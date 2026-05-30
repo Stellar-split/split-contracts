@@ -124,6 +124,17 @@
                     },
                     {
                       "key": {
+                        "symbol": "insurance_pool"
+                      },
+                      "val": {
+                        "i128": {
+                          "hi": 0,
+                          "lo": 0
+                        }
+                      }
+                    },
+                    {
+                      "key": {
                         "symbol": "prerequisite_id"
                       },
                       "val": "void"
@@ -440,6 +451,17 @@
                     {
                       "key": {
                         "symbol": "funded"
+                      },
+                      "val": {
+                        "i128": {
+                          "hi": 0,
+                          "lo": 0
+                        }
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "insurance_pool"
                       },
                       "val": {
                         "i128": {

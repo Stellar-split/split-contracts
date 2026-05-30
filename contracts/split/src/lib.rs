@@ -13,7 +13,7 @@ use soroban_sdk::{
 };
 use types::{
     AuditEntry, CompletionProof, CreateInvoiceParams, Invoice, InvoiceOptions, InvoiceStatus,
-    InvoiceTemplate, Payment, SubscriptionParams, Tranche,
+    InvoiceTemplate, Payment, ScheduledPayment, SubscriptionParams, Tranche,
 };
 
 // ---------------------------------------------------------------------------
@@ -62,6 +62,11 @@ fn rep_key(payer: &Address) -> (Symbol, Address) {
 /// Per-payer per-invoice nonce key (issue #21).
 fn nonce_key(invoice_id: u64, payer: &Address) -> (Symbol, u64, Address) {
     (symbol_short!("nonce"), invoice_id, payer.clone())
+}
+
+/// Per-payer per-invoice scheduled payment key.
+fn scheduled_pay_key(invoice_id: u64, payer: &Address) -> (Symbol, u64, Address) {
+    (symbol_short!("sched"), invoice_id, payer.clone())
 }
 
 // ---------------------------------------------------------------------------
@@ -220,6 +225,7 @@ impl SplitContract {
             options.bonus_max_payers,
             options.prerequisite_id,
             options.tranches,
+            options.insurance_pool,
         )
     }
 
@@ -236,6 +242,7 @@ impl SplitContract {
         bonus_max_payers: u32,
         prerequisite_id: Option<u64>,
         tranches: Vec<Tranche>,
+        insurance_pool: i128,
     ) -> u64 {
         assert!(
             recipients.len() == amounts.len(),
@@ -244,6 +251,7 @@ impl SplitContract {
         assert!(!recipients.is_empty(), "must have at least one recipient");
         assert!(deadline > env.ledger().timestamp(), "deadline must be in the future");
         assert!(bonus_pool >= 0, "bonus_pool must be non-negative");
+        assert!(insurance_pool >= 0, "insurance_pool must be non-negative");
 
         for amt in amounts.iter() {
             assert!(amt > 0, "amounts must be positive");
@@ -271,6 +279,10 @@ impl SplitContract {
         if bonus_pool > 0 {
             let token_client = token::Client::new(env, &token);
             token_client.transfer(&creator, &env.current_contract_address(), &bonus_pool);
+        }
+        if insurance_pool > 0 {
+            let token_client = token::Client::new(env, &token);
+            token_client.transfer(&creator, &env.current_contract_address(), &insurance_pool);
         }
 
         // Build per-recipient token vec (all the same token).
@@ -306,6 +318,7 @@ impl SplitContract {
             prerequisite_id,
             tranches,
             released_bps: 0,
+            insurance_pool,
         };
 
         save_invoice(env, id, &invoice);
@@ -338,6 +351,7 @@ impl SplitContract {
                 0,
                 None,
                 Vec::new(&env),
+                0,
             );
             ids.push_back(id);
         }
@@ -379,6 +393,7 @@ impl SplitContract {
             0,
             None,
             Vec::new(&env),
+            0,
         );
 
         if months > 1 {
@@ -413,6 +428,147 @@ impl SplitContract {
         require_not_paused(&env);
         payer.require_auth();
         Self::_pay(&env, &payer, invoice_id, amount, nonce);
+    }
+
+    /// Register a payment intent at a specific future ledger timestamp.
+    ///
+    /// Consumes the nonce to prevent double-use. The actual transfer is deferred
+    /// until `execute_scheduled_pay()` is called after `execute_at` is reached.
+    /// The caller should set `nonce` to the current value from `get_nonce()`.
+    pub fn schedule_pay(
+        env: Env,
+        payer: Address,
+        invoice_id: u64,
+        amount: i128,
+        nonce: u64,
+        execute_at: u64,
+    ) {
+        require_not_paused(&env);
+        payer.require_auth();
+
+        let invoice = load_invoice(&env, invoice_id);
+
+        assert!(!invoice.frozen, "invoice is frozen");
+        assert!(
+            invoice.status == InvoiceStatus::Pending,
+            "invoice is not pending"
+        );
+        assert!(
+            env.ledger().timestamp() <= invoice.deadline,
+            "invoice deadline has passed"
+        );
+        assert!(amount > 0, "payment amount must be positive");
+        assert!(
+            execute_at > env.ledger().timestamp(),
+            "execute_at must be in the future"
+        );
+
+        let total: i128 = invoice.amounts.iter().sum();
+        let remaining = total - invoice.funded;
+        assert!(amount <= remaining, "payment exceeds remaining balance");
+
+        // Validate and consume nonce (same as pay()).
+        let stored_nonce: u64 = env
+            .storage()
+            .persistent()
+            .get(&nonce_key(invoice_id, &payer))
+            .unwrap_or(0u64);
+        assert!(nonce == stored_nonce, "invalid nonce");
+        env.storage()
+            .persistent()
+            .set(&nonce_key(invoice_id, &payer), &(stored_nonce + 1));
+
+        // Store the scheduled payment.
+        let sched = ScheduledPayment { payer: payer.clone(), invoice_id, amount, nonce, execute_at };
+        env.storage()
+            .persistent()
+            .set(&scheduled_pay_key(invoice_id, &payer), &sched);
+
+        events::payment_scheduled(&env, invoice_id, &payer, amount, execute_at);
+    }
+
+    /// Execute a previously scheduled payment once its `execute_at` timestamp has been reached.
+    ///
+    /// The payer must authorize the transaction. Anyone may call this on their behalf
+    /// as long as the payer signs.
+    pub fn execute_scheduled_pay(env: Env, payer: Address, invoice_id: u64) {
+        require_not_paused(&env);
+        payer.require_auth();
+
+        let sched: ScheduledPayment = env
+            .storage()
+            .persistent()
+            .get(&scheduled_pay_key(invoice_id, &payer))
+            .expect("no scheduled payment found");
+
+        assert!(
+            env.ledger().timestamp() >= sched.execute_at,
+            "scheduled payment time not yet reached"
+        );
+
+        // Remove the scheduled payment (must succeed before token transfer).
+        env.storage()
+            .persistent()
+            .remove(&scheduled_pay_key(invoice_id, &payer));
+
+        // Perform the payment (reuse _pay — the nonce was already consumed at schedule time,
+        // so pass the stored nonce which will match the current expected nonce).
+        // But actually the nonce was already incremented at schedule_pay, so we bypass
+        // _pay and do the transfer directly.
+        let mut invoice = load_invoice(&env, invoice_id);
+
+        assert!(!invoice.frozen, "invoice is frozen");
+        assert!(
+            invoice.status == InvoiceStatus::Pending,
+            "invoice is not pending"
+        );
+        assert!(
+            env.ledger().timestamp() <= invoice.deadline,
+            "invoice deadline has passed"
+        );
+
+        let total: i128 = invoice.amounts.iter().sum();
+        let remaining = total - invoice.funded;
+        assert!(sched.amount <= remaining, "payment exceeds remaining balance");
+
+        let token_client =
+            token::Client::new(&env, &invoice.tokens.get(0).expect("no token"));
+        token_client.transfer(&payer, &env.current_contract_address(), &sched.amount);
+
+        invoice
+            .payments
+            .push_back(Payment { payer: payer.clone(), amount: sched.amount, tip: 0 });
+        invoice.funded += sched.amount;
+
+        // Increment per-address reputation counter.
+        let rep: u64 = env
+            .storage()
+            .persistent()
+            .get(&rep_key(&payer))
+            .unwrap_or(0u64);
+        env.storage()
+            .persistent()
+            .set(&rep_key(&payer), &(rep + 1));
+
+        append_audit_entry(&env, invoice_id, symbol_short!("pay"), &payer);
+        events::payment_received(&env, invoice_id, &payer, sched.amount);
+
+        if invoice.funded >= total {
+            let in_group = env
+                .storage()
+                .persistent()
+                .has(&invoice_group_key(invoice_id));
+            let guarded = invoice.prerequisite_id.is_some()
+                || !invoice.tranches.is_empty()
+                || in_group;
+            if guarded {
+                save_invoice(&env, invoice_id, &invoice);
+            } else {
+                Self::_release(&env, invoice_id, &mut invoice, &payer);
+            }
+        } else {
+            save_invoice(&env, invoice_id, &invoice);
+        }
     }
 
     fn _pay(env: &Env, payer: &Address, invoice_id: u64, amount: i128, nonce: u64) {
@@ -572,6 +728,15 @@ impl SplitContract {
             invoice.completion_time = Some(now);
             append_audit_entry(env, invoice_id, symbol_short!("release"), actor);
             events::invoice_released(env, invoice_id, &invoice.recipients);
+            let total: i128 = invoice.amounts.iter().sum();
+            events::invoice_completed(
+                env,
+                invoice_id,
+                &invoice.creator,
+                total,
+                invoice.recipients.len() as u32,
+                now,
+            );
         }
 
         save_invoice(env, invoice_id, invoice);
@@ -655,9 +820,28 @@ impl SplitContract {
                         save_invoice(env, member_id, &member);
                         append_audit_entry(env, member_id, symbol_short!("release"), actor);
                         events::invoice_released(env, member_id, &member.recipients);
+                        let member_total: i128 = member.amounts.iter().sum();
+                        events::invoice_completed(
+                            env,
+                            member_id,
+                            &member.creator,
+                            member_total,
+                            member.recipients.len() as u32,
+                            env.ledger().timestamp(),
+                        );
                     }
                 }
             }
+        }
+
+        // Return any insurance pool to the creator (not needed since invoice is complete).
+        if invoice.insurance_pool > 0 {
+            token_client.transfer(
+                &env.current_contract_address(),
+                &invoice.creator,
+                &invoice.insurance_pool,
+            );
+            invoice.insurance_pool = 0;
         }
 
         invoice.status = InvoiceStatus::Released;
@@ -665,6 +849,15 @@ impl SplitContract {
         save_invoice(env, invoice_id, invoice);
         append_audit_entry(env, invoice_id, symbol_short!("release"), actor);
         events::invoice_released(env, invoice_id, &invoice.recipients);
+        let total: i128 = invoice.amounts.iter().sum();
+        events::invoice_completed(
+            env,
+            invoice_id,
+            &invoice.creator,
+            total,
+            invoice.recipients.len() as u32,
+            env.ledger().timestamp(),
+        );
 
         // Spin up next subscription invoice if one is scheduled.
         if let Some(params) = env
@@ -687,6 +880,7 @@ impl SplitContract {
                 0,
                 None,
                 Vec::new(env),
+                0,
             );
             env.storage()
                 .persistent()
@@ -699,6 +893,10 @@ impl SplitContract {
     // -----------------------------------------------------------------------
 
     /// Refund all payers if the deadline has passed and the invoice is not fully funded.
+    ///
+    /// If the contract token balance is insufficient (e.g. due to a contract bug),
+    /// draws from the optional creator-funded `insurance_pool` to make payers whole.
+    /// Any remaining balance (bonus + unused insurance) is returned to the creator.
     pub fn refund(env: Env, invoice_id: u64) {
         require_not_paused(&env);
         let mut invoice = load_invoice(&env, invoice_id);
@@ -721,16 +919,32 @@ impl SplitContract {
             totals.set(payment.payer.clone(), prev + payment.amount);
         }
 
+        let total_owed: i128 = totals.values().into_iter().sum();
+        let contract_balance = token_client.balance(&env.current_contract_address());
+
+        // If the contract doesn't hold enough, draw from the insurance pool.
+        if contract_balance < total_owed {
+            let shortfall = total_owed - contract_balance;
+            assert!(
+                invoice.insurance_pool >= shortfall,
+                "insurance pool insufficient to cover shortfall"
+            );
+            invoice.insurance_pool -= shortfall;
+            events::insurance_used(&env, invoice_id, shortfall, invoice.insurance_pool);
+        }
+
         for (payer, amount) in totals.iter() {
             token_client.transfer(&env.current_contract_address(), &payer, &amount);
             events::payer_refunded(&env, invoice_id, &payer, amount);
         }
 
-        if invoice.bonus_pool > 0 {
+        // Return whatever balance remains to the creator (bonus + unused insurance).
+        let remaining = token_client.balance(&env.current_contract_address());
+        if remaining > 0 {
             token_client.transfer(
                 &env.current_contract_address(),
                 &invoice.creator,
-                &invoice.bonus_pool,
+                &remaining,
             );
         }
 
@@ -755,11 +969,11 @@ impl SplitContract {
         );
         assert!(invoice.creator == caller, "only creator can cancel");
 
+        let token_client =
+            token::Client::new(&env, &invoice.tokens.get(0).expect("no token"));
+
         if invoice.funded > 0 {
             // Refund all payments.
-            let token_client =
-                token::Client::new(&env, &invoice.tokens.get(0).expect("no token"));
-
             let mut totals: Map<Address, i128> = Map::new(&env);
             for payment in invoice.payments.iter() {
                 let prev = totals.get(payment.payer.clone()).unwrap_or(0);
@@ -780,8 +994,6 @@ impl SplitContract {
             invoice.status = InvoiceStatus::Refunded;
         } else {
             if invoice.bonus_pool > 0 {
-                let token_client =
-                    token::Client::new(&env, &invoice.tokens.get(0).expect("no token"));
                 token_client.transfer(
                     &env.current_contract_address(),
                     &invoice.creator,
@@ -789,6 +1001,16 @@ impl SplitContract {
                 );
             }
             invoice.status = InvoiceStatus::Cancelled;
+        }
+
+        // Return any insurance pool to the creator (not needed since invoice is done).
+        if invoice.insurance_pool > 0 {
+            token_client.transfer(
+                &env.current_contract_address(),
+                &invoice.creator,
+                &invoice.insurance_pool,
+            );
+            invoice.insurance_pool = 0;
         }
 
         save_invoice(&env, invoice_id, &invoice);
@@ -808,6 +1030,41 @@ impl SplitContract {
         invoice.creator.require_auth();
         invoice.creator = new_creator;
         save_invoice(&env, invoice_id, &invoice);
+    }
+
+    /// Append a new recipient with `amount` to an invoice.
+    ///
+    /// Only the creator can call this, and only while no payment has been received
+    /// (`funded == 0`) and the invoice is still `Pending`.
+    pub fn add_recipient(
+        env: Env,
+        caller: Address,
+        invoice_id: u64,
+        new_recipient: Address,
+        amount: i128,
+    ) {
+        require_not_paused(&env);
+        caller.require_auth();
+
+        let mut invoice = load_invoice(&env, invoice_id);
+
+        assert!(
+            invoice.status == InvoiceStatus::Pending,
+            "invoice is not pending"
+        );
+        assert!(invoice.creator == caller, "only creator can add recipients");
+        assert!(invoice.funded == 0, "cannot add recipient after payment received");
+        assert!(amount > 0, "amount must be positive");
+
+        let token = invoice.tokens.get(0).expect("no token");
+        invoice.recipients.push_back(new_recipient.clone());
+        invoice.amounts.push_back(amount);
+        invoice.tokens.push_back(token);
+        invoice.claimed.push_back(0i128);
+
+        save_invoice(&env, invoice_id, &invoice);
+        append_audit_entry(&env, invoice_id, symbol_short!("add_rec"), &caller);
+        events::recipient_added(&env, invoice_id, &caller, &new_recipient, amount);
     }
 
     /// Extend the deadline for an invoice (creator only).
@@ -886,6 +1143,7 @@ impl SplitContract {
             0,
             None,
             Vec::new(&env),
+            0,
         )
     }
 

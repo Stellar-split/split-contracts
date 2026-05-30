@@ -1,5 +1,21 @@
 use soroban_sdk::{symbol_short, Address, Bytes, Env, Vec};
 
+/// Emitted when an invoice reaches a completed state (Released) with a full
+/// structured summary optimised for webhook / off-chain processing.
+pub fn invoice_completed(
+    env: &Env,
+    invoice_id: u64,
+    creator: &Address,
+    total: i128,
+    recipient_count: u32,
+    completion_timestamp: u64,
+) {
+    env.events().publish(
+        (symbol_short!("inv_cmpl"), invoice_id),
+        (invoice_id, creator.clone(), total, recipient_count, completion_timestamp),
+    );
+}
+
 /// Emitted when a new invoice is created.
 pub fn invoice_created(env: &Env, invoice_id: u64, creator: &Address, total: i128, metadata: &Option<Bytes>) {
     env.events().publish(
@@ -28,6 +44,30 @@ pub fn invoice_released(env: &Env, invoice_id: u64, recipients: &Vec<Address>) {
 pub fn invoice_refunded(env: &Env, invoice_id: u64) {
     env.events()
         .publish((symbol_short!("inv_ref"), invoice_id), ());
+}
+
+/// Emitted when a recipient is added to an existing invoice.
+pub fn recipient_added(env: &Env, invoice_id: u64, caller: &Address, recipient: &Address, amount: i128) {
+    env.events().publish(
+        (symbol_short!("add_rec"), invoice_id),
+        (caller.clone(), recipient.clone(), amount),
+    );
+}
+
+/// Emitted when a future payment is scheduled.
+pub fn payment_scheduled(env: &Env, invoice_id: u64, payer: &Address, amount: i128, execute_at: u64) {
+    env.events().publish(
+        (symbol_short!("sched_pay"), invoice_id),
+        (payer.clone(), amount, execute_at),
+    );
+}
+
+/// Emitted when the insurance pool is drawn from to cover a refund shortfall.
+pub fn insurance_used(env: &Env, invoice_id: u64, shortfall: i128, remaining: i128) {
+    env.events().publish(
+        (symbol_short!("ins_used"), invoice_id),
+        (shortfall, remaining),
+    );
 }
 
 /// Emitted once per unique payer when their refund is transferred.
