@@ -572,6 +572,15 @@ impl SplitContract {
             invoice.completion_time = Some(now);
             append_audit_entry(env, invoice_id, symbol_short!("release"), actor);
             events::invoice_released(env, invoice_id, &invoice.recipients);
+            let total: i128 = invoice.amounts.iter().sum();
+            events::invoice_completed(
+                env,
+                invoice_id,
+                &invoice.creator,
+                total,
+                invoice.recipients.len() as u32,
+                now,
+            );
         }
 
         save_invoice(env, invoice_id, invoice);
@@ -655,6 +664,15 @@ impl SplitContract {
                         save_invoice(env, member_id, &member);
                         append_audit_entry(env, member_id, symbol_short!("release"), actor);
                         events::invoice_released(env, member_id, &member.recipients);
+                        let member_total: i128 = member.amounts.iter().sum();
+                        events::invoice_completed(
+                            env,
+                            member_id,
+                            &member.creator,
+                            member_total,
+                            member.recipients.len() as u32,
+                            env.ledger().timestamp(),
+                        );
                     }
                 }
             }
@@ -665,6 +683,15 @@ impl SplitContract {
         save_invoice(env, invoice_id, invoice);
         append_audit_entry(env, invoice_id, symbol_short!("release"), actor);
         events::invoice_released(env, invoice_id, &invoice.recipients);
+        let total: i128 = invoice.amounts.iter().sum();
+        events::invoice_completed(
+            env,
+            invoice_id,
+            &invoice.creator,
+            total,
+            invoice.recipients.len() as u32,
+            env.ledger().timestamp(),
+        );
 
         // Spin up next subscription invoice if one is scheduled.
         if let Some(params) = env

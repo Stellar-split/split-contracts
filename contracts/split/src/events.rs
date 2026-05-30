@@ -1,5 +1,21 @@
 use soroban_sdk::{symbol_short, Address, Bytes, Env, Vec};
 
+/// Emitted when an invoice reaches a completed state (Released) with a full
+/// structured summary optimised for webhook / off-chain processing.
+pub fn invoice_completed(
+    env: &Env,
+    invoice_id: u64,
+    creator: &Address,
+    total: i128,
+    recipient_count: u32,
+    completion_timestamp: u64,
+) {
+    env.events().publish(
+        (symbol_short!("inv_cmpl"), invoice_id),
+        (invoice_id, creator.clone(), total, recipient_count, completion_timestamp),
+    );
+}
+
 /// Emitted when a new invoice is created.
 pub fn invoice_created(env: &Env, invoice_id: u64, creator: &Address, total: i128, metadata: &Option<Bytes>) {
     env.events().publish(
