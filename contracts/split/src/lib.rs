@@ -810,6 +810,41 @@ impl SplitContract {
         save_invoice(&env, invoice_id, &invoice);
     }
 
+    /// Append a new recipient with `amount` to an invoice.
+    ///
+    /// Only the creator can call this, and only while no payment has been received
+    /// (`funded == 0`) and the invoice is still `Pending`.
+    pub fn add_recipient(
+        env: Env,
+        caller: Address,
+        invoice_id: u64,
+        new_recipient: Address,
+        amount: i128,
+    ) {
+        require_not_paused(&env);
+        caller.require_auth();
+
+        let mut invoice = load_invoice(&env, invoice_id);
+
+        assert!(
+            invoice.status == InvoiceStatus::Pending,
+            "invoice is not pending"
+        );
+        assert!(invoice.creator == caller, "only creator can add recipients");
+        assert!(invoice.funded == 0, "cannot add recipient after payment received");
+        assert!(amount > 0, "amount must be positive");
+
+        let token = invoice.tokens.get(0).expect("no token");
+        invoice.recipients.push_back(new_recipient.clone());
+        invoice.amounts.push_back(amount);
+        invoice.tokens.push_back(token);
+        invoice.claimed.push_back(0i128);
+
+        save_invoice(&env, invoice_id, &invoice);
+        append_audit_entry(&env, invoice_id, symbol_short!("add_rec"), &caller);
+        events::recipient_added(&env, invoice_id, &caller, &new_recipient, amount);
+    }
+
     /// Extend the deadline for an invoice (creator only).
     pub fn extend_deadline(env: Env, caller: Address, invoice_id: u64, new_deadline: u64) {
         require_not_paused(&env);
