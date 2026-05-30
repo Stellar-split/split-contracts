@@ -148,6 +148,17 @@
                     },
                     {
                       "key": {
+                        "symbol": "insurance_pool"
+                      },
+                      "val": {
+                        "i128": {
+                          "hi": 0,
+                          "lo": 0
+                        }
+                      }
+                    },
+                    {
+                      "key": {
                         "symbol": "prerequisite_id"
                       },
                       "val": "void"
@@ -239,6 +250,17 @@
                       },
                       "val": {
                         "vec": []
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "insurance_pool"
+                      },
+                      "val": {
+                        "i128": {
+                          "hi": 0,
+                          "lo": 0
+                        }
                       }
                     },
                     {
@@ -719,6 +741,17 @@
                     },
                     {
                       "key": {
+                        "symbol": "insurance_pool"
+                      },
+                      "val": {
+                        "i128": {
+                          "hi": 0,
+                          "lo": 0
+                        }
+                      }
+                    },
+                    {
+                      "key": {
                         "symbol": "payments"
                       },
                       "val": {
@@ -981,6 +1014,17 @@
                         "i128": {
                           "hi": 0,
                           "lo": 200
+                        }
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "insurance_pool"
+                      },
+                      "val": {
+                        "i128": {
+                          "hi": 0,
+                          "lo": 0
                         }
                       }
                     },

@@ -44,6 +44,7 @@ fn default_options(env: &Env) -> InvoiceOptions {
         bonus_max_payers: 0,
         prerequisite_id: None,
         tranches: Vec::new(env),
+        insurance_pool: 0,
     }
 }
 
@@ -601,6 +602,7 @@ fn test_bonus_pool_distributed_to_first_payer() {
             bonus_max_payers: 1,
             prerequisite_id: None,
             tranches: Vec::new(&env),
+            insurance_pool: 0,
         },
     );
 
@@ -837,6 +839,7 @@ fn test_release_blocked_by_prerequisite() {
             bonus_max_payers: 0,
             prerequisite_id: Some(id_a),
             tranches: Vec::new(&env),
+            insurance_pool: 0,
         },
     );
 
@@ -880,6 +883,7 @@ fn test_release_succeeds_after_prerequisite_released() {
             bonus_max_payers: 0,
             prerequisite_id: Some(id_a),
             tranches: Vec::new(&env),
+            insurance_pool: 0,
         },
     );
 
@@ -956,6 +960,7 @@ fn test_tranches_partial_then_full_release() {
             bonus_max_payers: 0,
             prerequisite_id: None,
             tranches: tranches.clone(),
+            insurance_pool: 0,
         },
     );
 
@@ -1014,6 +1019,7 @@ fn test_release_before_any_tranche_unlocked_panics() {
             bonus_max_payers: 0,
             prerequisite_id: None,
             tranches: tranches.clone(),
+            insurance_pool: 0,
         },
     );
 
@@ -1223,4 +1229,261 @@ fn test_add_recipient_with_audit_log() {
     assert_eq!(log.len(), 1);
     assert_eq!(log.get_unchecked(0).action, symbol_short!("add_rec"));
     assert_eq!(log.get_unchecked(0).actor, creator);
+}
+
+// ---------------------------------------------------------------------------
+// Insurance pool
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_insurance_pool_returned_on_refund() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+    let tk = token_client(&env, &token_id);
+
+    let creator = Address::generate(&env);
+    let payer = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    let sa = StellarAssetClient::new(&env, &token_id);
+    sa.mint(&payer, &500);
+    sa.mint(&creator, &200);
+    env.ledger().set_timestamp(1_000);
+
+    let mut recipients = Vec::new(&env);
+    recipients.push_back(recipient.clone());
+    let mut amounts = Vec::new(&env);
+    amounts.push_back(500_i128);
+
+    let creator_bal_before = tk.balance(&creator);
+    let id = c.create_invoice(
+        &creator,
+        &recipients,
+        &amounts,
+        &token_id,
+        &9_999_u64,
+        &InvoiceOptions {
+            co_creators: Vec::new(&env),
+            allow_early_withdrawal: false,
+            bonus_pool: 0,
+            bonus_max_payers: 0,
+            prerequisite_id: None,
+            tranches: Vec::new(&env),
+            insurance_pool: 100,
+        },
+    );
+
+    // Insurance pool was deposited.
+    assert_eq!(tk.balance(&creator), creator_bal_before - 100);
+
+    c.pay(&payer, &id, &300_i128, &0_u64);
+
+    // Deadline passes, refund.
+    env.ledger().set_timestamp(10_001);
+    c.refund(&id);
+
+    // Payer got their money back.
+    assert_eq!(tk.balance(&payer), 500);
+    // Creator got insurance pool back.
+    assert_eq!(tk.balance(&creator), creator_bal_before);
+}
+
+#[test]
+fn test_insurance_pool_covers_shortfall() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+    let tk = token_client(&env, &token_id);
+
+    let creator = Address::generate(&env);
+    let payer = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let drain_target = Address::generate(&env);
+
+    let sa = StellarAssetClient::new(&env, &token_id);
+    sa.mint(&payer, &500);
+    sa.mint(&creator, &200);
+    sa.mint(&drain_target, &1_000);
+    env.ledger().set_timestamp(1_000);
+
+    let mut recipients = Vec::new(&env);
+    recipients.push_back(recipient.clone());
+    let mut amounts = Vec::new(&env);
+    amounts.push_back(500_i128);
+
+    let id = c.create_invoice(
+        &creator,
+        &recipients,
+        &amounts,
+        &token_id,
+        &9_999_u64,
+        &InvoiceOptions {
+            co_creators: Vec::new(&env),
+            allow_early_withdrawal: false,
+            bonus_pool: 0,
+            bonus_max_payers: 0,
+            prerequisite_id: None,
+            tranches: Vec::new(&env),
+            insurance_pool: 200,
+        },
+    );
+
+    c.pay(&payer, &id, &300_i128, &0_u64);
+
+    // Simulate a bug: drain 100 tokens from the contract.
+    env.as_contract(&contract_id, || {
+        tk.transfer(&env.current_contract_address(), &drain_target, &100_i128);
+    });
+
+    // Deadline passes, refund.
+    let creator_bal_before = tk.balance(&creator);
+    env.ledger().set_timestamp(10_001);
+    c.refund(&id);
+
+    // Payer got full refund despite shortfall.
+    assert_eq!(tk.balance(&payer), 500);
+    // Creator got back what remains after payer refund (contract had 500 - 100 drain = 400,
+    // paid 300 to payer, remaining 100 returned to creator = 100 back).
+    assert_eq!(tk.balance(&creator), creator_bal_before + 100);
+}
+
+#[test]
+#[should_panic(expected = "insurance pool insufficient to cover shortfall")]
+fn test_insurance_pool_insufficient_panics() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+    let tk = token_client(&env, &token_id);
+
+    let creator = Address::generate(&env);
+    let payer = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let drain_target = Address::generate(&env);
+
+    let sa = StellarAssetClient::new(&env, &token_id);
+    sa.mint(&payer, &500);
+    sa.mint(&creator, &100);
+    sa.mint(&drain_target, &1_000);
+    env.ledger().set_timestamp(1_000);
+
+    let mut recipients = Vec::new(&env);
+    recipients.push_back(recipient.clone());
+    let mut amounts = Vec::new(&env);
+    amounts.push_back(500_i128);
+
+    let id = c.create_invoice(
+        &creator,
+        &recipients,
+        &amounts,
+        &token_id,
+        &9_999_u64,
+        &InvoiceOptions {
+            co_creators: Vec::new(&env),
+            allow_early_withdrawal: false,
+            bonus_pool: 0,
+            bonus_max_payers: 0,
+            prerequisite_id: None,
+            tranches: Vec::new(&env),
+            insurance_pool: 50,
+        },
+    );
+
+    c.pay(&payer, &id, &300_i128, &0_u64);
+
+    // Drain 250 — contract has 50, needs 300 for refund.
+    env.as_contract(&contract_id, || {
+        tk.transfer(&env.current_contract_address(), &drain_target, &250_i128);
+    });
+
+    env.ledger().set_timestamp(10_001);
+    c.refund(&id);
+}
+
+#[test]
+fn test_insurance_pool_returned_on_cancel() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+    let tk = token_client(&env, &token_id);
+
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    let sa = StellarAssetClient::new(&env, &token_id);
+    sa.mint(&creator, &100);
+    env.ledger().set_timestamp(1_000);
+
+    let mut recipients = Vec::new(&env);
+    recipients.push_back(recipient.clone());
+    let mut amounts = Vec::new(&env);
+    amounts.push_back(500_i128);
+
+    let creator_bal_before = tk.balance(&creator);
+    let id = c.create_invoice(
+        &creator,
+        &recipients,
+        &amounts,
+        &token_id,
+        &9_999_u64,
+        &InvoiceOptions {
+            co_creators: Vec::new(&env),
+            allow_early_withdrawal: false,
+            bonus_pool: 0,
+            bonus_max_payers: 0,
+            prerequisite_id: None,
+            tranches: Vec::new(&env),
+            insurance_pool: 100,
+        },
+    );
+
+    assert_eq!(tk.balance(&creator), creator_bal_before - 100);
+
+    c.cancel_invoice(&creator, &id);
+
+    // Creator got insurance pool back.
+    assert_eq!(tk.balance(&creator), creator_bal_before);
+}
+
+#[test]
+fn test_insurance_pool_returned_on_release() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+    let tk = token_client(&env, &token_id);
+
+    let creator = Address::generate(&env);
+    let payer = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    let sa = StellarAssetClient::new(&env, &token_id);
+    sa.mint(&payer, &500);
+    sa.mint(&creator, &100);
+    env.ledger().set_timestamp(1_000);
+
+    let mut recipients = Vec::new(&env);
+    recipients.push_back(recipient.clone());
+    let mut amounts = Vec::new(&env);
+    amounts.push_back(500_i128);
+
+    let creator_bal_before = tk.balance(&creator);
+    let id = c.create_invoice(
+        &creator,
+        &recipients,
+        &amounts,
+        &token_id,
+        &9_999_u64,
+        &InvoiceOptions {
+            co_creators: Vec::new(&env),
+            allow_early_withdrawal: false,
+            bonus_pool: 0,
+            bonus_max_payers: 0,
+            prerequisite_id: None,
+            tranches: Vec::new(&env),
+            insurance_pool: 100,
+        },
+    );
+
+    assert_eq!(tk.balance(&creator), creator_bal_before - 100);
+
+    c.pay(&payer, &id, &500_i128, &0_u64);
+
+    // Release should return insurance pool to creator.
+    assert_eq!(tk.balance(&creator), creator_bal_before);
+    assert_eq!(tk.balance(&recipient), 500);
 }

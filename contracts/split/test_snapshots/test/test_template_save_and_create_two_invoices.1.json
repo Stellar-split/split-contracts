@@ -535,6 +535,17 @@
                     },
                     {
                       "key": {
+                        "symbol": "insurance_pool"
+                      },
+                      "val": {
+                        "i128": {
+                          "hi": 0,
+                          "lo": 0
+                        }
+                      }
+                    },
+                    {
+                      "key": {
                         "symbol": "payments"
                       },
                       "val": {
@@ -797,6 +808,17 @@
                         "i128": {
                           "hi": 0,
                           "lo": 100
+                        }
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "insurance_pool"
+                      },
+                      "val": {
+                        "i128": {
+                          "hi": 0,
+                          "lo": 0
                         }
                       }
                     },

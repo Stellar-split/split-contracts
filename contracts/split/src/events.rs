@@ -54,6 +54,14 @@ pub fn recipient_added(env: &Env, invoice_id: u64, caller: &Address, recipient: 
     );
 }
 
+/// Emitted when the insurance pool is drawn from to cover a refund shortfall.
+pub fn insurance_used(env: &Env, invoice_id: u64, shortfall: i128, remaining: i128) {
+    env.events().publish(
+        (symbol_short!("ins_used"), invoice_id),
+        (shortfall, remaining),
+    );
+}
+
 /// Emitted once per unique payer when their refund is transferred.
 pub fn payer_refunded(env: &Env, invoice_id: u64, payer: &Address, amount: i128) {
     env.events().publish(

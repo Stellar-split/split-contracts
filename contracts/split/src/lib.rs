@@ -220,6 +220,7 @@ impl SplitContract {
             options.bonus_max_payers,
             options.prerequisite_id,
             options.tranches,
+            options.insurance_pool,
         )
     }
 
@@ -236,6 +237,7 @@ impl SplitContract {
         bonus_max_payers: u32,
         prerequisite_id: Option<u64>,
         tranches: Vec<Tranche>,
+        insurance_pool: i128,
     ) -> u64 {
         assert!(
             recipients.len() == amounts.len(),
@@ -244,6 +246,7 @@ impl SplitContract {
         assert!(!recipients.is_empty(), "must have at least one recipient");
         assert!(deadline > env.ledger().timestamp(), "deadline must be in the future");
         assert!(bonus_pool >= 0, "bonus_pool must be non-negative");
+        assert!(insurance_pool >= 0, "insurance_pool must be non-negative");
 
         for amt in amounts.iter() {
             assert!(amt > 0, "amounts must be positive");
@@ -271,6 +274,10 @@ impl SplitContract {
         if bonus_pool > 0 {
             let token_client = token::Client::new(env, &token);
             token_client.transfer(&creator, &env.current_contract_address(), &bonus_pool);
+        }
+        if insurance_pool > 0 {
+            let token_client = token::Client::new(env, &token);
+            token_client.transfer(&creator, &env.current_contract_address(), &insurance_pool);
         }
 
         // Build per-recipient token vec (all the same token).
@@ -306,6 +313,7 @@ impl SplitContract {
             prerequisite_id,
             tranches,
             released_bps: 0,
+            insurance_pool,
         };
 
         save_invoice(env, id, &invoice);
@@ -338,6 +346,7 @@ impl SplitContract {
                 0,
                 None,
                 Vec::new(&env),
+                0,
             );
             ids.push_back(id);
         }
@@ -379,6 +388,7 @@ impl SplitContract {
             0,
             None,
             Vec::new(&env),
+            0,
         );
 
         if months > 1 {
@@ -678,6 +688,16 @@ impl SplitContract {
             }
         }
 
+        // Return any insurance pool to the creator (not needed since invoice is complete).
+        if invoice.insurance_pool > 0 {
+            token_client.transfer(
+                &env.current_contract_address(),
+                &invoice.creator,
+                &invoice.insurance_pool,
+            );
+            invoice.insurance_pool = 0;
+        }
+
         invoice.status = InvoiceStatus::Released;
         invoice.completion_time = Some(env.ledger().timestamp());
         save_invoice(env, invoice_id, invoice);
@@ -714,6 +734,7 @@ impl SplitContract {
                 0,
                 None,
                 Vec::new(env),
+                0,
             );
             env.storage()
                 .persistent()
@@ -726,6 +747,10 @@ impl SplitContract {
     // -----------------------------------------------------------------------
 
     /// Refund all payers if the deadline has passed and the invoice is not fully funded.
+    ///
+    /// If the contract token balance is insufficient (e.g. due to a contract bug),
+    /// draws from the optional creator-funded `insurance_pool` to make payers whole.
+    /// Any remaining balance (bonus + unused insurance) is returned to the creator.
     pub fn refund(env: Env, invoice_id: u64) {
         require_not_paused(&env);
         let mut invoice = load_invoice(&env, invoice_id);
@@ -748,16 +773,32 @@ impl SplitContract {
             totals.set(payment.payer.clone(), prev + payment.amount);
         }
 
+        let total_owed: i128 = totals.values().into_iter().sum();
+        let contract_balance = token_client.balance(&env.current_contract_address());
+
+        // If the contract doesn't hold enough, draw from the insurance pool.
+        if contract_balance < total_owed {
+            let shortfall = total_owed - contract_balance;
+            assert!(
+                invoice.insurance_pool >= shortfall,
+                "insurance pool insufficient to cover shortfall"
+            );
+            invoice.insurance_pool -= shortfall;
+            events::insurance_used(&env, invoice_id, shortfall, invoice.insurance_pool);
+        }
+
         for (payer, amount) in totals.iter() {
             token_client.transfer(&env.current_contract_address(), &payer, &amount);
             events::payer_refunded(&env, invoice_id, &payer, amount);
         }
 
-        if invoice.bonus_pool > 0 {
+        // Return whatever balance remains to the creator (bonus + unused insurance).
+        let remaining = token_client.balance(&env.current_contract_address());
+        if remaining > 0 {
             token_client.transfer(
                 &env.current_contract_address(),
                 &invoice.creator,
-                &invoice.bonus_pool,
+                &remaining,
             );
         }
 
@@ -782,11 +823,11 @@ impl SplitContract {
         );
         assert!(invoice.creator == caller, "only creator can cancel");
 
+        let token_client =
+            token::Client::new(&env, &invoice.tokens.get(0).expect("no token"));
+
         if invoice.funded > 0 {
             // Refund all payments.
-            let token_client =
-                token::Client::new(&env, &invoice.tokens.get(0).expect("no token"));
-
             let mut totals: Map<Address, i128> = Map::new(&env);
             for payment in invoice.payments.iter() {
                 let prev = totals.get(payment.payer.clone()).unwrap_or(0);
@@ -807,8 +848,6 @@ impl SplitContract {
             invoice.status = InvoiceStatus::Refunded;
         } else {
             if invoice.bonus_pool > 0 {
-                let token_client =
-                    token::Client::new(&env, &invoice.tokens.get(0).expect("no token"));
                 token_client.transfer(
                     &env.current_contract_address(),
                     &invoice.creator,
@@ -816,6 +855,16 @@ impl SplitContract {
                 );
             }
             invoice.status = InvoiceStatus::Cancelled;
+        }
+
+        // Return any insurance pool to the creator (not needed since invoice is done).
+        if invoice.insurance_pool > 0 {
+            token_client.transfer(
+                &env.current_contract_address(),
+                &invoice.creator,
+                &invoice.insurance_pool,
+            );
+            invoice.insurance_pool = 0;
         }
 
         save_invoice(&env, invoice_id, &invoice);
@@ -948,6 +997,7 @@ impl SplitContract {
             0,
             None,
             Vec::new(&env),
+            0,
         )
     }
 

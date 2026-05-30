@@ -198,6 +198,17 @@
                     },
                     {
                       "key": {
+                        "symbol": "insurance_pool"
+                      },
+                      "val": {
+                        "i128": {
+                          "hi": 0,
+                          "lo": 0
+                        }
+                      }
+                    },
+                    {
+                      "key": {
                         "symbol": "prerequisite_id"
                       },
                       "val": "void"
@@ -608,6 +619,17 @@
                         "i128": {
                           "hi": 0,
                           "lo": 300
+                        }
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "insurance_pool"
+                      },
+                      "val": {
+                        "i128": {
+                          "hi": 0,
+                          "lo": 0
                         }
                       }
                     },

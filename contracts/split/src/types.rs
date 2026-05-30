@@ -83,6 +83,9 @@ pub struct InvoiceOptions {
     pub prerequisite_id: Option<u64>,
     /// Issue #23: graduated release schedule; empty = release all at once.
     pub tranches: Vec<Tranche>,
+    /// Optional creator-funded insurance pool used to cover payer refunds when
+    /// the contract balance is insufficient (e.g. due to a contract bug).
+    pub insurance_pool: i128,
 }
 
 #[contracttype]
@@ -113,4 +116,7 @@ pub struct Invoice {
     pub tranches: Vec<Tranche>,
     /// Issue #23: cumulative basis points already distributed (0–10 000).
     pub released_bps: u32,
+    /// Optional insurance pool deposited by the creator at invoice creation.
+    /// Drawn from in `refund()` when the contract balance is insufficient.
+    pub insurance_pool: i128,
 }

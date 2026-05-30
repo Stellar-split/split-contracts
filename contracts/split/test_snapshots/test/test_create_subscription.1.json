@@ -430,6 +430,17 @@
                     },
                     {
                       "key": {
+                        "symbol": "insurance_pool"
+                      },
+                      "val": {
+                        "i128": {
+                          "hi": 0,
+                          "lo": 0
+                        }
+                      }
+                    },
+                    {
+                      "key": {
                         "symbol": "payments"
                       },
                       "val": {
@@ -685,6 +696,17 @@
                     {
                       "key": {
                         "symbol": "funded"
+                      },
+                      "val": {
+                        "i128": {
+                          "hi": 0,
+                          "lo": 0
+                        }
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "insurance_pool"
                       },
                       "val": {
                         "i128": {
