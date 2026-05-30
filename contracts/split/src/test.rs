@@ -1487,3 +1487,132 @@ fn test_insurance_pool_returned_on_release() {
     assert_eq!(tk.balance(&creator), creator_bal_before);
     assert_eq!(tk.balance(&recipient), 500);
 }
+
+// ---------------------------------------------------------------------------
+// Scheduled payments — schedule_pay / execute_scheduled_pay
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_schedule_and_execute_pay() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+    let tk = token_client(&env, &token_id);
+
+    let creator = Address::generate(&env);
+    let payer = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    StellarAssetClient::new(&env, &token_id).mint(&payer, &500);
+    env.ledger().set_timestamp(1_000);
+
+    let id = make_invoice(&env, &c, &creator, &recipient, 300, &token_id, 9_999);
+
+    // Schedule a payment for timestamp 5_000.
+    c.schedule_pay(&payer, &id, &300_i128, &0_u64, &5_000_u64);
+
+    // Before the scheduled time, invoice is still pending and no transfer happened.
+    assert_eq!(tk.balance(&payer), 500);
+    assert_eq!(c.get_invoice(&id).funded, 0);
+
+    // Advance to execute time.
+    env.ledger().set_timestamp(5_000);
+    c.execute_scheduled_pay(&payer, &id);
+
+    assert_eq!(c.get_invoice(&id).status, InvoiceStatus::Released);
+    assert_eq!(tk.balance(&recipient), 300);
+}
+
+#[test]
+#[should_panic(expected = "scheduled payment time not yet reached")]
+fn test_execute_scheduled_pay_before_time_panics() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let payer = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    StellarAssetClient::new(&env, &token_id).mint(&payer, &500);
+    env.ledger().set_timestamp(1_000);
+
+    let id = make_invoice(&env, &c, &creator, &recipient, 300, &token_id, 9_999);
+
+    c.schedule_pay(&payer, &id, &300_i128, &0_u64, &5_000_u64);
+
+    // Try to execute before the scheduled time.
+    env.ledger().set_timestamp(4_999);
+    c.execute_scheduled_pay(&payer, &id);
+}
+
+#[test]
+fn test_schedule_pay_consumes_nonce() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let payer = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    StellarAssetClient::new(&env, &token_id).mint(&payer, &500);
+    env.ledger().set_timestamp(1_000);
+
+    let id = make_invoice(&env, &c, &creator, &recipient, 300, &token_id, 9_999);
+
+    // Nonce starts at 0.
+    assert_eq!(c.get_nonce(&id, &payer), 0);
+
+    // Schedule consumes nonce 0.
+    c.schedule_pay(&payer, &id, &200_i128, &0_u64, &5_000_u64);
+    assert_eq!(c.get_nonce(&id, &payer), 1);
+
+    // A direct pay must use nonce 1 now.
+    c.pay(&payer, &id, &100_i128, &1_u64);
+    assert_eq!(c.get_nonce(&id, &payer), 2);
+}
+
+#[test]
+fn test_schedule_pay_then_multi_step() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+    let tk = token_client(&env, &token_id);
+
+    let creator = Address::generate(&env);
+    let payer = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    StellarAssetClient::new(&env, &token_id).mint(&payer, &500);
+    env.ledger().set_timestamp(1_000);
+
+    let id = make_invoice(&env, &c, &creator, &recipient, 500, &token_id, 9_999);
+
+    // Pay 100 now.
+    c.pay(&payer, &id, &100_i128, &0_u64);
+    assert_eq!(c.get_invoice(&id).funded, 100);
+
+    // Schedule 300 for later.
+    c.schedule_pay(&payer, &id, &300_i128, &1_u64, &5_000_u64);
+
+    // Pay remaining 100 now (nonce=2 after scheduling consumed 1).
+    c.pay(&payer, &id, &100_i128, &2_u64);
+    assert_eq!(c.get_invoice(&id).funded, 200);
+
+    // Execute the scheduled payment.
+    env.ledger().set_timestamp(5_000);
+    c.execute_scheduled_pay(&payer, &id);
+
+    assert_eq!(c.get_invoice(&id).status, InvoiceStatus::Released);
+    assert_eq!(c.get_invoice(&id).funded, 500);
+    assert_eq!(tk.balance(&recipient), 500);
+}
+
+#[test]
+#[should_panic(expected = "no scheduled payment found")]
+fn test_execute_scheduled_pay_none_panics() {
+    let (env, contract_id, _token_id) = setup();
+    let c = client(&env, &contract_id);
+
+    let payer = Address::generate(&env);
+    env.ledger().set_timestamp(1_000);
+
+    c.execute_scheduled_pay(&payer, &1_u64);
+}

@@ -54,6 +54,14 @@ pub fn recipient_added(env: &Env, invoice_id: u64, caller: &Address, recipient: 
     );
 }
 
+/// Emitted when a future payment is scheduled.
+pub fn payment_scheduled(env: &Env, invoice_id: u64, payer: &Address, amount: i128, execute_at: u64) {
+    env.events().publish(
+        (symbol_short!("sched_pay"), invoice_id),
+        (payer.clone(), amount, execute_at),
+    );
+}
+
 /// Emitted when the insurance pool is drawn from to cover a refund shortfall.
 pub fn insurance_used(env: &Env, invoice_id: u64, shortfall: i128, remaining: i128) {
     env.events().publish(
