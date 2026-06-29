@@ -78,6 +78,8 @@ fn default_options(env: &Env) -> InvoiceOptions {
         scheduled_release_at: None,
         target_usd_cents: None,
         payment_token: None,
+        release_delay_ledgers: None,
+        metadata_hash: None,
     }
 }
 
@@ -129,6 +131,8 @@ fn invoice_options(
         scheduled_release_at: None,
         target_usd_cents: None,
         payment_token: None,
+        release_delay_ledgers: None,
+        metadata_hash: None,
     }
 }
 

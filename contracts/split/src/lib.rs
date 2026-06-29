@@ -38,8 +38,8 @@ use soroban_sdk::{
 use soroban_sdk::xdr::ToXdr;
 use types::{
     AdminRole, AuditEntry, Bid, CloneOverrides, CompactInvoice, CompletionProof, CreatorStats,
-    CreateInvoiceParams, FeeTier, Invoice, InvoiceCore, InvoiceExt, InvoiceExt2, InvoiceHot,
-    InvoiceOptions, InvoicePayment, InvoiceStatus, InvoiceTemplate, LegacyInvoice,
+    CreateInvoiceParams, FeeTier, Invoice, InvoiceCore, InvoiceExt, InvoiceExt2, InvoiceExt3,
+    InvoiceHot, InvoiceOptions, InvoicePayment, InvoiceStatus, InvoiceTemplate, LegacyInvoice,
     OverflowBehavior, Payment, PaymentCertificate, PaymentProof, QueuedAction, ResolveAction,
     ResolveRule, SplitRule, SubscriptionParams, TimelockAction, Tranche, TreasuryRecord,
     SimulateReleaseResult, CircuitBreakerStatus, ConfidentialPayment,
@@ -110,6 +110,23 @@ fn circuit_breaker_reason_key() -> Symbol {
 /// Issue #295: Confidential payment storage key per (invoice_id, payer).
 fn confidential_pay_key(invoice_id: u64, payer: &Address) -> (Symbol, u64, Address) {
     (symbol_short!("conf_pay"), invoice_id, payer.clone())
+}
+
+/// Issue #327: release delay ledgers for an invoice.
+fn release_delay_key(id: u64) -> (Symbol, u64) {
+    (symbol_short!("rel_dly"), id)
+}
+/// Issue #327: ledger sequence when the invoice was fully funded.
+fn funded_at_ledger_key(id: u64) -> (Symbol, u64) {
+    (symbol_short!("fund_led"), id)
+}
+/// Issue #329: off-chain metadata hash for an invoice.
+fn metadata_hash_key(id: u64) -> (Symbol, u64) {
+    (symbol_short!("meta_hsh"), id)
+}
+/// Issue #330: set of recipients already paid via release_to_recipient.
+fn paid_recipients_key(id: u64) -> (Symbol, u64) {
+    (symbol_short!("paid_rec"), id)
 }
 
 /// Issue #295: Counter of confidential payments per invoice.
@@ -849,10 +866,10 @@ pub fn get_audit_log(env: &Env, id: u64) -> Vec<AuditEntry> {
 // ---------------------------------------------------------------------------
 
 fn is_paused(env: &Env) -> bool {
-    env.storage()
-        .persistent()
-        .get(&paused_key())
-        .unwrap_or(false)
+    // Issue #328: primary store is instance; fall back to persistent for migration compat.
+    env.storage().instance().get(&paused_key()).unwrap_or_else(||
+        env.storage().persistent().get(&paused_key()).unwrap_or(false)
+    )
 }
 
 fn require_not_paused(env: &Env) {
@@ -1096,13 +1113,21 @@ impl SplitContract {
     /// Pause the contract. Requires admin auth.
     pub fn pause(env: Env, admin: Address) {
         require_role(&env, &admin, AdminRole::Operator);
-        env.storage().persistent().set(&paused_key(), &true);
+        // Issue #328: store in instance storage so a single TTL bump covers it.
+        env.storage().instance().set(&paused_key(), &true);
+        events::contract_paused(&env, &admin);
     }
 
     /// Unpause the contract. Requires admin auth.
     pub fn unpause(env: Env, admin: Address) {
         require_role(&env, &admin, AdminRole::Operator);
-        env.storage().persistent().set(&paused_key(), &false);
+        env.storage().instance().set(&paused_key(), &false);
+        events::contract_unpaused(&env, &admin);
+    }
+
+    /// Issue #328: Return the current pause state (read-only; available while paused).
+    pub fn is_paused(env: Env) -> bool {
+        is_paused(&env)
     }
 
     /// Pause a specific function by name. Requires Operator+ auth.
@@ -1604,6 +1629,27 @@ impl SplitContract {
         types::InvoiceSnapshot { core, ext, ext2, audit_log }
     }
 
+    /// Issue #327 / #329 / #330: Return extended per-invoice fields not present in InvoiceSnapshot.
+    pub fn get_invoice_ext3(env: Env, invoice_id: u64) -> InvoiceExt3 {
+        let release_delay: Option<u32> = env.storage().persistent().get(&release_delay_key(invoice_id));
+        let funded_at: Option<u32> = env.storage().persistent().get(&funded_at_ledger_key(invoice_id));
+        let unlock_at: Option<u32> = match (funded_at, release_delay) {
+            (Some(fa), Some(d)) => Some(fa.saturating_add(d)),
+            _ => None,
+        };
+        let metadata_hash: Option<BytesN<32>> = env.storage().persistent().get(&metadata_hash_key(invoice_id));
+        let paid_recipients: Vec<Address> = env.storage().persistent()
+            .get(&paid_recipients_key(invoice_id))
+            .unwrap_or_else(|| Vec::new(&env));
+        InvoiceExt3 {
+            release_delay_ledgers: release_delay,
+            funded_at_ledger: funded_at,
+            unlock_at_ledger: unlock_at,
+            metadata_hash,
+            paid_recipients,
+        }
+    }
+
     /// Return the current creation fee.
     pub fn get_creation_fee(env: Env) -> i128 {
         env.storage()
@@ -1985,6 +2031,8 @@ impl SplitContract {
             options.priorities,
             options.require_kyc,
             options.scheduled_release_at,
+            options.release_delay_ledgers,
+            options.metadata_hash,
         )
     }
 
@@ -2035,6 +2083,8 @@ impl SplitContract {
         priorities: Vec<u32>,
         require_kyc: bool,
         scheduled_release_at: Option<u64>,
+        release_delay_ledgers: Option<u32>,
+        metadata_hash: Option<BytesN<32>>,
     ) -> u64 {
         assert!(
             recipients.len() == amounts.len(),
@@ -2360,6 +2410,17 @@ impl SplitContract {
         };
 
         save_invoice(env, id, &invoice);
+
+        // Issue #327: store optional time-lock delay.
+        if let Some(delay) = release_delay_ledgers {
+            assert!(delay <= 100_000, "release_delay_ledgers must be ≤ 100000");
+            env.storage().persistent().set(&release_delay_key(id), &delay);
+        }
+        // Issue #329: store optional metadata hash.
+        if let Some(ref hash) = metadata_hash {
+            env.storage().persistent().set(&metadata_hash_key(id), hash);
+        }
+
         events::invoice_created(env, id, &creator, total, &invoice.cross_chain_ref);
         maybe_record_created(env, &creator, total);
         update_creator_stats_on_creation(env, &creator);
@@ -2490,6 +2551,8 @@ impl SplitContract {
                 Vec::new(&env), // priorities
                 false, // require_kyc
                 None, // scheduled_release_at
+                None, // release_delay_ledgers
+                None, // metadata_hash
             );
             ids.push_back(id);
         }
@@ -2564,6 +2627,8 @@ impl SplitContract {
             Vec::new(&env), // priorities
             false, // require_kyc
             None, // scheduled_release_at
+            None, // release_delay_ledgers
+            None, // metadata_hash
         );
 
         if months > 1 {
@@ -3222,6 +3287,10 @@ impl SplitContract {
                 .storage()
                 .persistent()
                 .has(&invoice_group_key(invoice_id));
+            // Issue #327: a release delay forces a manual release() call.
+            let has_release_delay = env.storage().persistent()
+                .get::<_, u32>(&release_delay_key(invoice_id))
+                .is_some();
             let guarded =
                 invoice.prerequisite_id.is_some()
                     || !invoice.tranches.is_empty()
@@ -3229,7 +3298,13 @@ impl SplitContract {
                     || in_group
                     || !invoice.co_signers.is_empty()
                     || (invoice.oracle_address.is_some() && !invoice.condition_met)
-                    || (invoice.min_funding_bps > 0 && invoice.funded < (invoice.amounts.iter().sum::<i128>() * invoice.min_funding_bps as i128 / 10_000));
+                    || (invoice.min_funding_bps > 0 && invoice.funded < (invoice.amounts.iter().sum::<i128>() * invoice.min_funding_bps as i128 / 10_000))
+                    || has_release_delay;
+            // Issue #327: record the ledger sequence when full funding is reached.
+            if !env.storage().persistent().has(&funded_at_ledger_key(invoice_id)) {
+                let seq = env.ledger().sequence();
+                env.storage().persistent().set(&funded_at_ledger_key(invoice_id), &seq);
+            }
             if guarded {
                 save_invoice(env, invoice_id, &invoice);
             } else {
@@ -3572,7 +3647,37 @@ impl SplitContract {
         } else {
             total
         };
-        assert!(invoice.funded >= min_required, "minimum funding not reached");
+        // Issue #330: if some recipients were already paid via release_to_recipient,
+        // reduce min_required by their paid amounts so the funded check still passes.
+        let paid_set_rel: Vec<Address> = env.storage().persistent()
+            .get(&paid_recipients_key(invoice_id))
+            .unwrap_or_else(|| Vec::new(&env));
+        let already_paid_amount: i128 = if paid_set_rel.is_empty() {
+            0
+        } else {
+            let mut paid_total: i128 = 0;
+            for i in 0..invoice.recipients.len() {
+                let r = invoice.recipients.get(i).unwrap();
+                if paid_set_rel.iter().any(|p| p == r) {
+                    paid_total += invoice.amounts.get(i).unwrap();
+                }
+            }
+            paid_total
+        };
+        let effective_min_required = min_required.saturating_sub(already_paid_amount);
+        assert!(invoice.funded >= effective_min_required, "minimum funding not reached");
+
+        // Issue #327: enforce time-lock delay set by the creator.
+        if let Some(delay_ledgers) = env.storage().persistent().get::<_, u32>(&release_delay_key(invoice_id)) {
+            if let Some(funded_at) = env.storage().persistent().get::<_, u32>(&funded_at_ledger_key(invoice_id)) {
+                let unlock_at = funded_at.saturating_add(delay_ledgers);
+                if env.ledger().sequence() < unlock_at {
+                    panic!("FundsLockedUntil");
+                }
+                // Emit event the first time funds become releasable.
+                events::funds_unlocked(&env, invoice_id, unlock_at);
+            }
+        }
 
         // Approval check (issue #25).
         if invoice.approver.is_some() && !invoice.approved {
@@ -3838,6 +3943,95 @@ impl SplitContract {
                 events::allowlist_updated(&env, invoice_id, &creator, &payer, true);
             }
         }
+    }
+
+    /// Issue #329: Update the off-chain metadata hash for an invoice.
+    ///
+    /// Only the creator may call this. Emits `MetadataUpdated` with old and new hash.
+    /// The contract does not validate or fetch the off-chain content.
+    pub fn update_metadata_hash(env: Env, invoice_id: u64, creator: Address, new_hash: BytesN<32>) {
+        require_not_paused(&env);
+        creator.require_auth();
+
+        let invoice = load_invoice(&env, invoice_id);
+        assert!(invoice.creator == creator, "only creator can update metadata hash");
+
+        let old_hash: Option<BytesN<32>> = env.storage().persistent().get(&metadata_hash_key(invoice_id));
+        env.storage().persistent().set(&metadata_hash_key(invoice_id), &new_hash);
+
+        append_audit_entry(&env, invoice_id, symbol_short!("meta_upd"), &creator);
+        events::metadata_updated(&env, invoice_id, &old_hash, &new_hash);
+    }
+
+    /// Issue #330: Release funds to a single recipient by their share.
+    ///
+    /// The invoice must be fully funded. Each recipient can only be paid once via
+    /// this function. Use `release` to pay all remaining recipients at once.
+    pub fn release_to_recipient(env: Env, invoice_id: u64, recipient: Address) {
+        require_fn_not_paused(&env, &symbol_short!("release"));
+
+        let mut invoice = load_invoice(&env, invoice_id);
+        let creator = invoice.creator.clone();
+        creator.require_auth();
+
+        assert!(
+            invoice.status == InvoiceStatus::Pending,
+            "invoice is not pending"
+        );
+        assert!(!invoice.frozen, "invoice is frozen");
+        assert!(!invoice.admin_frozen, "invoice frozen by admin");
+        assert!(!invoice.disputed, "invoice is disputed");
+
+        // Invoice must have been fully funded at some point.
+        // After partial releases, funded may be less than total, so we check funded_at_ledger.
+        let total: i128 = invoice.amounts.iter().sum();
+        let was_fully_funded = invoice.funded >= total
+            || env.storage().persistent().has(&funded_at_ledger_key(invoice_id));
+        assert!(was_fully_funded, "invoice not fully funded");
+
+        // Issue #327: respect time-lock delay.
+        if let Some(delay_ledgers) = env.storage().persistent().get::<_, u32>(&release_delay_key(invoice_id)) {
+            if let Some(funded_at) = env.storage().persistent().get::<_, u32>(&funded_at_ledger_key(invoice_id)) {
+                let unlock_at = funded_at.saturating_add(delay_ledgers);
+                assert!(env.ledger().sequence() >= unlock_at, "FundsLockedUntil");
+            }
+        }
+
+        // Find recipient in list.
+        let mut recipient_idx: Option<u32> = None;
+        for i in 0..invoice.recipients.len() {
+            if invoice.recipients.get(i).unwrap() == recipient {
+                recipient_idx = Some(i);
+                break;
+            }
+        }
+        assert!(recipient_idx.is_some(), "recipient not found in invoice");
+        let idx = recipient_idx.unwrap();
+
+        // Check not already paid.
+        let mut paid: Vec<Address> = env.storage().persistent()
+            .get(&paid_recipients_key(invoice_id))
+            .unwrap_or_else(|| Vec::new(&env));
+        assert!(
+            !paid.iter().any(|a| a == recipient),
+            "RecipientAlreadyPaid"
+        );
+
+        let amount = invoice.amounts.get(idx).unwrap();
+        assert!(amount > 0, "recipient amount must be positive");
+
+        let token_client = token::Client::new(&env, &invoice.tokens.get(0).expect("no token"));
+        token_client.transfer(&env.current_contract_address(), &recipient, &amount);
+
+        paid.push_back(recipient.clone());
+        env.storage().persistent().set(&paid_recipients_key(invoice_id), &paid);
+
+        // Reduce funded so the contract's token balance stays consistent with paid amounts.
+        invoice.funded -= amount;
+        save_invoice(&env, invoice_id, &invoice);
+
+        append_audit_entry(&env, invoice_id, symbol_short!("rec_paid"), &creator);
+        events::recipient_paid(&env, invoice_id, &recipient, amount);
     }
 
     /// Admin override: force-resume any paused invoice regardless of who paused it.
@@ -4487,16 +4681,51 @@ impl SplitContract {
         let mut total_fee: i128 = 0;
         let mut total_tax: i128 = 0;
         let mut payouts: Vec<i128> = Vec::new(env);
-        
+
+        // Issue #330: recipients already paid via release_to_recipient are skipped here.
+        let paid_set: Vec<Address> = env.storage().persistent()
+            .get(&paid_recipients_key(invoice_id))
+            .unwrap_or_else(|| Vec::new(env));
+        // Compute effective total excluding paid recipients' amounts.
+        let effective_total: i128 = if paid_set.is_empty() {
+            total
+        } else {
+            let mut et: i128 = 0;
+            for i in 0..n {
+                let r = invoice.recipients.get(i).unwrap();
+                if !paid_set.iter().any(|p| p == r) {
+                    et += invoice.amounts.get(i).unwrap();
+                }
+            }
+            if et == 0 { 1 } else { et }
+        };
+        // Find the index of the last unpaid recipient (for remainder assignment).
+        let last_unpaid_idx: u32 = {
+            let mut last = n.saturating_sub(1);
+            for i in 0..n {
+                let r = invoice.recipients.get(i).unwrap();
+                if paid_set.is_empty() || !paid_set.iter().any(|p| p == r) {
+                    last = i;
+                }
+            }
+            last
+        };
+
         let waivers: Vec<Address> = env
             .storage()
             .persistent()
             .get(&platform_fee_waiver_list_key())
             .unwrap_or_else(|| Vec::new(&env));
-        
+
         for i in 0..n {
             let recipient = invoice.recipients.get(i).unwrap();
             let amount = invoice.amounts.get(i).unwrap();
+
+            // Issue #330: skip already-paid recipients.
+            if !paid_set.is_empty() && paid_set.iter().any(|p| p == recipient) {
+                payouts.push_back(0i128);
+                continue;
+            }
 
             // Issue: if split_rules are defined, compute payout from rule instead of amounts[].
             let proportional = if !invoice.split_rules.is_empty() {
@@ -4514,10 +4743,10 @@ impl SplitContract {
                         }
                     }
                 }
-            } else if i == n - 1 {
+            } else if i == last_unpaid_idx {
                 funded - distributed
             } else {
-                (amount as u128 * funded as u128 / total as u128) as i128
+                (amount as u128 * funded as u128 / effective_total as u128) as i128
             };
             distributed += proportional;
 
@@ -4564,6 +4793,11 @@ impl SplitContract {
             for i in 0..n {
                 let recipient = invoice.recipients.get(i).unwrap();
                 let proportional = payouts.get(i).unwrap();
+
+                // Issue #330: skip recipients already paid via release_to_recipient.
+                if proportional == 0 && !paid_set.is_empty() && paid_set.iter().any(|p| p == recipient) {
+                    continue;
+                }
 
                 let tax = (proportional as u128 * invoice.tax_bps as u128 / 10_000u128) as i128;
                 let post_tax = proportional - tax;
@@ -4889,6 +5123,8 @@ impl SplitContract {
                 Vec::new(env), // priorities
                 false, // require_kyc
                 None, // scheduled_release_at
+                None, // release_delay_ledgers
+                None, // metadata_hash
             );
             env.storage()
                 .persistent()
@@ -5517,6 +5753,8 @@ impl SplitContract {
             old_invoice.priorities.clone(),
             old_invoice.require_kyc,
             old_invoice.scheduled_release_at,
+            None, // release_delay_ledgers
+            None, // metadata_hash
         );
 
         // Copy payments from shards to new invoice (issue #177).
@@ -5787,6 +6025,8 @@ impl SplitContract {
             Vec::new(&env), // priorities
             false, // require_kyc
             None, // scheduled_release_at
+            None, // release_delay_ledgers
+            None, // metadata_hash
         )
     }
 

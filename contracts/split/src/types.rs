@@ -265,6 +265,10 @@ pub struct InvoiceOptions {
     pub target_usd_cents: Option<u64>,
     /// Issue #307: explicit payment token override; uses this token instead of the invoice base token.
     pub payment_token: Option<Address>,
+    /// Issue #327: ledgers to lock funds after full funding (max 100_000 ≈ 5 days).
+    pub release_delay_ledgers: Option<u32>,
+    /// Issue #329: optional IPFS CID / SHA-256 hash of off-chain invoice metadata.
+    pub metadata_hash: Option<BytesN<32>>,
 }
 
 /// Legacy invoice layout used by stored invoices created before the `version`
@@ -893,10 +897,30 @@ impl Invoice {
             parent_invoice_id: None,
             priorities: Vec::new(env),
             target_usd_cents: None,
+            refunded_addresses: Vec::new(env),
         }
     }
 }
 
+
+/// Issue #327 / #329 / #330: Extended invoice fields for new features.
+/// Stored in separate persistent storage (key: inv_ex3 + invoice_id) so existing
+/// InvoiceCore / InvoiceExt / InvoiceExt2 XDR layouts are not disturbed.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct InvoiceExt3 {
+    /// Issue #327: creator-set ledger delay before funds can be released.
+    pub release_delay_ledgers: Option<u32>,
+    /// Issue #327: ledger sequence when the invoice became fully funded.
+    pub funded_at_ledger: Option<u32>,
+    /// Issue #327: computed unlock ledger (funded_at_ledger + release_delay_ledgers).
+    /// None if no delay is set.
+    pub unlock_at_ledger: Option<u32>,
+    /// Issue #329: IPFS CID or SHA-256 hash of off-chain metadata.
+    pub metadata_hash: Option<BytesN<32>>,
+    /// Issue #330: recipients whose share has already been transferred.
+    pub paid_recipients: Vec<Address>,
+}
 
 /// Issue #298: Result type returned by simulate_release().
 #[contracttype]

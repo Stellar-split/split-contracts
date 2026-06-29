@@ -1,4 +1,4 @@
-use soroban_sdk::{symbol_short, Address, Env, Vec, String};
+use soroban_sdk::{symbol_short, Address, BytesN, Env, Vec, String};
 use crate::types::{InvoiceStatus, TimelockAction};
 
 /// Emitted when a new invoice is created.
@@ -421,5 +421,55 @@ pub fn upgrade_cancelled(env: &Env, admin: &Address) {
     env.events().publish(
         (symbol_short!("split"), symbol_short!("upg_cncl")),
         admin.clone(),
+    );
+}
+
+/// Issue #328: Emitted when the contract is emergency-paused by an admin.
+/// Topics: (split, ct_paused)
+/// Data: (admin, ledger)
+pub fn contract_paused(env: &Env, admin: &Address) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("ct_paused")),
+        (admin.clone(), env.ledger().sequence()),
+    );
+}
+
+/// Issue #328: Emitted when the contract is unpaused by an admin.
+/// Topics: (split, ct_unpsd)
+/// Data: (admin, ledger)
+pub fn contract_unpaused(env: &Env, admin: &Address) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("ct_unpsd")),
+        (admin.clone(), env.ledger().sequence()),
+    );
+}
+
+/// Issue #327: Emitted when funds become releasable after the time-lock delay expires.
+/// Topics: (split, fnd_unlk, invoice_id)
+/// Data: unlock_ledger
+pub fn funds_unlocked(env: &Env, invoice_id: u64, unlock_ledger: u32) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("fnd_unlk"), invoice_id),
+        unlock_ledger,
+    );
+}
+
+/// Issue #329: Emitted when a creator updates an invoice's off-chain metadata hash.
+/// Topics: (split, meta_upd, invoice_id)
+/// Data: (old_hash, new_hash, ledger)
+pub fn metadata_updated(env: &Env, invoice_id: u64, old_hash: &Option<BytesN<32>>, new_hash: &BytesN<32>) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("meta_upd"), invoice_id),
+        (old_hash.clone(), new_hash.clone(), env.ledger().sequence()),
+    );
+}
+
+/// Issue #330: Emitted when a single recipient is paid via release_to_recipient.
+/// Topics: (split, rec_paid, invoice_id)
+/// Data: (recipient, amount, ledger)
+pub fn recipient_paid(env: &Env, invoice_id: u64, recipient: &Address, amount: i128) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("rec_paid"), invoice_id),
+        (recipient.clone(), amount, env.ledger().sequence()),
     );
 }
