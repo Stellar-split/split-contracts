@@ -931,6 +931,50 @@ pub struct SimulateReleaseResult {
     pub would_succeed: bool,
 }
 
+/// Issue #325: Status of a payer-raised dispute.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum DisputeStatus {
+    Active,
+    Resolved,
+    Expired,
+}
+
+/// Issue #325: Outcome of a resolved dispute.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum DisputeOutcome {
+    Approved,
+    Refunded,
+}
+
+/// Issue #325: On-chain record of a payer-initiated dispute.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct DisputeRecord {
+    pub reason_hash: BytesN<32>,
+    pub raised_at: u32,
+    pub status: DisputeStatus,
+}
+
+/// Issue #326: Protocol fee configuration set by admin.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct ProtocolFeeConfig {
+    pub rate_bps: u32,
+    pub treasury: Address,
+}
+
+/// Issue #316: Compute budget estimate for a contract function.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct ComputeEstimate {
+    pub instructions: u64,
+    pub mem_bytes: u64,
+    pub read_entries: u32,
+    pub write_entries: u32,
+}
+
 /// Issue #297: Circuit breaker status returned by get_circuit_breaker_status().
 #[contracttype]
 #[derive(Clone, Debug)]

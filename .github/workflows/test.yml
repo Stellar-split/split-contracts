@@ -31,3 +31,6 @@ jobs:
 
       - name: Run tests
         run: cargo test --workspace
+
+      - name: Storage key snapshot test
+        run: cargo test -p split storage_snapshot

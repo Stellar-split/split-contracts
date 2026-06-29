@@ -1,5 +1,6 @@
 use soroban_sdk::{symbol_short, Address, BytesN, Env, Vec, String};
 use crate::types::{InvoiceStatus, TimelockAction};
+use crate::types::{InvoiceStatus, TimelockAction, DisputeOutcome};
 
 /// Emitted when a new invoice is created.
 /// Topics: (split, created, invoice_id)
@@ -471,5 +472,56 @@ pub fn recipient_paid(env: &Env, invoice_id: u64, recipient: &Address, amount: i
     env.events().publish(
         (symbol_short!("split"), symbol_short!("rec_paid"), invoice_id),
         (recipient.clone(), amount, env.ledger().sequence()),
+/// Issue #315: Emitted when a delegated payment is executed.
+/// Topics: (split, dlgt_pay, invoice_id)
+/// Data: (payer, executor, amount, ledger)
+pub fn delegated_payment(env: &Env, invoice_id: u64, payer: &Address, executor: &Address, amount: i128) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("dlgt_pay"), invoice_id),
+        (payer.clone(), executor.clone(), amount, env.ledger().sequence()),
+    );
+}
+
+/// Issue #325: Emitted when a payer raises a dispute.
+/// Topics: (split, disp_rsd, invoice_id)
+/// Data: (payer, reason_hash, ledger)
+pub fn dispute_raised(env: &Env, invoice_id: u64, payer: &Address, reason_hash: &BytesN<32>) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("disp_rsd"), invoice_id),
+        (payer.clone(), reason_hash.clone(), env.ledger().sequence()),
+    );
+}
+
+/// Issue #325: Emitted when admin resolves a dispute.
+/// Topics: (split, disp_res, invoice_id)
+/// Data: (admin, outcome, ledger)
+pub fn dispute_resolved(env: &Env, invoice_id: u64, admin: &Address, outcome: &DisputeOutcome) {
+    let outcome_sym = match outcome {
+        DisputeOutcome::Approved => symbol_short!("approved"),
+        DisputeOutcome::Refunded => symbol_short!("refunded"),
+    };
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("disp_res"), invoice_id),
+        (admin.clone(), outcome_sym, env.ledger().sequence()),
+    );
+}
+
+/// Issue #325: Emitted when a dispute auto-expires and funds are released.
+/// Topics: (split, disp_exp, invoice_id)
+/// Data: ledger
+pub fn dispute_expired(env: &Env, invoice_id: u64) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("disp_exp"), invoice_id),
+        env.ledger().sequence(),
+    );
+}
+
+/// Issue #326: Emitted when a protocol fee is paid to treasury on release.
+/// Topics: (split, fee_paid, invoice_id)
+/// Data: (amount, treasury, ledger)
+pub fn fee_paid(env: &Env, invoice_id: u64, amount: i128, treasury: &Address) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("fee_paid"), invoice_id),
+        (amount, treasury.clone(), env.ledger().sequence()),
     );
 }
