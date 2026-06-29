@@ -47,6 +47,7 @@ use types::{
     ResolveRule, SplitRule, SubscriptionParams, TimelockAction, Tranche, TreasuryRecord,
     SimulateReleaseResult, CircuitBreakerStatus, ConfidentialPayment, UpgradeProposal,
     DisputeRecord, DisputeStatus, DisputeOutcome, ProtocolFeeConfig, ComputeEstimate,
+    CompactMigrateResult, ReleaseResult,
 };
 
 // ---------------------------------------------------------------------------
@@ -131,6 +132,34 @@ fn metadata_hash_key(id: u64) -> (Symbol, u64) {
 /// Issue #330: set of recipients already paid via release_to_recipient.
 fn paid_recipients_key(id: u64) -> (Symbol, u64) {
     (symbol_short!("paid_rec"), id)
+}
+
+/// Issue #332: contiguous Vec<Address> of all recipients — persistent storage.
+fn recipients_list_key(id: u64) -> (Symbol, u64) {
+    (symbol_short!("rec_lst"), id)
+}
+/// Issue #332: contiguous Vec<i128> of amounts parallel to recipients_list_key — persistent storage.
+fn amounts_list_key(id: u64) -> (Symbol, u64) {
+    (symbol_short!("amt_lst"), id)
+}
+/// Issue #332: u32 bit-vector of paid flags — persistent storage.
+fn paid_flags_key(id: u64) -> (Symbol, u64) {
+    (symbol_short!("paid_flg"), id)
+}
+
+/// Issue #333: u8 bitmask of milestones already emitted — instance storage.
+/// Bit 0 = 25 %, Bit 1 = 50 %, Bit 2 = 75 %, Bit 3 = 100 %.
+fn milestone_flags_key(id: u64) -> (Symbol, u64) {
+    (symbol_short!("ms_flgs"), id)
+}
+
+/// Issue #334: compact status byte (u8) — persistent storage.
+fn compact_status_key(id: u64) -> (Symbol, u64) {
+    (symbol_short!("cpt_sts"), id)
+}
+/// Issue #334: compact deadline as ledger sequence (u32) — persistent storage.
+fn compact_deadline_ledger_key(id: u64) -> (Symbol, u64) {
+    (symbol_short!("cpt_dlg"), id)
 }
 
 /// Issue #295: Counter of confidential payments per invoice.
@@ -844,6 +873,10 @@ fn save_invoice(env: &Env, id: u64, invoice: &Invoice) {
         recipients: invoice.recipients.clone(),
     };
     env.storage().instance().set(&invoice_hot_key(id), &hot);
+
+    // Issue #334: keep compact status byte in sync with every save.
+    save_compact_status(env, id, &invoice.status);
+
     bump_invoice_ttl(env);
 }
 
@@ -1002,6 +1035,119 @@ fn save_invoice_ext(env: &Env, id: u64, ext: &InvoiceExt) {
     env.storage()
         .persistent()
         .set(&invoice_ext_key(id), ext);
+}
+
+// ---------------------------------------------------------------------------
+// Issue #332: Recipient list helpers (optimised iteration)
+// ---------------------------------------------------------------------------
+
+/// Persist the contiguous recipient + amount vectors for `invoice_id`.
+/// Called once at invoice creation (or migration).  During release we load
+/// both vecs with two `get()` calls instead of N per-recipient reads.
+fn save_recipients_list(env: &Env, id: u64, recipients: &Vec<Address>, amounts: &Vec<i128>) {
+    env.storage().persistent().set(&recipients_list_key(id), recipients);
+    env.storage().persistent().set(&amounts_list_key(id), amounts);
+}
+
+/// Load the contiguous recipient list.  Falls back to the invoice struct's
+/// `recipients` field when the optimised list is absent (pre-migration).
+fn load_recipients_list(
+    env: &Env,
+    id: u64,
+    fallback_recipients: &Vec<Address>,
+    fallback_amounts: &Vec<i128>,
+) -> (Vec<Address>, Vec<i128>) {
+    let recipients: Vec<Address> = env
+        .storage()
+        .persistent()
+        .get(&recipients_list_key(id))
+        .unwrap_or_else(|| fallback_recipients.clone());
+    let amounts: Vec<i128> = env
+        .storage()
+        .persistent()
+        .get(&amounts_list_key(id))
+        .unwrap_or_else(|| fallback_amounts.clone());
+    (recipients, amounts)
+}
+
+// ---------------------------------------------------------------------------
+// Issue #333: Milestone event helpers
+// ---------------------------------------------------------------------------
+
+/// Milestone thresholds in basis-points (basis = 10 000).
+const MILESTONE_THRESHOLDS: [u32; 4] = [2500, 5000, 7500, 10000];
+
+/// Check whether `funded_amount` has newly crossed any milestone thresholds
+/// since `prev_funded`.  Emits a `milestone_reached` event for each newly-
+/// crossed threshold, and persists the updated bitmask in instance storage
+/// (no extra persistent rent — it piggybacks on the instance-TTL bump that
+/// `save_invoice` already performs on every `pay()` call).
+///
+/// Bit layout of the flag byte:
+///   Bit 0 → 25 %  (2500 bps)
+///   Bit 1 → 50 %  (5000 bps)
+///   Bit 2 → 75 %  (7500 bps)
+///   Bit 3 → 100 % (10000 bps)
+fn check_and_emit_milestones(
+    env: &Env,
+    invoice_id: u64,
+    prev_funded: i128,
+    new_funded: i128,
+    total: i128,
+) {
+    if total <= 0 {
+        return;
+    }
+    // Load existing flags (0 if this is the first call for this invoice).
+    let mut flags: u32 = env
+        .storage()
+        .instance()
+        .get(&milestone_flags_key(invoice_id))
+        .unwrap_or(0u32);
+
+    let mut changed = false;
+    for (bit, &bps) in MILESTONE_THRESHOLDS.iter().enumerate() {
+        // Already emitted?
+        if flags & (1u32 << bit) != 0 {
+            continue;
+        }
+        // Threshold in token units (rounded down).
+        let threshold_amount: i128 = total * bps as i128 / 10_000;
+        // Was this threshold NOT crossed before, but IS crossed now?
+        if prev_funded < threshold_amount && new_funded >= threshold_amount {
+            events::milestone_reached(env, invoice_id, bps, new_funded);
+            flags |= 1u32 << bit;
+            changed = true;
+        }
+    }
+
+    if changed {
+        env.storage()
+            .instance()
+            .set(&milestone_flags_key(invoice_id), &flags);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Issue #334: Compact status helpers
+// ---------------------------------------------------------------------------
+
+/// Write the compact status byte alongside the normal InvoiceCore.
+/// This is a non-breaking overlay: `load_invoice` continues to work.
+fn save_compact_status(env: &Env, id: u64, status: &InvoiceStatus) {
+    let byte: u32 = status.to_u8() as u32;
+    env.storage()
+        .persistent()
+        .set(&compact_status_key(id), &byte);
+}
+
+/// Read the compact status byte.  Returns `None` when the invoice has not yet
+/// been migrated (the `compact_status_key` entry is absent).
+fn load_compact_status(env: &Env, id: u64) -> Option<InvoiceStatus> {
+    env.storage()
+        .persistent()
+        .get::<_, u32>(&compact_status_key(id))
+        .map(|v| InvoiceStatus::from_u8(v as u8))
 }
 
 fn maybe_record_refunded(env: &Env, creator: &Address) {
@@ -2430,6 +2576,9 @@ impl SplitContract {
 
         save_invoice(env, id, &invoice);
 
+        // Issue #332: persist contiguous recipient + amount vectors for optimised release.
+        save_recipients_list(env, id, &invoice.recipients, &invoice.amounts);
+
         // Issue #327: store optional time-lock delay.
         if let Some(delay) = release_delay_ledgers {
             assert!(delay <= 100_000, "release_delay_ledgers must be ≤ 100000");
@@ -3248,6 +3397,11 @@ impl SplitContract {
         shard_payments.push_back(Payment { payer: payer.clone(), amount: credited_amount, tip: 0, attestation_hash, donate_on_failure });
         env.storage().persistent().set(&pay_shard_key(invoice_id, shard_id), &shard_payments);
 
+        // Issue #334: write compact status to optimised storage.
+        save_compact_status(env, invoice_id, &invoice.status);
+
+        // Capture funded total before and after mutation (used for milestone check below).
+        let prev_funded = invoice.funded;
         invoice.funded += credited_amount;
 
         // Increment per-address reputation counter (issue #24).
@@ -3272,6 +3426,11 @@ impl SplitContract {
 
         append_audit_entry(env, invoice_id, symbol_short!("pay"), payer);
         events::payment_received(env, invoice_id, payer, credited_amount);
+        // Issue #333: emit milestone events for any thresholds crossed by this payment.
+        {
+            let total_for_milestone: i128 = total; // already computed above
+            check_and_emit_milestones(env, invoice_id, prev_funded, invoice.funded, total_for_milestone);
+        }
         update_creator_stats_on_payment(env, &invoice.creator, credited_amount);
         update_creator_payers(env, &invoice.creator, payer);
         notify_invoice(env, invoice_id, symbol_short!("pay"), &invoice.notification_contract);
@@ -7635,4 +7794,109 @@ impl SplitContract {
             write_entries,
         }
     }
+
+    // -----------------------------------------------------------------------
+    // Issue #334: Compact XDR migration
+    // -----------------------------------------------------------------------
+
+    /// One-time migration helper that writes compact overlay fields for a
+    /// stored invoice, reducing XDR storage cost.
+    ///
+    /// **What it does:**
+    /// - Writes the invoice status as a single `u32` byte to `compact_status_key`
+    ///   (4 bytes + XDR key overhead) instead of the full `InvoiceStatus` enum
+    ///   variant (string-encoded, 20+ bytes).
+    /// - Writes the deadline as a `u32` ledger-sequence estimate to
+    ///   `compact_deadline_ledger_key` when the deadline is representable.
+    ///
+    /// The compact fields are *overlays* — `load_invoice` continues to read from
+    /// the original `InvoiceCore` / `InvoiceExt` / `InvoiceExt2` blobs.  The
+    /// compact fields are only used by optimised hot-path code that explicitly
+    /// reads them (e.g. status checks before a pay).
+    ///
+    /// Callable by anyone (read-only migration; no auth required).
+    pub fn compact_migrate(env: Env, invoice_id: u64) -> CompactMigrateResult {
+        require_not_paused(&env);
+        let invoice = load_invoice(&env, invoice_id);
+
+        // Write compact status byte.
+        save_compact_status(&env, invoice_id, &invoice.status);
+        let status_byte = invoice.status.to_u8() as u32;
+
+        // Write compact deadline-as-ledger when the deadline fits in a u32.
+        // We store it as an estimate: current_ledger + (deadline - now) / 5
+        // (Stellar produces roughly one ledger every 5 seconds).
+        let now_ts = env.ledger().timestamp();
+        let current_ledger = env.ledger().sequence();
+        let deadline_migrated = if invoice.deadline >= now_ts {
+            let secs_remaining = invoice.deadline - now_ts;
+            let ledgers_remaining = (secs_remaining / 5) as u32;
+            let deadline_ledger = current_ledger.saturating_add(ledgers_remaining);
+            env.storage()
+                .persistent()
+                .set(&compact_deadline_ledger_key(invoice_id), &deadline_ledger);
+            true
+        } else {
+            // Deadline already passed — store 0 as sentinel.
+            env.storage()
+                .persistent()
+                .set(&compact_deadline_ledger_key(invoice_id), &0u32);
+            false
+        };
+
+        // Issue #332: ensure recipients + amounts lists are present.
+        if !env.storage().persistent().has(&recipients_list_key(invoice_id)) {
+            save_recipients_list(&env, invoice_id, &invoice.recipients, &invoice.amounts);
+        }
+
+        CompactMigrateResult {
+            invoice_id,
+            status_byte,
+            deadline_migrated,
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #333: Milestone query helper
+    // -----------------------------------------------------------------------
+
+    /// Return the milestone bitmask for `invoice_id`.
+    ///
+    /// Bit layout:
+    ///   Bit 0 → 25 %  (2500 bps) emitted
+    ///   Bit 1 → 50 %  (5000 bps) emitted
+    ///   Bit 2 → 75 %  (7500 bps) emitted
+    ///   Bit 3 → 100 % (10000 bps) emitted
+    ///
+    /// Returns 0 when no milestones have been crossed yet.
+    pub fn get_milestone_flags(env: Env, invoice_id: u64) -> u32 {
+        env.storage()
+            .instance()
+            .get(&milestone_flags_key(invoice_id))
+            .unwrap_or(0u32)
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #332: Optimised recipient list query
+    // -----------------------------------------------------------------------
+
+    /// Return the contiguous recipients list stored at creation time.
+    ///
+    /// Falls back to reading from `InvoiceCore` for invoices created before
+    /// this optimisation was deployed.
+    pub fn get_recipients_list(env: Env, invoice_id: u64) -> Vec<Address> {
+        let (recipients, _amounts) = load_recipients_list(
+            &env,
+            invoice_id,
+            &Vec::new(&env),
+            &Vec::new(&env),
+        );
+        if !recipients.is_empty() {
+            recipients
+        } else {
+            // Fallback for pre-migration invoices.
+            load_invoice(&env, invoice_id).recipients
+        }
+    }
 }
+

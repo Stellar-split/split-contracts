@@ -1,5 +1,4 @@
 use soroban_sdk::{symbol_short, Address, BytesN, Env, Vec, String};
-use crate::types::{InvoiceStatus, TimelockAction};
 use crate::types::{InvoiceStatus, TimelockAction, DisputeOutcome};
 
 /// Emitted when a new invoice is created.
@@ -472,6 +471,30 @@ pub fn recipient_paid(env: &Env, invoice_id: u64, recipient: &Address, amount: i
     env.events().publish(
         (symbol_short!("split"), symbol_short!("rec_paid"), invoice_id),
         (recipient.clone(), amount, env.ledger().sequence()),
+    );
+}
+
+/// Issue #333: Emitted when an invoice crosses a funding milestone (25%, 50%, 75%, 100%).
+///
+/// # Indexer Guide
+/// `milestone_bps` encodes the threshold in basis points:
+///   - 2500 = 25%
+///   - 5000 = 50%
+///   - 7500 = 75%
+///   - 10000 = 100%
+///
+/// Multiple events can be emitted in a single `pay()` call when a large payment
+/// crosses several thresholds at once.
+///
+/// Topics: (split, milestone, invoice_id)
+/// Data: (milestone_bps, funded_amount, ledger)
+pub fn milestone_reached(env: &Env, invoice_id: u64, milestone_bps: u32, funded_amount: i128) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("milestone"), invoice_id),
+        (milestone_bps, funded_amount, env.ledger().sequence()),
+    );
+}
+
 /// Issue #315: Emitted when a delegated payment is executed.
 /// Topics: (split, dlgt_pay, invoice_id)
 /// Data: (payer, executor, amount, ledger)
