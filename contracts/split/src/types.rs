@@ -1031,3 +1031,51 @@ pub struct InvoiceHot {
     /// Recipient list — needed for penalty distribution and auto-release.
     pub recipients: Vec<Address>,
 }
+
+// ---------------------------------------------------------------------------
+// Issue #334: Compact XDR storage helpers
+// ---------------------------------------------------------------------------
+
+impl InvoiceStatus {
+    /// Encode as a single byte — saves XDR overhead vs. the full enum variant.
+    pub fn to_u8(&self) -> u8 {
+        match self {
+            InvoiceStatus::Pending   => 0,
+            InvoiceStatus::Released  => 1,
+            InvoiceStatus::Refunded  => 2,
+            InvoiceStatus::Cancelled => 3,
+        }
+    }
+
+    /// Decode from a single byte.  Unknown values map to Pending.
+    pub fn from_u8(v: u8) -> Self {
+        match v {
+            1 => InvoiceStatus::Released,
+            2 => InvoiceStatus::Refunded,
+            3 => InvoiceStatus::Cancelled,
+            _ => InvoiceStatus::Pending,
+        }
+    }
+}
+
+/// Issue #334: Result returned by `compact_migrate`.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct CompactMigrateResult {
+    /// Invoice ID that was migrated.
+    pub invoice_id: u64,
+    /// Status byte written to compact storage (0–3).
+    pub status_byte: u32,
+    /// Whether the deadline was representable as a ledger sequence.
+    pub deadline_migrated: bool,
+}
+
+/// Issue #332: Optimized release result.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct ReleaseResult {
+    /// Number of recipients paid in this call.
+    pub recipients_paid: u32,
+    /// Total amount transferred.
+    pub total_transferred: i128,
+}

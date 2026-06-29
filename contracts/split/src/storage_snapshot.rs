@@ -126,6 +126,18 @@ fn storage_key_snapshot() {
     // (Symbol, u64, u64)
     keys.push(("pay_shard_key", hex_xdr(&env, pay_shard_key(1, 1))));
 
+    // Issue #332: recipient optimisation keys (Symbol, u64)
+    keys.push(("recipients_list_key", hex_xdr(&env, recipients_list_key(1))));
+    keys.push(("amounts_list_key", hex_xdr(&env, amounts_list_key(1))));
+    keys.push(("paid_flags_key", hex_xdr(&env, paid_flags_key(1))));
+
+    // Issue #333: milestone flags key (Symbol, u64) — instance storage
+    keys.push(("milestone_flags_key", hex_xdr(&env, milestone_flags_key(1))));
+
+    // Issue #334: compact XDR overlay keys (Symbol, u64)
+    keys.push(("compact_status_key", hex_xdr(&env, compact_status_key(1))));
+    keys.push(("compact_deadline_ledger_key", hex_xdr(&env, compact_deadline_ledger_key(1))));
+
     // (Symbol, Address, Symbol)
     keys.push(("template_key", hex_xdr(&env, template_key(&a, &s))));
     keys.push(("template_version_count_key", hex_xdr(&env, template_version_count_key(&a, &s))));

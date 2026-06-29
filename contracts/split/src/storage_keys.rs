@@ -188,3 +188,43 @@ pub fn creator_self_used_key(creator: &Address) -> (Symbol, Address) { (symbol_s
 pub fn creator_self_limit_day_key(creator: &Address) -> (Symbol, Address) { (symbol_short!("cr_slf_day"), creator.clone()) }
 /// Creator self-limit pending raise request — persistent storage.
 pub fn creator_self_limit_raise_key(creator: &Address) -> (Symbol, Address) { (symbol_short!("cr_slf_rse"), creator.clone()) }
+
+// ---------------------------------------------------------------------------
+// Issue #332: Recipient payout optimization
+// ---------------------------------------------------------------------------
+
+/// Contiguous Vec<Address> of all recipients for an invoice — persistent storage.
+/// Replaces per-recipient storage keys so the full list can be loaded with a
+/// single `env.storage().persistent().get()` call during release.
+pub fn recipients_list_key(invoice_id: u64) -> (Symbol, u64) { (symbol_short!("rec_lst"), invoice_id) }
+
+/// Contiguous Vec<i128> of amounts parallel to `recipients_list_key` — persistent storage.
+pub fn amounts_list_key(invoice_id: u64) -> (Symbol, u64) { (symbol_short!("amt_lst"), invoice_id) }
+
+/// Bit-vector (u32) of paid flags parallel to recipients list — persistent storage.
+/// Bit N is set when recipients[N] has been paid. Supports up to 32 recipients per
+/// compact flag word; a second word (`paid_flags_1`, etc.) would extend capacity.
+pub fn paid_flags_key(invoice_id: u64) -> (Symbol, u64) { (symbol_short!("paid_flg"), invoice_id) }
+
+// ---------------------------------------------------------------------------
+// Issue #333: Payment milestone events
+// ---------------------------------------------------------------------------
+
+/// Bitmask (u8) of milestones already emitted for an invoice — instance storage.
+/// Bit 0 = 25%, Bit 1 = 50%, Bit 2 = 75%, Bit 3 = 100%.
+/// Stored in instance storage so it piggybacks on the instance-level TTL bump
+/// that already happens on every pay() call, avoiding extra rent.
+pub fn milestone_flags_key(invoice_id: u64) -> (Symbol, u64) { (symbol_short!("ms_flgs"), invoice_id) }
+
+// ---------------------------------------------------------------------------
+// Issue #334: Compact XDR storage
+// ---------------------------------------------------------------------------
+
+/// Compact status byte (u8) for an invoice — persistent storage (overlay).
+/// 0 = Pending, 1 = Released, 2 = Refunded, 3 = Cancelled.
+/// Replaces storing the full InvoiceStatus enum variant for minimal XDR cost.
+pub fn compact_status_key(invoice_id: u64) -> (Symbol, u64) { (symbol_short!("cpt_sts"), invoice_id) }
+
+/// Compact deadline stored as u32 ledger sequence — persistent storage.
+/// Used when wall-clock time is not required (opt-in via compact_migrate).
+pub fn compact_deadline_ledger_key(invoice_id: u64) -> (Symbol, u64) { (symbol_short!("cpt_dlg"), invoice_id) }
