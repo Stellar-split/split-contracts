@@ -31,6 +31,9 @@ mod test;
 #[cfg(test)]
 mod fuzz_tests;
 
+#[cfg(test)]
+mod storage_snapshot;
+
 use soroban_sdk::{
     String,
     contract, contractimpl, symbol_short, token, Address, Bytes, BytesN, Env, IntoVal, Map, Symbol, Val, Vec,
@@ -127,7 +130,7 @@ fn counter_key() -> Symbol {
     symbol_short!("counter")
 }
 fn archive_after_ledgers_key() -> Symbol {
-    symbol_short!("arch_after")
+    symbol_short!("arch_af")
 }
 fn archive_marker_key(id: u64) -> (Symbol, u64) {
     (symbol_short!("archv"), id)
@@ -568,8 +571,6 @@ fn archive_invoice_storage(env: &Env, id: u64, core: &InvoiceCore) {
             cross_chain_ref: None, require_kyc: false, arbiter: None, disputed: false,
             admin_frozen: false, auction_on_expiry: false, auction_end: 0, bids: Vec::new(env),
             min_payment: 0, min_funding_amount: 0, priorities: Vec::new(env),
-            substitute_recipient_approvals: Vec::new(env),
-            creation_timestamp: 0, min_payment_increment: 0,
         });
 
     env.storage().instance().set(&invoice_key(id), core);
@@ -726,10 +727,6 @@ fn load_invoice(env: &Env, id: u64) -> Invoice {
             target_usd_cents: None,
         });
     
-    // Load compact representation if available
-    if let Some(compact) = env.storage().persistent().get::<_, CompactInvoice>(&invoice_compact_key(id))
-        .or_else(|| env.storage().instance().get(&invoice_compact_key(id)))
-    {
     // Load compact representation if available, then overlay hot fields.
     let mut invoice = if let Some(compact) = env.storage().persistent().get::<_, CompactInvoice>(&invoice_compact_key(id)) {
         Invoice::from_compact(&compact, core, ext, ext2)
@@ -6830,6 +6827,8 @@ impl SplitContract {
             let actor = env.current_contract_address();
             Self::_release(&env, invoice_id, &mut invoice.clone(), &actor);
         }
+    }
+
     // Issue #308: Per-payer claim_refund after deadline
     // -----------------------------------------------------------------------
 
