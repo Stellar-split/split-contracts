@@ -1753,6 +1753,184 @@ fn test_creation_fee_charged_per_invoice_in_batch() {
 }
 
 // ---------------------------------------------------------------------------
+// Batch invoice creation (issue #311)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_batch_create_3_invoices() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    StellarAssetClient::new(&env, &token_id).mint(&creator, &10_000);
+    env.ledger().set_timestamp(1_000);
+
+    c.initialize(&admin, &0_i128, &treasury, &token_id, &0_u32, &None, &0_u32, &0_u32, &0_u64);
+
+    let mut recipients = Vec::new(&env);
+    recipients.push_back(recipient.clone());
+    let mut amounts = Vec::new(&env);
+    amounts.push_back(100_i128);
+
+    let params = types::CreateInvoiceParams {
+        recipients,
+        amounts,
+        token: token_id.clone(),
+        deadline: 9_999,
+    };
+
+    let mut invoices = Vec::new(&env);
+    invoices.push_back(params.clone());
+    invoices.push_back(params.clone());
+    invoices.push_back(params);
+
+    let ids = c.create_invoices_batch(&creator, &invoices);
+    assert_eq!(ids.len(), 3);
+    assert_eq!(ids.get(0).unwrap(), 1);
+    assert_eq!(ids.get(1).unwrap(), 2);
+    assert_eq!(ids.get(2).unwrap(), 3);
+
+    // Verify each invoice was created
+    for i in 0..3 {
+        let inv = c.get_invoice(&(i as u64 + 1));
+        assert_eq!(inv.status, InvoiceStatus::Pending);
+    }
+}
+
+#[test]
+fn test_batch_create_10_invoices() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    StellarAssetClient::new(&env, &token_id).mint(&creator, &100_000);
+    env.ledger().set_timestamp(1_000);
+
+    c.initialize(&admin, &0_i128, &treasury, &token_id, &0_u32, &None, &0_u32, &0_u32, &0_u64);
+
+    let mut recipients = Vec::new(&env);
+    recipients.push_back(recipient.clone());
+    let mut amounts = Vec::new(&env);
+    amounts.push_back(100_i128);
+
+    let params = types::CreateInvoiceParams {
+        recipients,
+        amounts,
+        token: token_id.clone(),
+        deadline: 9_999,
+    };
+
+    let mut invoices = Vec::new(&env);
+    for _ in 0..10 {
+        invoices.push_back(params.clone());
+    }
+
+    let ids = c.create_invoices_batch(&creator, &invoices);
+    assert_eq!(ids.len(), 10);
+    assert_eq!(ids.get(0).unwrap(), 1);
+    assert_eq!(ids.get(9).unwrap(), 10);
+}
+
+#[test]
+fn test_batch_create_exceeds_limit() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    StellarAssetClient::new(&env, &token_id).mint(&creator, &100_000);
+    env.ledger().set_timestamp(1_000);
+
+    c.initialize(&admin, &0_i128, &treasury, &token_id, &0_u32, &None, &0_u32, &0_u32, &0_u64);
+
+    let mut recipients = Vec::new(&env);
+    recipients.push_back(recipient.clone());
+    let mut amounts = Vec::new(&env);
+    amounts.push_back(100_i128);
+
+    let params = types::CreateInvoiceParams {
+        recipients,
+        amounts,
+        token: token_id.clone(),
+        deadline: 9_999,
+    };
+
+    let mut invoices = Vec::new(&env);
+    for _ in 0..11 {
+        invoices.push_back(params.clone());
+    }
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        c.create_invoices_batch(&creator, &invoices);
+    }));
+    assert!(result.is_err(), "expected panic for exceeding batch limit");
+}
+
+#[test]
+fn test_batch_create_with_invalid_item_rejected() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    StellarAssetClient::new(&env, &token_id).mint(&creator, &10_000);
+    env.ledger().set_timestamp(1_000);
+
+    c.initialize(&admin, &0_i128, &treasury, &token_id, &0_u32, &None, &0_u32, &0_u32, &0_u64);
+
+    // Valid params
+    let mut recipients = Vec::new(&env);
+    recipients.push_back(recipient.clone());
+    let mut amounts = Vec::new(&env);
+    amounts.push_back(100_i128);
+    let valid_params = types::CreateInvoiceParams {
+        recipients,
+        amounts,
+        token: token_id.clone(),
+        deadline: 9_999,
+    };
+
+    // Invalid params: past deadline
+    let mut bad_recipients = Vec::new(&env);
+    bad_recipients.push_back(recipient.clone());
+    let mut bad_amounts = Vec::new(&env);
+    bad_amounts.push_back(100_i128);
+    let invalid_params = types::CreateInvoiceParams {
+        recipients: bad_recipients,
+        amounts: bad_amounts,
+        token: token_id.clone(),
+        deadline: 500, // past current timestamp of 1_000
+    };
+
+    let mut invoices = Vec::new(&env);
+    invoices.push_back(valid_params.clone());
+    invoices.push_back(invalid_params);
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        c.create_invoices_batch(&creator, &invoices);
+    }));
+    assert!(result.is_err(), "expected panic for invalid invoice in batch");
+
+    // Verify single invoice creation still works (proving counter wasn't corrupted)
+    let standalone_id = make_invoice(&env, &c, &creator, &recipient, 200, &token_id, 9_999);
+    assert_eq!(standalone_id, 1, "counter should have remained at 0, first invoice gets id 1");
+}
+
+// ---------------------------------------------------------------------------
 // Rollover invoice
 // ---------------------------------------------------------------------------
 

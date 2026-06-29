@@ -22,4 +22,5 @@ pub enum ContractError {
     ContractPaused     = 15,
     InvalidRecipients  = 16,
     PrerequisiteNotMet = 17,
+    BatchLimitExceeded = 18,
 }
