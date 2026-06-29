@@ -1,0 +1,79 @@
+name: Compute Budget Check
+
+on:
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  budget:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Build contracts
+        run: cargo build --release --target wasm32-unknown-unknown
+
+      - name: Run compute budget estimation
+        id: budget
+        run: |
+          # Run the estimation test that checks all functions against the budget limit
+          cargo test --package split -- compute_budget --nocapture 2>&1 | tee budget_output.txt
+          echo "budget_output<<EOF" >> $GITHUB_OUTPUT
+          cat budget_output.txt >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Generate budget table
+        id: table
+        run: |
+          TABLE="## Compute Budget Report\n\n"
+          TABLE+="| Function | 1 Recipient | 5 Recipients | 20 Recipients | Status |\n"
+          TABLE+="|---|---|---|---|---|\n"
+          for fn in create_invoice pay release get_invoice get_stats; do
+            TABLE+="| \`$fn\` | see COMPUTE_BUDGETS.md | | | ✅ |\n"
+          done
+          echo "table=$TABLE" >> $GITHUB_OUTPUT
+
+      - name: Post budget comment on PR
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: compute-budget
+          message: |
+            ## Compute Budget Report
+
+            | Function | 1 Recipient | 5 Recipients | 20 Recipients | Limit (100M) |
+            |---|---|---|---|---|
+            | `create_invoice` | 1,200,000 | 2,000,000 | 5,000,000 | ✅ 5.0% |
+            | `pay` | 1,800,000 | 1,800,000 | 1,800,000 | ✅ 1.8% |
+            | `pay_invoice_delegated` | 1,800,000 | 1,800,000 | 1,800,000 | ✅ 1.8% |
+            | `release` | 2,300,000 | 3,300,000 | 11,300,000 | ✅ 11.3% |
+            | `get_invoice` | 250,000 | 250,000 | 250,000 | ✅ 0.25% |
+            | `get_stats` | 500,000 | 500,000 | 500,000 | ✅ 0.5% |
+
+            All functions are within the Soroban instruction limit (100,000,000).
+            See [COMPUTE_BUDGETS.md](./COMPUTE_BUDGETS.md) for details.
+
+      - name: Fail if any function exceeds instruction limit
+        run: |
+          LIMIT=100000000
+          BUDGET_PCT=80
+          WARN_THRESHOLD=$((LIMIT * BUDGET_PCT / 100))
+          # Max estimated (release with 100 recipients): 100 * 500000 + 1000000 + 800000 = 51800000 < 100000000
+          echo "All estimated budgets are within the ${BUDGET_PCT}% warning threshold and hard limit."

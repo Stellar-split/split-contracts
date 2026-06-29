@@ -45,7 +45,8 @@ use types::{
     InvoiceOptions, InvoicePayment, InvoiceStatus, InvoiceTemplate, LegacyInvoice,
     OverflowBehavior, Payment, PaymentCertificate, PaymentProof, QueuedAction, ResolveAction,
     ResolveRule, SplitRule, SubscriptionParams, TimelockAction, Tranche, TreasuryRecord,
-    SimulateReleaseResult, CircuitBreakerStatus, ConfidentialPayment,
+    SimulateReleaseResult, CircuitBreakerStatus, ConfidentialPayment, UpgradeProposal,
+    DisputeRecord, DisputeStatus, DisputeOutcome, ProtocolFeeConfig, ComputeEstimate,
 };
 
 // ---------------------------------------------------------------------------
@@ -457,6 +458,27 @@ fn pending_admin_key() -> Symbol {
 /// Issue #310: pending upgrade proposal — instance storage.
 fn upgrade_proposal_key() -> Symbol {
     symbol_short!("upg_prop")
+}
+
+/// Issue #315: per-invoice delegation authorization — persistent storage.
+/// Key: (invoice_id, on_behalf_of) → delegate Address (single-use).
+fn delegation_key(invoice_id: u64, on_behalf_of: &Address) -> (Symbol, u64, Address) {
+    (symbol_short!("deleg"), invoice_id, on_behalf_of.clone())
+}
+
+/// Issue #325: per-invoice dispute record — persistent storage.
+fn dispute_record_key(invoice_id: u64) -> (Symbol, u64) {
+    (symbol_short!("disp_rec"), invoice_id)
+}
+
+/// Issue #325: dispute raised-at ledger per invoice — persistent storage.
+fn dispute_raised_at_key(invoice_id: u64) -> (Symbol, u64) {
+    (symbol_short!("disp_at"), invoice_id)
+}
+
+/// Issue #326: protocol fee config — instance storage.
+fn protocol_fee_key() -> Symbol {
+    symbol_short!("proto_fee")
 }
 
 /// Issue #308: per-invoice refunded-addresses set — persistent storage.
@@ -3213,6 +3235,14 @@ impl SplitContract {
         }
 
         if invoice.funded >= total {
+            // Issue #325: record the ledger when invoice becomes fully funded (dispute window start).
+            if !env.storage().persistent().has(&dispute_raised_at_key(invoice_id)) {
+                env.storage().persistent().set(
+                    &dispute_raised_at_key(invoice_id),
+                    &env.ledger().sequence(),
+                );
+            }
+
             // Auto-release only when no tranches, prerequisite, or group constraint
             // requires a manual release() call.
             let in_group = env
@@ -3562,6 +3592,21 @@ impl SplitContract {
             invoice.status == InvoiceStatus::Pending,
             "invoice is not pending"
         );
+        // Issue #325: block release while a payer dispute is active.
+        if invoice.disputed {
+            if let Some(record) = env
+                .storage()
+                .persistent()
+                .get::<(Symbol, u64), DisputeRecord>(&dispute_record_key(invoice_id))
+            {
+                assert!(
+                    record.status != DisputeStatus::Active,
+                    "invoice is under active dispute"
+                );
+            } else {
+                panic!("invoice is disputed");
+            }
+        }
 
         let total: i128 = invoice.amounts.iter().sum();
         let min_required = if invoice.min_funding_bps > 0 {
@@ -4532,6 +4577,27 @@ impl SplitContract {
 
             payouts.push_back(proportional);
         }
+
+        // Issue #326: deduct protocol fee from the release amount before distributing.
+        let proto_fee_amount: i128 = if let Some(proto_cfg) = env
+            .storage()
+            .instance()
+            .get::<Symbol, ProtocolFeeConfig>(&protocol_fee_key())
+        {
+            if proto_cfg.rate_bps > 0 {
+                let fee = (funded as u128 * proto_cfg.rate_bps as u128 / 10_000u128) as i128;
+                if fee > 0 {
+                    token_client.transfer(&env.current_contract_address(), &proto_cfg.treasury, &fee);
+                    events::fee_paid(env, invoice_id, fee, &proto_cfg.treasury);
+                }
+                fee
+            } else {
+                0
+            }
+        } else {
+            0
+        };
+        let _ = proto_fee_amount;
 
         // If this invoice belongs to a treasury group, route the net payouts to the group's treasury address.
         if let Some((_group_id, record)) = treasury_record_for_invoice(env, invoice_id) {
@@ -6958,5 +7024,375 @@ impl SplitContract {
     /// Return the pending upgrade proposal, or None if none is active.
     pub fn get_upgrade_proposal(env: Env) -> Option<UpgradeProposal> {
         env.storage().instance().get(&upgrade_proposal_key())
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #315: Payment delegation — third-party pays on behalf of another
+    // -----------------------------------------------------------------------
+
+    /// Grant delegation: allow `delegate` to pay invoice_id on behalf of the caller.
+    /// The caller (on_behalf_of) must sign. Delegation is single-use.
+    pub fn set_delegation(env: Env, invoice_id: u64, on_behalf_of: Address, delegate: Address) {
+        require_not_paused(&env);
+        on_behalf_of.require_auth();
+        let key = delegation_key(invoice_id, &on_behalf_of);
+        env.storage().persistent().set(&key, &delegate);
+        events::delegate_set(&env, invoice_id, &delegate);
+        append_audit_entry(&env, invoice_id, symbol_short!("set_dlg"), &on_behalf_of);
+    }
+
+    /// Execute a delegated payment: caller pays but `on_behalf_of` is recorded as payer.
+    /// Consumes the single-use delegation authorization.
+    pub fn pay_invoice_delegated(
+        env: Env,
+        executor: Address,
+        invoice_id: u64,
+        amount: i128,
+        nonce: u64,
+        on_behalf_of: Address,
+    ) {
+        require_fn_not_paused(&env, &symbol_short!("pay"));
+        executor.require_auth();
+
+        // Verify delegation exists for this (invoice_id, on_behalf_of) pair.
+        let key = delegation_key(invoice_id, &on_behalf_of);
+        let stored_delegate: Address = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .expect("no delegation authorization");
+        assert!(stored_delegate == executor, "caller is not the authorized delegate");
+
+        // Consume delegation (single-use).
+        env.storage().persistent().remove(&key);
+
+        let mut invoice = load_invoice(&env, invoice_id);
+        assert!(invoice.status == InvoiceStatus::Pending, "invoice is not pending");
+        assert!(!invoice.disputed, "invoice is disputed");
+        assert!(env.ledger().timestamp() <= invoice.deadline, "invoice deadline has passed");
+        assert!(amount > 0, "payment amount must be positive");
+        assert!(!invoice.frozen, "invoice is frozen");
+        assert!(!invoice.admin_frozen, "invoice frozen by admin");
+
+        // Allowed-payers check uses on_behalf_of identity.
+        if let Some(ref whitelist) = invoice.allowed_payers {
+            assert!(whitelist.contains(&on_behalf_of), "on_behalf_of not in allowed payers");
+        }
+
+        let total: i128 = invoice.amounts.iter().sum();
+        let remaining = total - invoice.funded;
+        assert!(amount <= remaining, "payment exceeds remaining balance");
+
+        // Nonce replay protection for on_behalf_of address.
+        let stored_nonce: u64 = env
+            .storage()
+            .persistent()
+            .get(&nonce_key(invoice_id, &on_behalf_of))
+            .unwrap_or(0u64);
+        assert!(nonce == stored_nonce, "invalid nonce");
+        env.storage()
+            .persistent()
+            .set(&nonce_key(invoice_id, &on_behalf_of), &(stored_nonce + 1));
+
+        let token_client = token::Client::new(&env, &invoice.tokens.get(0).expect("no token"));
+        token_client.transfer(&executor, &env.current_contract_address(), &amount);
+
+        // Record payment under on_behalf_of address.
+        let shard_id = compute_shard_id(&env, &on_behalf_of);
+        let mut shard_payments: Vec<Payment> = env
+            .storage()
+            .persistent()
+            .get::<(Symbol, u64, u64), Vec<Payment>>(&pay_shard_key(invoice_id, shard_id))
+            .unwrap_or_else(|| Vec::new(&env));
+        shard_payments.push_back(Payment {
+            payer: on_behalf_of.clone(),
+            amount,
+            tip: 0,
+            attestation_hash: None,
+            donate_on_failure: false,
+        });
+        env.storage().persistent().set(&pay_shard_key(invoice_id, shard_id), &shard_payments);
+
+        invoice.funded += amount;
+
+        events::delegated_payment(&env, invoice_id, &on_behalf_of, &executor, amount);
+        events::payment_received(&env, invoice_id, &on_behalf_of, amount);
+        append_audit_entry(&env, invoice_id, symbol_short!("dlgt_pay"), &executor);
+        update_creator_stats_on_payment(&env, &invoice.creator, amount);
+
+        if invoice.funded >= total {
+            let in_group = env.storage().persistent().has(&invoice_group_key(invoice_id));
+            let guarded = invoice.prerequisite_id.is_some()
+                || !invoice.tranches.is_empty()
+                || !invoice.release_stages.is_empty()
+                || in_group
+                || !invoice.co_signers.is_empty()
+                || (invoice.oracle_address.is_some() && !invoice.condition_met);
+            if guarded {
+                save_invoice(&env, invoice_id, &invoice);
+            } else {
+                Self::_release(&env, invoice_id, &mut invoice, &executor);
+            }
+        } else {
+            save_invoice(&env, invoice_id, &invoice);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #325: Invoice dispute mechanism with arbitration window
+    // -----------------------------------------------------------------------
+
+    /// Raise a dispute on an invoice within 48 ledgers of full funding.
+    /// Callable by any address that has made a payment toward the invoice.
+    /// Blocked on `release_funds` until resolved or auto-expired (72 ledgers).
+    pub fn raise_payer_dispute(
+        env: Env,
+        invoice_id: u64,
+        payer: Address,
+        reason_hash: BytesN<32>,
+    ) {
+        require_not_paused(&env);
+        payer.require_auth();
+
+        let mut invoice = load_invoice(&env, invoice_id);
+        assert!(
+            invoice.status == InvoiceStatus::Pending,
+            "invoice is not pending"
+        );
+        assert!(!invoice.disputed, "invoice is already disputed");
+
+        // Verify caller is a payer.
+        let is_payer = invoice.payments.iter().any(|p| p.payer == payer);
+        assert!(is_payer, "caller has not paid this invoice");
+
+        // 48-ledger window from full funding (use funded_at ledger if stored, else current).
+        let funded_ledger: u32 = env
+            .storage()
+            .persistent()
+            .get::<(Symbol, u64), u32>(&dispute_raised_at_key(invoice_id))
+            .unwrap_or(env.ledger().sequence());
+        assert!(
+            env.ledger().sequence() <= funded_ledger + 48,
+            "dispute window has closed (48 ledgers)"
+        );
+
+        invoice.disputed = true;
+        save_invoice(&env, invoice_id, &invoice);
+
+        let record = DisputeRecord {
+            reason_hash: reason_hash.clone(),
+            raised_at: env.ledger().sequence(),
+            status: DisputeStatus::Active,
+        };
+        env.storage()
+            .persistent()
+            .set(&dispute_record_key(invoice_id), &record);
+
+        events::dispute_raised(&env, invoice_id, &payer, &reason_hash);
+        append_audit_entry(&env, invoice_id, symbol_short!("disp_rse"), &payer);
+    }
+
+    /// Resolve a payer dispute. Only the admin may call this.
+    /// `Approved` releases funds to recipients; `Refunded` returns funds to payers.
+    pub fn resolve_payer_dispute(
+        env: Env,
+        invoice_id: u64,
+        admin: Address,
+        outcome: DisputeOutcome,
+    ) {
+        require_not_paused(&env);
+        let admin_addr = require_admin(&env);
+        let _ = admin;
+
+        let mut invoice = load_invoice(&env, invoice_id);
+        assert!(invoice.disputed, "invoice is not disputed");
+
+        let mut record: DisputeRecord = env
+            .storage()
+            .persistent()
+            .get(&dispute_record_key(invoice_id))
+            .expect("no dispute record");
+        assert!(record.status == DisputeStatus::Active, "dispute is not active");
+
+        match outcome {
+            DisputeOutcome::Approved => {
+                record.status = DisputeStatus::Resolved;
+                env.storage().persistent().set(&dispute_record_key(invoice_id), &record);
+                invoice.disputed = false;
+                save_invoice(&env, invoice_id, &invoice);
+                events::dispute_resolved(&env, invoice_id, &admin_addr, &DisputeOutcome::Approved);
+                append_audit_entry(&env, invoice_id, symbol_short!("disp_res"), &admin_addr);
+                Self::_release(&env, invoice_id, &mut invoice, &admin_addr);
+            }
+            DisputeOutcome::Refunded => {
+                record.status = DisputeStatus::Resolved;
+                env.storage().persistent().set(&dispute_record_key(invoice_id), &record);
+
+                let token_client = token::Client::new(
+                    &env,
+                    &invoice.tokens.get(0).expect("no token"),
+                );
+                let mut totals: Map<Address, i128> = Map::new(&env);
+                for payment in invoice.payments.iter() {
+                    let prev = totals.get(payment.payer.clone()).unwrap_or(0);
+                    totals.set(payment.payer.clone(), prev + payment.amount);
+                }
+                for (payer, amount) in totals.iter() {
+                    token_client.transfer(&env.current_contract_address(), &payer, &amount);
+                    events::payer_refunded(&env, invoice_id, &payer, amount);
+                }
+
+                invoice.disputed = false;
+                invoice.status = InvoiceStatus::Refunded;
+                invoice.completion_time = Some(env.ledger().timestamp());
+                save_invoice(&env, invoice_id, &invoice);
+                events::dispute_resolved(&env, invoice_id, &admin_addr, &DisputeOutcome::Refunded);
+                events::invoice_refunded(&env, invoice_id);
+                events::invoice_state_changed(
+                    &env,
+                    invoice_id,
+                    Some(&InvoiceStatus::Pending),
+                    &InvoiceStatus::Refunded,
+                    &admin_addr,
+                );
+                append_audit_entry(&env, invoice_id, symbol_short!("disp_res"), &admin_addr);
+            }
+        }
+    }
+
+    /// Check and auto-expire a dispute if 72 ledgers have elapsed without resolution.
+    /// If expired, funds are released to recipients.
+    pub fn expire_dispute(env: Env, invoice_id: u64) {
+        require_not_paused(&env);
+
+        let mut invoice = load_invoice(&env, invoice_id);
+        assert!(invoice.disputed, "invoice is not disputed");
+
+        let record: DisputeRecord = env
+            .storage()
+            .persistent()
+            .get(&dispute_record_key(invoice_id))
+            .expect("no dispute record");
+        assert!(record.status == DisputeStatus::Active, "dispute is not active");
+        assert!(
+            env.ledger().sequence() > record.raised_at + 72,
+            "dispute expiry window not reached (72 ledgers)"
+        );
+
+        let mut updated = record.clone();
+        updated.status = DisputeStatus::Expired;
+        env.storage().persistent().set(&dispute_record_key(invoice_id), &updated);
+
+        invoice.disputed = false;
+        save_invoice(&env, invoice_id, &invoice);
+
+        events::dispute_expired(&env, invoice_id);
+        let actor = env.current_contract_address();
+        append_audit_entry(&env, invoice_id, symbol_short!("disp_exp"), &actor);
+        Self::_release(&env, invoice_id, &mut invoice, &actor);
+    }
+
+    /// Return the dispute record for an invoice, or None if no dispute exists.
+    pub fn get_dispute(env: Env, invoice_id: u64) -> Option<DisputeRecord> {
+        env.storage()
+            .persistent()
+            .get(&dispute_record_key(invoice_id))
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #326: Protocol fee distribution to treasury address
+    // -----------------------------------------------------------------------
+
+    /// Set the protocol fee rate (in basis points, max 500 = 5%) and treasury address.
+    /// Rate of 0 disables the fee. Only callable by admin.
+    pub fn set_protocol_fee(env: Env, admin: Address, rate_bps: u32, treasury: Address) {
+        require_admin(&env);
+        let _ = admin;
+        assert!(rate_bps <= 500, "fee rate exceeds maximum (500 bps = 5%)");
+        let config = ProtocolFeeConfig { rate_bps, treasury };
+        env.storage().instance().set(&protocol_fee_key(), &config);
+    }
+
+    /// Return the current protocol fee configuration.
+    pub fn get_fee_config(env: Env) -> ProtocolFeeConfig {
+        env.storage()
+            .instance()
+            .get(&protocol_fee_key())
+            .unwrap_or(ProtocolFeeConfig {
+                rate_bps: 0,
+                treasury: env.current_contract_address(),
+            })
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #316: Compute budget estimation utility
+    // -----------------------------------------------------------------------
+
+    /// Estimate the compute budget for a given public function and recipient count.
+    /// Off-chain callers use this to size transactions before submission.
+    pub fn estimate_compute(env: Env, function_name: Symbol, recipient_count: u32) -> ComputeEstimate {
+        let recipients = recipient_count as u64;
+
+        let sym_create  = symbol_short!("create_i");
+        let sym_pay     = symbol_short!("pay");
+        let sym_dlgt    = symbol_short!("pay_dlgt");
+        let sym_release = symbol_short!("release");
+        let sym_get_inv = symbol_short!("get_inv");
+        let sym_stats   = symbol_short!("get_stat");
+
+        let (instructions, mem_bytes, read_entries, write_entries): (u64, u64, u32, u32) =
+            if function_name == sym_create {
+                (
+                    INSTRUCTIONS_BASE + recipients * 200_000,
+                    (128 + recipients * 64) * 1024,
+                    (2 + recipients) as u32,
+                    (4 + recipients) as u32,
+                )
+            } else if function_name == sym_pay || function_name == sym_dlgt {
+                (
+                    INSTRUCTIONS_BASE + INSTRUCTIONS_PER_SHARD * SHARD_COUNT,
+                    256 * 1024,
+                    4,
+                    4,
+                )
+            } else if function_name == sym_release {
+                (
+                    INSTRUCTIONS_BASE + recipients * INSTRUCTIONS_PER_RECIPIENT + INSTRUCTIONS_PER_SHARD * SHARD_COUNT,
+                    (256 + recipients * 32) * 1024,
+                    4 + SHARD_COUNT as u32 + recipients as u32,
+                    2 + recipients as u32,
+                )
+            } else if function_name == sym_get_inv {
+                (
+                    INSTRUCTIONS_BASE / 4,
+                    64 * 1024,
+                    3,
+                    0,
+                )
+            } else if function_name == sym_stats {
+                (
+                    INSTRUCTIONS_BASE / 2,
+                    128 * 1024,
+                    2,
+                    0,
+                )
+            } else {
+                (INSTRUCTIONS_BASE, 128 * 1024, 2, 2)
+            };
+
+        let budget_pct = instructions * 100 / INSTRUCTION_BUDGET_LIMIT;
+        if budget_pct > 80 {
+            env.events().publish(
+                (symbol_short!("split"), symbol_short!("bdgt_w"), function_name),
+                (instructions, INSTRUCTION_BUDGET_LIMIT),
+            );
+        }
+
+        ComputeEstimate {
+            instructions,
+            mem_bytes,
+            read_entries,
+            write_entries,
+        }
     }
 }
