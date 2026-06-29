@@ -23,4 +23,8 @@ pub enum ContractError {
     InvalidRecipients  = 16,
     PrerequisiteNotMet = 17,
     BatchLimitExceeded = 18,
+    /// Issue #327: Funds are still time-locked and cannot be released yet.
+    FundsLockedUntil   = 18,
+    /// Issue #330: Recipient has already been paid on this invoice.
+    RecipientAlreadyPaid = 19,
 }
