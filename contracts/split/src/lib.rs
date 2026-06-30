@@ -39,6 +39,7 @@ use soroban_sdk::{
     contract, contractimpl, symbol_short, token, Address, Bytes, BytesN, Env, IntoVal, Map, Symbol, Val, Vec,
 };
 use soroban_sdk::xdr::ToXdr;
+use error::ContractError;
 use types::{
     AdminRole, AuditEntry, Bid, CloneOverrides, CompactInvoice, CompletionProof, CreatorStats,
     CreateInvoiceParams, FeeTier, Invoice, InvoiceCore, InvoiceExt, InvoiceExt2, InvoiceExt3,
@@ -2721,6 +2722,95 @@ impl SplitContract {
                 None, // scheduled_release_at
                 None, // release_delay_ledgers
                 None, // metadata_hash
+            );
+            ids.push_back(id);
+        }
+        ids
+    }
+
+    /// Create up to 10 invoices in a single atomic transaction.
+    ///
+    /// All invoices are validated independently; if any single invoice fails
+    /// validation the entire batch is rejected and no invoices are created.
+    /// Invoice IDs are assigned sequentially from the current counter and all
+    /// `InvoiceCreated` events are emitted in the same transaction.
+    ///
+    /// Returns a `Vec` of the newly assigned invoice IDs (in order).
+    pub fn create_invoices_batch(
+        env: Env,
+        creator: Address,
+        params_list: Vec<CreateInvoiceParams>,
+    ) -> Vec<u64> {
+        creator.require_auth();
+        if params_list.len() > 10 {
+            panic!("BatchLimitExceeded");
+        }
+
+        // Pre-validate all invoices before creating any —
+        // ensures atomicity: all succeed or none are created.
+        for params in params_list.iter() {
+            assert!(
+                params.recipients.len() == params.amounts.len(),
+                "recipients and amounts length mismatch"
+            );
+            assert!(!params.recipients.is_empty(), "must have at least one recipient");
+            assert!(
+                params.deadline > env.ledger().timestamp(),
+                "deadline must be in the future"
+            );
+            for amt in params.amounts.iter() {
+                assert!(amt > 0, "amounts must be positive");
+            }
+        }
+
+        let mut ids: Vec<u64> = Vec::new(&env);
+        for params in params_list.iter() {
+            let id = Self::_create_invoice_inner(
+                &env,
+                creator.clone(),
+                params.recipients,
+                params.amounts,
+                params.token,
+                params.deadline,
+                Vec::new(&env),  // co_creators
+                false,            // allow_early_withdrawal
+                0_i128,           // bonus_pool
+                0_u32,            // bonus_max_payers
+                None,             // prerequisite_id
+                Vec::new(&env),   // tranches
+                Vec::new(&env),   // co_signers
+                0_u32,            // required_signatures
+                0_u32,            // penalty_bps
+                0_u64,            // penalty_deadline
+                0_u32,            // min_funding_bps
+                Vec::new(&env),   // release_stages
+                None,             // price_oracle
+                Vec::new(&env),   // swap_tokens
+                None,             // oracle_address
+                0_u32,            // tax_bps
+                None,             // tax_authority
+                0_u32,            // insurance_premium_bps
+                false,            // smart_route
+                None,             // notification_contract
+                OverflowBehavior::Reject,
+                false,            // convert_to_stream
+                Vec::new(&env),   // accepted_tokens
+                None,             // forward_to
+                None,             // forward_invoice_id
+                None,             // creator_cosigner
+                0_i128,           // velocity_limit
+                0_u64,            // velocity_window
+                Vec::new(&env),   // split_rules
+                Vec::new(&env),   // auto_resolve_rules
+                None,             // cross_chain_ref
+                None,             // allowed_payers
+                None,             // payment_cooldown_secs
+                None,             // max_payments_per_window
+                None,             // payment_window_secs
+                None,             // refund_grace_secs
+                Vec::new(&env),   // priorities
+                false,            // require_kyc
+                None,             // scheduled_release_at
             );
             ids.push_back(id);
         }
