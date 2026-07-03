@@ -43,7 +43,7 @@ use error::ContractError;
 use types::{
     AdminRole, AuditEntry, Bid, CloneOverrides, CompactInvoice, CompletionProof, CreatorStats,
     CreateInvoiceParams, FeeTier, Invoice, InvoiceCore, InvoiceExt, InvoiceExt2, InvoiceExt3,
-    InvoiceHot, InvoiceOptions, InvoicePayment, InvoiceStatus, InvoiceTemplate, LegacyInvoice,
+    InvoiceHot, InvoiceOptions, InvoiceOptions2, InvoicePayment, InvoiceStatus, InvoiceTemplate, LegacyInvoice,
     OverflowBehavior, Payment, PaymentCertificate, PaymentProof, QueuedAction, ResolveAction,
     ResolveRule, SplitRule, SubscriptionParams, TimelockAction, Tranche, TreasuryRecord,
     SimulateReleaseResult, CircuitBreakerStatus, ConfidentialPayment, UpgradeProposal,
@@ -629,8 +629,7 @@ fn archive_invoice_storage(env: &Env, id: u64, core: &InvoiceCore) {
             velocity_window: 0, parent_invoice_id: None, pause_reason: None, auto_resume_at: None,
             payment_cooldown_secs: None, max_payments_per_window: None, payment_window_secs: None,
             scheduled_release_at: None, refund_grace_secs: None,
-            penalty_tiers: Vec::new(env), allowed_callers: None, fallback_action: None,
-            external_prerequisite: None,
+            penalty_tiers: Vec::new(env), allowed_callers: None,
         });
     let ext2: InvoiceExt2 = env.storage().persistent()
         .get(&invoice_ext2_key(id))
@@ -640,6 +639,7 @@ fn archive_invoice_storage(env: &Env, id: u64, core: &InvoiceCore) {
             cross_chain_ref: None, require_kyc: false, arbiter: None, disputed: false,
             admin_frozen: false, auction_on_expiry: false, auction_end: 0, bids: Vec::new(env),
             min_payment: 0, min_funding_amount: 0, priorities: Vec::new(env),
+            target_usd_cents: None, refunded_addresses: Vec::new(env),
         });
 
     env.storage().instance().set(&invoice_key(id), core);
@@ -663,7 +663,7 @@ fn archive_invoice_storage(env: &Env, id: u64, core: &InvoiceCore) {
         env.storage().persistent().remove(&shard_key);
     }
 
-    if let Some(audit_log) = env.storage().persistent().get(&audit_log_key(id)) {
+    if let Some(audit_log) = env.storage().persistent().get::<_, Vec<AuditEntry>>(&audit_log_key(id)) {
         env.storage().instance().set(&audit_log_key(id), &audit_log);
     }
     env.storage().persistent().remove(&invoice_key(id));
@@ -671,7 +671,7 @@ fn archive_invoice_storage(env: &Env, id: u64, core: &InvoiceCore) {
     env.storage().persistent().remove(&invoice_ext2_key(id));
     env.storage().persistent().remove(&invoice_compact_key(id));
     env.storage().persistent().remove(&audit_log_key(id));
-    env.storage().instance().set(&created_ledger_key(id), &env.storage().persistent().get(&created_ledger_key(id)).unwrap_or(env.ledger().sequence()));
+    env.storage().instance().set(&created_ledger_key(id), &env.storage().persistent().get::<_, u32>(&created_ledger_key(id)).unwrap_or_else(|| env.ledger().sequence()));
 }
 
 fn maybe_archive_invoice(env: &Env, id: u64) {
@@ -690,9 +690,9 @@ fn maybe_archive_invoice(env: &Env, id: u64) {
         return;
     }
 
-    let created_ledger: u64 = env.storage().persistent().get(&created_ledger_key(id)).or_else(|| env.storage().instance().get(&created_ledger_key(id))).unwrap_or_else(|| env.ledger().sequence());
+    let created_ledger: u64 = env.storage().persistent().get(&created_ledger_key(id)).or_else(|| env.storage().instance().get(&created_ledger_key(id))).unwrap_or_else(|| env.ledger().sequence() as u64);
     let archive_after = env.storage().instance().get(&archive_after_ledgers_key()).unwrap_or(ARCHIVE_AFTER_LEDGERS);
-    if env.ledger().sequence().saturating_sub(created_ledger) < archive_after {
+    if (env.ledger().sequence() as u64).saturating_sub(created_ledger) < archive_after {
         return;
     }
 
@@ -774,7 +774,6 @@ fn load_invoice(env: &Env, id: u64) -> Invoice {
             penalty_tiers: Vec::new(env),
             allowed_callers: None,
             refund_grace_secs: None,
-            refunded_addresses: Vec::new(env),
         });
     let ext2: InvoiceExt2 = env.storage().persistent()
         .get(&invoice_ext2_key(id))
@@ -794,6 +793,7 @@ fn load_invoice(env: &Env, id: u64) -> Invoice {
             min_funding_amount: 0,
             priorities: Vec::new(env),
             target_usd_cents: None,
+            refunded_addresses: Vec::new(env),
         });
     
     // Load compact representation if available, then overlay hot fields.
@@ -816,7 +816,7 @@ fn load_invoice(env: &Env, id: u64) -> Invoice {
 fn save_invoice(env: &Env, id: u64, invoice: &Invoice) {
     // Issue #286: Verify invariants before saving
     debug_assert!(
-        invoice.funded <= invoice.amounts.iter().sum(),
+        invoice.funded <= invoice.amounts.iter().sum::<i128>(),
         "invariant: funded exceeds total"
     );
 
@@ -1763,7 +1763,6 @@ impl SplitContract {
                         penalty_tiers: Vec::new(&env),
                         allowed_callers: None,
                         refund_grace_secs: None,
-                        refunded_addresses: Vec::new(&env),
                     })
             });
         let ext2: types::InvoiceExt2 = env
@@ -1789,6 +1788,7 @@ impl SplitContract {
                         min_funding_amount: 0,
                         priorities: Vec::new(&env),
                         target_usd_cents: None,
+                        refunded_addresses: Vec::new(&env),
                     })
             });
         let audit_log: Vec<types::AuditEntry> = get_audit_log(&env, invoice_id);
@@ -2120,6 +2120,7 @@ impl SplitContract {
         token: Address,
         deadline: u64,
         options: InvoiceOptions,
+        opts2: InvoiceOptions2,
     ) -> u64 {
         // Check if contract is paused, but allow exempt creators
         let is_paused = is_paused(&env);
@@ -2156,7 +2157,7 @@ impl SplitContract {
             recipients,
             amounts,
             // Issue #307: if payment_token is explicitly set, use it instead of the token param.
-            options.payment_token.unwrap_or(token),
+            opts2.payment_token.unwrap_or(token),
             deadline,
             options.co_creators,
             options.allow_early_withdrawal,
@@ -2197,8 +2198,9 @@ impl SplitContract {
             options.priorities,
             options.require_kyc,
             options.scheduled_release_at,
-            options.release_delay_ledgers,
-            options.metadata_hash,
+            opts2.release_delay_ledgers,
+            opts2.metadata_hash,
+            opts2.target_usd_cents,
         )
     }
 
@@ -2251,6 +2253,7 @@ impl SplitContract {
         scheduled_release_at: Option<u64>,
         release_delay_ledgers: Option<u32>,
         metadata_hash: Option<BytesN<32>>,
+        target_usd_cents: Option<u64>,
     ) -> u64 {
         assert!(
             recipients.len() == amounts.len(),
@@ -2572,7 +2575,7 @@ impl SplitContract {
             refunded_addresses: Vec::new(env),
             admin_frozen: false,
             min_funding_amount: 0,
-            target_usd_cents: None,
+            target_usd_cents,
         };
 
         save_invoice(env, id, &invoice);
@@ -2722,6 +2725,7 @@ impl SplitContract {
                 None, // scheduled_release_at
                 None, // release_delay_ledgers
                 None, // metadata_hash
+                None, // target_usd_cents
             );
             ids.push_back(id);
         }
@@ -2811,6 +2815,9 @@ impl SplitContract {
                 Vec::new(&env),   // priorities
                 false,            // require_kyc
                 None,             // scheduled_release_at
+                None,             // release_delay_ledgers
+                None,             // metadata_hash
+                None,             // target_usd_cents
             );
             ids.push_back(id);
         }
@@ -2887,6 +2894,7 @@ impl SplitContract {
             None, // scheduled_release_at
             None, // release_delay_ledgers
             None, // metadata_hash
+            None, // target_usd_cents
         );
 
         if months > 1 {
@@ -5437,6 +5445,7 @@ impl SplitContract {
                 None, // scheduled_release_at
                 None, // release_delay_ledgers
                 None, // metadata_hash
+                None, // target_usd_cents
             );
             env.storage()
                 .persistent()
@@ -6067,6 +6076,7 @@ impl SplitContract {
             old_invoice.scheduled_release_at,
             None, // release_delay_ledgers
             None, // metadata_hash
+            None, // target_usd_cents
         );
 
         // Copy payments from shards to new invoice (issue #177).
@@ -6339,6 +6349,7 @@ impl SplitContract {
             None, // scheduled_release_at
             None, // release_delay_ledgers
             None, // metadata_hash
+            None, // target_usd_cents
         )
     }
 
@@ -6822,7 +6833,6 @@ impl SplitContract {
                 payment_cooldown_secs: None, max_payments_per_window: None, payment_window_secs: None,
                 scheduled_release_at: None, refund_grace_secs: None,
                 penalty_tiers: Vec::new(&env), allowed_callers: None,
-                refunded_addresses: Vec::new(&env),
             });
         let ext2: InvoiceExt2 = env.storage().persistent()
             .get(&invoice_ext2_key(invoice_id))
@@ -6832,7 +6842,7 @@ impl SplitContract {
                 admin_frozen: false,
                 auction_on_expiry: false, auction_end: 0, bids: Vec::new(&env),
                 min_payment: 0, min_funding_amount: 0, priorities: Vec::new(&env),
-                target_usd_cents: None,
+                target_usd_cents: None, refunded_addresses: Vec::new(&env),
             });
 
         // Copy to instance storage.
@@ -6887,7 +6897,7 @@ impl SplitContract {
                         admin_frozen: false,
                         auction_on_expiry: false, auction_end: 0, bids: Vec::new(&env),
                         min_payment: 0, min_funding_amount: 0, priorities: Vec::new(&env),
-                        target_usd_cents: None,
+                        target_usd_cents: None, refunded_addresses: Vec::new(&env),
                     });
 
                 env.storage().instance().set(&invoice_key(id), &core);
@@ -7317,11 +7327,11 @@ impl SplitContract {
         // Verify the range proof: concatenate commitment bytes + range_proof then hash.
         // A valid proof produces a non-zero 32-byte digest (placeholder for full ZK verify).
         let mut preimage = Bytes::new(&env);
-        preimage.append(&commitment.into());
+        preimage.append(&commitment.clone().into());
         preimage.append(&range_proof);
         let proof_hash = env.crypto().sha256(&preimage);
         let zero: BytesN<32> = BytesN::from_array(&env, &[0u8; 32]);
-        assert!(proof_hash != zero, "invalid range proof");
+        assert!(proof_hash.to_bytes() != zero, "invalid range proof");
 
         let record = ConfidentialPayment {
             commitment,

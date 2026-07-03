@@ -261,6 +261,13 @@ pub struct InvoiceOptions {
     pub scheduled_release_at: Option<u64>,
     /// KYC verification requirement.
     pub require_kyc: bool,
+}
+
+/// Overflow options for `create_invoice`, split off from [`InvoiceOptions`] to stay within
+/// Soroban's 40-field `#[contracttype]` limit.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct InvoiceOptions2 {
     /// Issue #274: invoice target in USD cents; used with price_oracle for dynamic funding.
     pub target_usd_cents: Option<u64>,
     /// Issue #307: explicit payment token override; uses this token instead of the invoice base token.
@@ -376,8 +383,6 @@ pub struct InvoiceExt {
     pub penalty_tiers: Vec<PenaltyTier>,
     pub allowed_callers: Option<Vec<Address>>,
     pub refund_grace_secs: Option<u64>,
-    /// Issue #308: addresses that have already claimed a per-payer refund on this invoice.
-    pub refunded_addresses: Vec<Address>,
 }
 
 #[contracttype]
@@ -400,6 +405,8 @@ pub struct InvoiceExt2 {
     pub priorities: Vec<u32>,
     /// Issue #274: invoice target in USD cents for oracle-based dynamic funding.
     pub target_usd_cents: Option<u64>,
+    /// Issue #308: addresses that have already claimed a per-payer refund on this invoice.
+    pub refunded_addresses: Vec<Address>,
 }
 
 /// Issue #211: A single escalating penalty tier (seconds_after_deadline, bps).
@@ -584,7 +591,6 @@ impl Invoice {
                 penalty_tiers: self.penalty_tiers,
                 allowed_callers: self.allowed_callers,
                 refund_grace_secs: self.refund_grace_secs,
-                refunded_addresses: self.refunded_addresses,
             },
             InvoiceExt2 {
                 notification_contract: self.notification_contract,
@@ -601,6 +607,7 @@ impl Invoice {
                 min_funding_amount: self.min_funding_amount,
                 priorities: self.priorities,
                 target_usd_cents: self.target_usd_cents,
+                refunded_addresses: self.refunded_addresses,
             },
         )
     }
@@ -669,7 +676,6 @@ impl Invoice {
             penalty_tiers: ext.penalty_tiers,
             allowed_callers: ext.allowed_callers,
             refund_grace_secs: ext.refund_grace_secs,
-            refunded_addresses: ext.refunded_addresses,
             notification_contract: ext2.notification_contract,
             overflow_behavior: ext2.overflow_behavior,
             cross_chain_ref: ext2.cross_chain_ref,
@@ -684,6 +690,7 @@ impl Invoice {
             min_funding_amount: ext2.min_funding_amount,
             priorities: ext2.priorities,
             target_usd_cents: ext2.target_usd_cents,
+            refunded_addresses: ext2.refunded_addresses,
         }
     }
 }

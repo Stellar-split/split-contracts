@@ -24,7 +24,7 @@ pub enum ContractError {
     PrerequisiteNotMet = 17,
     BatchLimitExceeded = 18,
     /// Issue #327: Funds are still time-locked and cannot be released yet.
-    FundsLockedUntil   = 18,
+    FundsLockedUntil   = 20,
     /// Issue #330: Recipient has already been paid on this invoice.
     RecipientAlreadyPaid = 19,
 }
