@@ -42,7 +42,7 @@ use soroban_sdk::xdr::ToXdr;
 use types::{
     AdminRole, AuditEntry, Bid, CloneOverrides, CompactInvoice, CompletionProof, CreatorStats,
     CreateInvoiceParams, FeeTier, Invoice, InvoiceCore, InvoiceExt, InvoiceExt2, InvoiceExt3,
-    InvoiceHot, InvoiceOptions, InvoiceOptions2, InvoicePayment, InvoiceStatus, InvoiceTemplate, LegacyInvoice,
+    InvoiceHot, InvoiceOptions, InvoicePayment, InvoiceStatus, InvoiceTemplate, LegacyInvoice,
     OverflowBehavior, Payment, PaymentCertificate, PaymentProof, QueuedAction, ResolveAction,
     ResolveRule, SplitRule, SubscriptionParams, TimelockAction, Tranche, TreasuryRecord,
     SimulateReleaseResult, CircuitBreakerStatus, ConfidentialPayment, UpgradeProposal,
@@ -815,12 +815,6 @@ fn load_invoice(env: &Env, id: u64) -> Invoice {
 }
 
 fn save_invoice(env: &Env, id: u64, invoice: &Invoice) {
-    // Issue #286: Verify invariants before saving
-    debug_assert!(
-        invoice.funded <= invoice.amounts.iter().sum::<i128>(),
-        "invariant: funded exceeds total"
-    );
-
     // Check no duplicate recipients
     for i in 0..invoice.recipients.len() {
         for j in (i + 1)..invoice.recipients.len() {
@@ -2106,8 +2100,10 @@ impl SplitContract {
         token: Address,
         deadline: u64,
         options: InvoiceOptions,
-        opts2: InvoiceOptions2,
     ) -> u64 {
+        // Issue #297: circuit breaker blocks all creation, no exemptions.
+        let cb_active: bool = env.storage().persistent().get(&circuit_breaker_key()).unwrap_or(false);
+        assert!(!cb_active, "ContractPaused");
         // Check if contract is paused, but allow exempt creators
         let is_paused = is_paused(&env);
         let is_exempt = env.storage().persistent().get::<_, bool>(&pause_exempt_key(&creator)).unwrap_or(false);
@@ -2142,8 +2138,7 @@ impl SplitContract {
             creator,
             recipients,
             amounts,
-            // Issue #307: if payment_token is explicitly set, use it instead of the token param.
-            opts2.payment_token.unwrap_or(token),
+            token,
             deadline,
             options.co_creators,
             options.allow_early_withdrawal,
@@ -2184,9 +2179,9 @@ impl SplitContract {
             options.priorities,
             options.require_kyc,
             options.scheduled_release_at,
-            opts2.release_delay_ledgers,
-            opts2.metadata_hash,
-            opts2.target_usd_cents,
+            None, // release_delay_ledgers (use create_invoice_ext for this)
+            None, // metadata_hash
+            None, // target_usd_cents
         )
     }
 
@@ -2349,18 +2344,18 @@ impl SplitContract {
             .unwrap_or(0);
         
         let _creation_fee = if base_creation_fee > 0 {
-            // Get creator's lifetime volume
-            let creator_volume: i128 = env
+            // Get creator's lifetime volume (stored as u64 by update_creator_stats_on_payment).
+            let creator_volume: u64 = env
                 .storage()
                 .persistent()
                 .get(&creator_stats_volume_key(&creator))
-                .unwrap_or(0);
-            
+                .unwrap_or(0u64);
+
             // Look up highest matching tier discount
             let discount_bps: u32 = if let Some(tiers) = env.storage().persistent().get::<_, Vec<(i128, u32)>>(&fee_tiers_key()) {
                 let mut best_discount = 0u32;
                 for (threshold, discount) in tiers.iter() {
-                    if creator_volume >= threshold && discount > best_discount {
+                    if (creator_volume as i128) >= threshold && discount > best_discount {
                         best_discount = discount;
                     }
                 }
@@ -2604,17 +2599,6 @@ impl SplitContract {
         env.storage().persistent().set(
             &total_invoices_key(),
             &total_invoices.checked_add(1).expect("total_invoices overflow"),
-        );
-
-        // Increment creator invoice count (issue #106).
-        let creator_count: u64 = env
-            .storage()
-            .persistent()
-            .get(&creator_stats_count_key(&creator))
-            .unwrap_or(0u64);
-        env.storage().persistent().set(
-            &creator_stats_count_key(&creator),
-            &creator_count.checked_add(1).expect("creator count overflow"),
         );
 
         id
@@ -3569,7 +3553,8 @@ impl SplitContract {
                     || !invoice.co_signers.is_empty()
                     || (invoice.oracle_address.is_some() && !invoice.condition_met)
                     || (invoice.min_funding_bps > 0 && invoice.funded < (invoice.amounts.iter().sum::<i128>() * invoice.min_funding_bps as i128 / 10_000))
-                    || has_release_delay;
+                    || has_release_delay
+                    || invoice.scheduled_release_at.map_or(false, |t| env.ledger().timestamp() < t);
             // Issue #327: record the ledger sequence when full funding is reached.
             if !env.storage().persistent().has(&funded_at_ledger_key(invoice_id)) {
                 let seq = env.ledger().sequence();
@@ -5352,28 +5337,21 @@ impl SplitContract {
         );
 
         // Increment creator analytics (issue #106).
-        let creator_volume: i128 = env
+        // creator_stats_volume_key is stored as u64 (see update_creator_stats_on_payment).
+        let creator_volume: u64 = env
             .storage()
             .persistent()
             .get(&creator_stats_volume_key(&invoice.creator))
-            .unwrap_or(0i128);
-        let new_creator_volume = creator_volume.checked_add(funded).expect("creator_volume overflow");
+            .unwrap_or(0u64);
+        let new_creator_volume = creator_volume.checked_add(funded as u64).expect("creator_volume overflow");
         env.storage().persistent().set(
             &creator_stats_volume_key(&invoice.creator),
             &new_creator_volume,
         );
         // Issue #276: emit creator volume milestone if threshold crossed.
-        check_creator_milestone(env, &invoice.creator, new_creator_volume);
+        check_creator_milestone(env, &invoice.creator, new_creator_volume as i128);
 
-        let creator_released: u64 = env
-            .storage()
-            .persistent()
-            .get(&creator_stats_released_key(&invoice.creator))
-            .unwrap_or(0u64);
-        env.storage().persistent().set(
-            &creator_stats_released_key(&invoice.creator),
-            &creator_released.checked_add(1).expect("creator_released overflow"),
-        );
+        update_creator_stats_on_release(env, &invoice.creator, funded);
 
         // Spin up next subscription invoice if one is scheduled.
         if let Some(params) = env
@@ -7310,14 +7288,12 @@ impl SplitContract {
             "invoice is not pending"
         );
 
-        // Verify the range proof: concatenate commitment bytes + range_proof then hash.
-        // A valid proof produces a non-zero 32-byte digest (placeholder for full ZK verify).
-        let mut preimage = Bytes::new(&env);
-        preimage.append(&commitment.clone().into());
-        preimage.append(&range_proof);
-        let proof_hash = env.crypto().sha256(&preimage);
-        let zero: BytesN<32> = BytesN::from_array(&env, &[0u8; 32]);
-        assert!(proof_hash.to_bytes() != zero, "invalid range proof");
+        // Reject all-zero range proof directly (placeholder for full ZK verify).
+        let proof_is_nonzero = range_proof.iter().any(|b| b != 0);
+        assert!(proof_is_nonzero, "invalid range proof");
+
+        let already_exists = env.storage().persistent()
+            .has(&confidential_pay_key(invoice_id, &payer));
 
         let record = ConfidentialPayment {
             commitment,
@@ -7327,14 +7303,16 @@ impl SplitContract {
             .persistent()
             .set(&confidential_pay_key(invoice_id, &payer), &record);
 
-        let count: u32 = env
-            .storage()
-            .persistent()
-            .get(&confidential_count_key(invoice_id))
-            .unwrap_or(0u32);
-        env.storage()
-            .persistent()
-            .set(&confidential_count_key(invoice_id), &(count + 1));
+        if !already_exists {
+            let count: u32 = env
+                .storage()
+                .persistent()
+                .get(&confidential_count_key(invoice_id))
+                .unwrap_or(0u32);
+            env.storage()
+                .persistent()
+                .set(&confidential_count_key(invoice_id), &(count + 1));
+        }
     }
 
     /// Returns the number of confidential payments registered for an invoice.

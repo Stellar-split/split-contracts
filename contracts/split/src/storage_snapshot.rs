@@ -1,11 +1,22 @@
 #![cfg(test)]
 
+extern crate std;
+
+use std::collections::HashSet;
+use std::string::String as StdString;
+use std::string::ToString;
+use std::vec::Vec as StdVec;
+
 use super::*;
 use soroban_sdk::{xdr::ToXdr, Env};
 
-fn hex_xdr(env: &Env, val: impl ToXdr) -> String {
+fn hex_xdr(env: &Env, val: impl ToXdr) -> StdString {
     let bytes = val.to_xdr(env);
-    bytes.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().concat()
+    bytes
+        .iter()
+        .map(|b| std::format!("{:02x}", b))
+        .collect::<StdVec<_>>()
+        .concat()
 }
 
 #[test]
@@ -15,7 +26,7 @@ fn storage_key_snapshot() {
     let a = Address::from_str(&env, "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF");
     let s = symbol_short!("x");
 
-    let mut keys: Vec<(&str, String)> = Vec::new();
+    let mut keys: StdVec<(&str, StdString)> = StdVec::new();
 
     // -----------------------------------------------------------------------
     // Instance-tier keys (contract-level singletons, return Symbol)
@@ -152,10 +163,10 @@ fn storage_key_snapshot() {
     // Collision check
     // -----------------------------------------------------------------------
     {
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = HashSet::new();
         for (name, xdr) in &keys {
             assert!(
-                seen.insert(xdr),
+                seen.insert(xdr.clone()),
                 "Collision detected: '{}' has the same XDR as another key",
                 name,
             );
@@ -165,19 +176,19 @@ fn storage_key_snapshot() {
     // -----------------------------------------------------------------------
     // Build expected snapshot JSON
     // -----------------------------------------------------------------------
-    let mut lines: Vec<String> = Vec::new();
+    let mut lines: StdVec<StdString> = StdVec::new();
     lines.push("{".to_string());
-    lines.push(format!("  \"_comment\": \"Storage key XDR snapshot — see README Storage Key Registry section for policy.\","));
-    lines.push(format!("  \"_keys_introduced\": \"Snapshot introduced with #331. Add your key name and XDR here.\","));
-    lines.push(format!("  \"version\": \"1\","));
-    lines.push(format!("  \"keys\": {{"));
+    lines.push(std::format!("  \"_comment\": \"Storage key XDR snapshot — see README Storage Key Registry section for policy.\","));
+    lines.push(std::format!("  \"_keys_introduced\": \"Snapshot introduced with #331. Add your key name and XDR here.\","));
+    lines.push(std::format!("  \"version\": \"1\","));
+    lines.push(std::format!("  \"keys\": {{"));
     for (i, (name, xdr)) in keys.iter().enumerate() {
         let comma = if i == keys.len() - 1 { "" } else { "," };
-        lines.push(format!("    \"{}\": \"{}\"{}", name, xdr, comma));
+        lines.push(std::format!("    \"{}\": \"{}\"{}", name, xdr, comma));
     }
-    lines.push(format!("  }}"));
-    lines.push(format!("}}"));
-    lines.push(String::new());
+    lines.push(std::format!("  }}"));
+    lines.push(std::format!("}}"));
+    lines.push(StdString::new());
     let generated = lines.join("\n");
 
     // -----------------------------------------------------------------------
