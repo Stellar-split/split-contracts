@@ -39,7 +39,6 @@ use soroban_sdk::{
     contract, contractimpl, symbol_short, token, Address, Bytes, BytesN, Env, IntoVal, Map, Symbol, Val, Vec,
 };
 use soroban_sdk::xdr::ToXdr;
-use error::ContractError;
 use types::{
     AdminRole, AuditEntry, Bid, CloneOverrides, CompactInvoice, CompletionProof, CreatorStats,
     CreateInvoiceParams, FeeTier, Invoice, InvoiceCore, InvoiceExt, InvoiceExt2, InvoiceExt3,
@@ -48,7 +47,7 @@ use types::{
     ResolveRule, SplitRule, SubscriptionParams, TimelockAction, Tranche, TreasuryRecord,
     SimulateReleaseResult, CircuitBreakerStatus, ConfidentialPayment, UpgradeProposal,
     DisputeRecord, DisputeStatus, DisputeOutcome, ProtocolFeeConfig, ComputeEstimate,
-    CompactMigrateResult, ReleaseResult,
+    CompactMigrateResult,
 };
 
 // ---------------------------------------------------------------------------
@@ -144,6 +143,7 @@ fn amounts_list_key(id: u64) -> (Symbol, u64) {
     (symbol_short!("amt_lst"), id)
 }
 /// Issue #332: u32 bit-vector of paid flags — persistent storage.
+#[cfg(test)]
 fn paid_flags_key(id: u64) -> (Symbol, u64) {
     (symbol_short!("paid_flg"), id)
 }
@@ -529,6 +529,7 @@ fn protocol_fee_key() -> Symbol {
 }
 
 /// Issue #308: per-invoice refunded-addresses set — persistent storage.
+#[cfg(test)]
 fn refunded_key(invoice_id: u64) -> (Symbol, u64) {
     (symbol_short!("refunded"), invoice_id)
 }
@@ -1032,12 +1033,6 @@ fn load_treasury_record(env: &Env, group_id: u64) -> TreasuryRecord {
         .expect("treasury record not found")
 }
 
-fn save_invoice_ext(env: &Env, id: u64, ext: &InvoiceExt) {
-    env.storage()
-        .persistent()
-        .set(&invoice_ext_key(id), ext);
-}
-
 // ---------------------------------------------------------------------------
 // Issue #332: Recipient list helpers (optimised iteration)
 // ---------------------------------------------------------------------------
@@ -1140,15 +1135,6 @@ fn save_compact_status(env: &Env, id: u64, status: &InvoiceStatus) {
     env.storage()
         .persistent()
         .set(&compact_status_key(id), &byte);
-}
-
-/// Read the compact status byte.  Returns `None` when the invoice has not yet
-/// been migrated (the `compact_status_key` entry is absent).
-fn load_compact_status(env: &Env, id: u64) -> Option<InvoiceStatus> {
-    env.storage()
-        .persistent()
-        .get::<_, u32>(&compact_status_key(id))
-        .map(|v| InvoiceStatus::from_u8(v as u8))
 }
 
 fn maybe_record_refunded(env: &Env, creator: &Address) {
@@ -1855,7 +1841,7 @@ impl SplitContract {
     /// Admin function to set up to 5 fee tiers sorted by volume threshold.
     /// Requires admin auth.
     pub fn set_fee_tiers(env: Env, admin: Address, tiers: Vec<FeeTier>) {
-        let admin_addr = require_admin(&env);
+        let _admin_addr = require_admin(&env);
         let _ = admin;
 
         debug_assert!(tiers.len() <= 5, "Maximum 5 fee tiers allowed");

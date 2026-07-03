@@ -316,6 +316,7 @@ pub fn fee_tiers_updated(env: &Env, tier_count: u32) {
 /// Issue #285: Emitted when a fee tier is applied at release time.
 /// Topics: (split, fee_tier_applied, creator)
 /// Data: (tier_index, fee_bps, creator_volume)
+#[allow(dead_code)]
 pub fn fee_tier_applied(env: &Env, creator: &Address, tier_index: u32, fee_bps: u32, creator_volume: u64) {
     env.events().publish(
         (symbol_short!("split"), symbol_short!("fee_app"), creator.clone()),
@@ -326,6 +327,7 @@ pub fn fee_tier_applied(env: &Env, creator: &Address, tier_index: u32, fee_bps: 
 /// Issue #299: Emitted when creator stats are updated.
 /// Topics: (split, creator_stats_updated, creator)
 /// Data: (total_invoices, total_raised, total_released, total_payers, avg_funding_time)
+#[allow(dead_code)]
 pub fn creator_stats_updated(env: &Env, creator: &Address, total_invoices: u32, total_raised: u64, total_released: u64, total_payers: u32, avg_funding_time_ledgers: u32) {
     env.events().publish(
         (symbol_short!("split"), symbol_short!("stats_upd"), creator.clone()),
