@@ -148,6 +148,17 @@ fn paid_flags_key(id: u64) -> (Symbol, u64) {
     (symbol_short!("paid_flg"), id)
 }
 
+/// Issue #163: pending recipient-replacement proposal (old_recipient -> new_recipient).
+fn replacement_proposal_key(id: u64) -> (Symbol, u64) {
+    (symbol_short!("rep_prop"), id)
+}
+
+/// Issue #163: recorded co-signer approvals for a recipient replacement
+/// (old_recipient -> Vec of approver addresses).
+fn replacement_approvals_key(id: u64) -> (Symbol, u64) {
+    (symbol_short!("rep_appr"), id)
+}
+
 /// Issue #333: u8 bitmask of milestones already emitted — instance storage.
 /// Bit 0 = 25 %, Bit 1 = 50 %, Bit 2 = 75 %, Bit 3 = 100 %.
 fn milestone_flags_key(id: u64) -> (Symbol, u64) {
@@ -2112,6 +2123,11 @@ impl SplitContract {
         }
         creator.require_auth();
         Self::_apply_rate_limit(&env, &creator);
+
+        // Issue #163: enforce an optional recipient cap at creation time.
+        if let Some(cap) = options.max_recipients {
+            assert!(recipients.len() <= cap, "exceeds max recipients");
+        }
 
         // Issue #4: reject creator if whitelist is non-empty and creator is not on it.
         let wl: Vec<Address> = env
@@ -4213,6 +4229,207 @@ impl SplitContract {
                 events::allowlist_updated(&env, invoice_id, &creator, &payer, true);
             }
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #163: dynamic recipient management (cap + replacement + quorum)
+    // -----------------------------------------------------------------------
+
+    /// Issue #163: Propose replacing an existing recipient with a new one.
+    ///
+    /// Only the creator or a co-creator may propose. The invoice must be Pending
+    /// and must not be a streaming (drip) invoice. If no co-signer quorum is
+    /// required (`required_signatures == 0`), the replacement is applied
+    /// immediately. Otherwise it is recorded as a pending proposal that
+    /// co-signers approve via [`Self::approve_recipient_replacement`].
+    pub fn propose_recipient_replacement(
+        env: Env,
+        proposer: Address,
+        invoice_id: u64,
+        old_recipient: Address,
+        new_recipient: Address,
+    ) {
+        require_not_paused(&env);
+        proposer.require_auth();
+
+        let invoice = load_invoice(&env, invoice_id);
+
+        assert!(
+            invoice.status == InvoiceStatus::Pending,
+            "replacement requires pending invoice"
+        );
+        assert!(
+            invoice.drip_duration.is_none(),
+            "cannot replace recipients on a streaming invoice"
+        );
+        assert!(
+            proposer == invoice.creator
+                || invoice.co_creators.iter().any(|c| c == proposer),
+            "not authorized to propose recipient replacement"
+        );
+        assert!(
+            invoice.recipients.iter().any(|r| r == old_recipient),
+            "old recipient is not part of this invoice"
+        );
+        assert!(
+            !invoice.recipients.iter().any(|r| r == new_recipient),
+            "new recipient is already part of this invoice"
+        );
+
+        let mut proposals: Map<Address, Address> = env
+            .storage()
+            .persistent()
+            .get(&replacement_proposal_key(invoice_id))
+            .unwrap_or_else(|| Map::new(&env));
+        proposals.set(old_recipient.clone(), new_recipient.clone());
+        env.storage()
+            .persistent()
+            .set(&replacement_proposal_key(invoice_id), &proposals);
+
+        append_audit_entry(&env, invoice_id, symbol_short!("rep_prop"), &proposer);
+        events::recipient_replacement_proposed(
+            &env,
+            invoice_id,
+            &old_recipient,
+            &new_recipient,
+        );
+
+        // No quorum required -> apply immediately.
+        if invoice.required_signatures == 0 {
+            Self::execute_recipient_replacement(&env, invoice_id, &old_recipient);
+        }
+    }
+
+    /// Issue #163: Approve a pending recipient replacement as a co-signer.
+    ///
+    /// Only an authorized co-signer may call. Once `required_signatures` distinct
+    /// co-signers have approved the same proposal, it is executed automatically.
+    pub fn approve_recipient_replacement(
+        env: Env,
+        approver: Address,
+        invoice_id: u64,
+        old_recipient: Address,
+    ) {
+        require_not_paused(&env);
+        approver.require_auth();
+
+        let invoice = load_invoice(&env, invoice_id);
+
+        assert!(
+            invoice.status == InvoiceStatus::Pending,
+            "replacement requires pending invoice"
+        );
+        assert!(
+            invoice.drip_duration.is_none(),
+            "cannot replace recipients on a streaming invoice"
+        );
+        assert!(
+            !invoice.co_signers.is_empty(),
+            "no co-signers configured for replacement"
+        );
+        assert!(
+            invoice.co_signers.iter().any(|c| c == approver),
+            "not an authorized co-signer"
+        );
+
+        let proposals: Map<Address, Address> = env
+            .storage()
+            .persistent()
+            .get(&replacement_proposal_key(invoice_id))
+            .expect("no recipient replacement proposal");
+        assert!(
+            proposals.get(old_recipient.clone()).is_some(),
+            "no proposal for this recipient"
+        );
+
+        let mut approvals: Map<Address, Vec<Address>> = env
+            .storage()
+            .persistent()
+            .get(&replacement_approvals_key(invoice_id))
+            .unwrap_or_else(|| Map::new(&env));
+
+        let mut approvers: Vec<Address> = approvals
+            .get(old_recipient.clone())
+            .unwrap_or_else(|| Vec::new(&env));
+        assert!(
+            !approvers.iter().any(|a| a == approver),
+            "co-signer already approved"
+        );
+        approvers.push_back(approver.clone());
+        approvals.set(old_recipient.clone(), approvers.clone());
+        env.storage()
+            .persistent()
+            .set(&replacement_approvals_key(invoice_id), &approvals);
+
+        append_audit_entry(&env, invoice_id, symbol_short!("rep_appr"), &approver);
+
+        if approvers.len() >= invoice.required_signatures {
+            Self::execute_recipient_replacement(&env, invoice_id, &old_recipient);
+        }
+    }
+
+    /// Issue #163 (private): execute a previously proposed recipient replacement.
+    fn execute_recipient_replacement(env: &Env, invoice_id: u64, old_recipient: &Address) {
+        let mut invoice = load_invoice(env, invoice_id);
+
+        let proposals: Map<Address, Address> = env
+            .storage()
+            .persistent()
+            .get(&replacement_proposal_key(invoice_id))
+            .expect("no recipient replacement proposal");
+        let new_recipient: Address = proposals
+            .get(old_recipient.clone())
+            .expect("proposal missing for recipient");
+
+        // Locate the slot currently held by the old recipient.
+        let mut idx: Option<u32> = None;
+        for i in 0..invoice.recipients.len() {
+            if invoice.recipients.get(i).unwrap() == *old_recipient {
+                idx = Some(i);
+                break;
+            }
+        }
+        assert!(idx.is_some(), "old recipient not found in invoice");
+        let idx = idx.unwrap();
+
+        // Inherit the existing slot (keeps amounts/claimed alignment).
+        invoice.recipients.set(idx, new_recipient.clone());
+
+        // Migrate the paid set so the new recipient is considered paid if the
+        // old one already was.
+        let mut paid: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&paid_recipients_key(invoice_id))
+            .unwrap_or_else(|| Vec::new(env));
+        if paid.iter().any(|p| p == *old_recipient)
+            && !paid.iter().any(|p| p == new_recipient)
+        {
+            paid.push_back(new_recipient.clone());
+            env.storage()
+                .persistent()
+                .set(&paid_recipients_key(invoice_id), &paid);
+        }
+
+        save_invoice(env, invoice_id, &invoice);
+
+        // Keep the optimised recipient list in sync (issue #332).
+        save_recipients_list(env, invoice_id, &invoice.recipients, &invoice.amounts);
+
+        // Clear the pending proposal and its approvals.
+        env.storage()
+            .persistent()
+            .remove(&replacement_proposal_key(invoice_id));
+        env.storage()
+            .persistent()
+            .remove(&replacement_approvals_key(invoice_id));
+
+        events::recipient_replacement_executed(
+            env,
+            invoice_id,
+            old_recipient,
+            &new_recipient,
+        );
     }
 
     /// Issue #329: Update the off-chain metadata hash for an invoice.

@@ -550,3 +550,33 @@ pub fn fee_paid(env: &Env, invoice_id: u64, amount: i128, treasury: &Address) {
         (amount, treasury.clone(), env.ledger().sequence()),
     );
 }
+
+/// Issue #163: emitted when a recipient replacement is proposed.
+/// Topics: (split, rep_prop, invoice_id)
+/// Data: (old_recipient, new_recipient)
+pub fn recipient_replacement_proposed(
+    env: &Env,
+    invoice_id: u64,
+    old_recipient: &Address,
+    new_recipient: &Address,
+) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("rep_prop"), invoice_id),
+        (old_recipient.clone(), new_recipient.clone()),
+    );
+}
+
+/// Issue #163: emitted when a recipient replacement is executed.
+/// Topics: (split, rep_exec, invoice_id)
+/// Data: (old_recipient, new_recipient)
+pub fn recipient_replacement_executed(
+    env: &Env,
+    invoice_id: u64,
+    old_recipient: &Address,
+    new_recipient: &Address,
+) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("rep_exec"), invoice_id),
+        (old_recipient.clone(), new_recipient.clone()),
+    );
+}

@@ -261,6 +261,8 @@ pub struct InvoiceOptions {
     pub scheduled_release_at: Option<u64>,
     /// KYC verification requirement.
     pub require_kyc: bool,
+    /// Issue #163: optional cap on the number of recipients at creation time.
+    pub max_recipients: Option<u32>,
 }
 
 /// Overflow options for `create_invoice`, split off from [`InvoiceOptions`] to stay within

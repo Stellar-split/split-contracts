@@ -76,6 +76,7 @@ fn default_options(env: &Env) -> InvoiceOptions {
         priorities: Vec::new(env),
         require_kyc: false,
         scheduled_release_at: None,
+        max_recipients: None,
     }
 }
 
@@ -125,6 +126,7 @@ fn invoice_options(
         priorities: Vec::new(env),
         require_kyc: false,
         scheduled_release_at: None,
+        max_recipients: None,
     }
 }
 
@@ -7418,4 +7420,198 @@ fn test_310_propose_overwrites_existing() {
 
     let p = c.get_upgrade_proposal().unwrap();
     assert_eq!(p.new_wasm_hash, hash2);
+}
+
+// ---------------------------------------------------------------------------
+// Issue #163: dynamic recipient management (cap + replacement + quorum)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_recipient_replacement_requires_quorum() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let a = Address::generate(&env);
+    let b = Address::generate(&env);
+    let r1 = Address::generate(&env);
+    let r2 = Address::generate(&env);
+    let r3 = Address::generate(&env);
+
+    env.ledger().set_timestamp(1_000);
+
+    let mut recipients = Vec::new(&env);
+    recipients.push_back(r1.clone());
+    recipients.push_back(r2.clone());
+    let mut amounts = Vec::new(&env);
+    amounts.push_back(100_i128);
+    amounts.push_back(100_i128);
+
+    let mut opts = default_options(&env);
+    let mut cosigners = Vec::new(&env);
+    cosigners.push_back(a.clone());
+    cosigners.push_back(b.clone());
+    opts.co_signers = cosigners;
+    opts.required_signatures = 2;
+    opts.max_recipients = None;
+
+    let id = c.create_invoice(
+        &creator,
+        &recipients,
+        &amounts,
+        &token_id,
+        &9_999_u64,
+        &opts,
+    );
+
+    // Creator (not a co-signer) proposes replacing r1 with r3.
+    c.propose_recipient_replacement(&creator, &id, &r1, &r3);
+
+    // First co-signer approval is insufficient (quorum = 2): no replacement yet.
+    c.approve_recipient_replacement(&a, &id, &r1);
+    assert_eq!(c.get_invoice(&id).recipients.get(0).unwrap(), r1);
+
+    // Second co-signer approval reaches quorum and executes the replacement.
+    c.approve_recipient_replacement(&b, &id, &r1);
+    assert_eq!(c.get_invoice(&id).recipients.get(0).unwrap(), r3);
+    assert_eq!(c.get_invoice(&id).recipients.get(1).unwrap(), r2);
+}
+
+#[test]
+fn test_recipient_replacement_preserves_claimed_amounts() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+    let tk = token_client(&env, &token_id);
+
+    let creator = Address::generate(&env);
+    let payer = Address::generate(&env);
+    let a = Address::generate(&env);
+    let b = Address::generate(&env);
+    let r1 = Address::generate(&env);
+    let r2 = Address::generate(&env);
+    let r3 = Address::generate(&env);
+
+    StellarAssetClient::new(&env, &token_id).mint(&payer, &200_i128);
+    env.ledger().set_timestamp(1_000);
+
+    let mut recipients = Vec::new(&env);
+    recipients.push_back(r1.clone());
+    recipients.push_back(r2.clone());
+    let mut amounts = Vec::new(&env);
+    amounts.push_back(100_i128);
+    amounts.push_back(100_i128);
+
+    let mut opts = default_options(&env);
+    let mut cosigners = Vec::new(&env);
+    cosigners.push_back(a.clone());
+    cosigners.push_back(b.clone());
+    opts.co_signers = cosigners;
+    opts.required_signatures = 2;
+    opts.max_recipients = None;
+
+    let id = c.create_invoice(
+        &creator,
+        &recipients,
+        &amounts,
+        &token_id,
+        &9_999_u64,
+        &opts,
+    );
+
+    // Fully fund; stays Pending because co-signers are set.
+    c.pay(&payer, &id, &200_i128, &0_u64, &false, &false);
+    assert_eq!(c.get_invoice(&id).status, InvoiceStatus::Pending);
+
+    // Pay r1 directly: r1 is now in the paid set, slot amount still 100.
+    c.release_to_recipient(&id, &r1);
+    assert_eq!(tk.balance(&r1), 100);
+
+    // Propose + approve replacement r1 -> r3 (quorum = 2).
+    c.propose_recipient_replacement(&creator, &id, &r1, &r3);
+    c.approve_recipient_replacement(&a, &id, &r1);
+    c.approve_recipient_replacement(&b, &id, &r1);
+
+    // get_invoice reflects the new recipient; the amount slot is inherited.
+    let inv = c.get_invoice(&id);
+    assert_eq!(inv.recipients.get(0).unwrap(), r3);
+    assert_eq!(inv.amounts.get(0).unwrap(), 100_i128);
+
+    // The new recipient cannot be paid again (paid set was migrated).
+    let result = c.try_release_to_recipient(&id, &r3);
+    assert!(result.is_err());
+}
+
+#[test]
+#[should_panic(expected = "replacement requires pending invoice")]
+fn test_recipient_replacement_blocked_on_released_invoice() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let payer = Address::generate(&env);
+    let r1 = Address::generate(&env);
+    let r2 = Address::generate(&env);
+    let r3 = Address::generate(&env);
+
+    StellarAssetClient::new(&env, &token_id).mint(&payer, &200_i128);
+    env.ledger().set_timestamp(1_000);
+
+    let mut recipients = Vec::new(&env);
+    recipients.push_back(r1.clone());
+    recipients.push_back(r2.clone());
+    let mut amounts = Vec::new(&env);
+    amounts.push_back(100_i128);
+    amounts.push_back(100_i128);
+
+    let id = c.create_invoice(
+        &creator,
+        &recipients,
+        &amounts,
+        &token_id,
+        &9_999_u64,
+        &default_options(&env),
+    );
+
+    // Fully fund -> auto-releases (no co-signers configured).
+    c.pay(&payer, &id, &200_i128, &0_u64, &false, &false);
+    assert_eq!(c.get_invoice(&id).status, InvoiceStatus::Released);
+
+    // Replacement must be blocked on a released invoice.
+    c.propose_recipient_replacement(&creator, &id, &r1, &r3);
+}
+
+#[test]
+#[should_panic(expected = "exceeds max recipients")]
+fn test_recipient_cap_enforced_at_creation() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let r1 = Address::generate(&env);
+    let r2 = Address::generate(&env);
+    let r3 = Address::generate(&env);
+
+    env.ledger().set_timestamp(1_000);
+
+    let mut recipients = Vec::new(&env);
+    recipients.push_back(r1.clone());
+    recipients.push_back(r2.clone());
+    recipients.push_back(r3.clone());
+    let mut amounts = Vec::new(&env);
+    amounts.push_back(100_i128);
+    amounts.push_back(100_i128);
+    amounts.push_back(100_i128);
+
+    let mut opts = default_options(&env);
+    opts.max_recipients = Some(2);
+
+    // 3 recipients exceeds the cap of 2 -> must panic.
+    c.create_invoice(
+        &creator,
+        &recipients,
+        &amounts,
+        &token_id,
+        &9_999_u64,
+        &opts,
+    );
 }
