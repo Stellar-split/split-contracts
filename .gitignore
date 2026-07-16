@@ -2,9 +2,6 @@
 target/
 *.wasm
 
-# Cargo lock (library crates don't commit this)
-Cargo.lock
-
 # Environment files
 .env
 .env.local
