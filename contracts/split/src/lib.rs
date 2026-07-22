@@ -16,7 +16,7 @@ use types::{
     AuditEntry, Bid, CompletionProof, CreateInvoiceParams, Invoice, InvoiceCore, InvoiceExt,
     InvoiceExt2, InvoiceOptions, InvoicePayment, InvoiceStatus, InvoiceTemplate,
     LegacyInvoice, OverflowBehavior, Payment, PaymentProof, ResolveAction, ResolveRule,
-    SplitRule, SubscriptionParams, Tranche, TreasuryRecord,
+    SplitRule, SubscriptionParams, Tranche, TreasuryRecord, RecipientReplacement,
 };
 
 // ---------------------------------------------------------------------------
@@ -193,7 +193,7 @@ fn kyc_contract_key() -> Symbol {
     symbol_short!("kyc_ctr")
 }
 
-/// Issue: per-creator invoice creation count key (cancellation rate limit).
+/// Per-creator invoice creation count key (issue #106).
 fn invoice_count_key(creator: &Address) -> (Symbol, Address) {
     (symbol_short!("inv_count"), creator.clone())
 }
@@ -201,6 +201,12 @@ fn invoice_count_key(creator: &Address) -> (Symbol, Address) {
 /// Issue: per-creator invoice cancellation count key (cancellation rate limit).
 fn cancel_count_key(creator: &Address) -> (Symbol, Address) {
     (symbol_short!("cnl_count"), creator.clone())
+}
+
+/// Storage key for a pending recipient-replacement proposal.
+/// Keyed by (invoice_id, old_recipient).
+fn repl_proposal_key(invoice_id: u64, old_recipient: &Address) -> (Symbol, u64, Address) {
+    (symbol_short!("repl_prp"), invoice_id, old_recipient.clone())
 }
 
 /// Issue: maximum cancellation rate in basis points, stored globally.
@@ -655,6 +661,14 @@ impl SplitContract {
             .unwrap_or_else(|| Vec::new(&env));
         if !wl.is_empty() {
             assert!(wl.iter().any(|a| a == creator), "creator not whitelisted");
+        }
+
+        // Enforce max_recipients cap if specified.
+        if let Some(max) = options.max_recipients {
+            assert!(
+                recipients.len() <= max as u32,
+                "exceeds max recipients"
+            );
         }
 
         Self::_create_invoice_inner(
@@ -4025,6 +4039,200 @@ impl SplitContract {
             }
         } else {
             save_invoice(&env, invoice_id, &invoice);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Recipient replacement (post-creation)
+    // -----------------------------------------------------------------------
+
+    /// Propose replacing `old_recipient` with `new_recipient` on an invoice.
+    ///
+    /// * Only the invoice creator or a co-creator may propose.
+    /// * The invoice must be Pending and must not use drip_duration
+    ///   (stream invoices are immutable).
+    /// * Stores the proposal in persistent storage; the proposer's approval
+    ///   is recorded automatically.
+    pub fn propose_recipient_replacement(
+        env: Env,
+        proposer: Address,
+        invoice_id: u64,
+        old_recipient: Address,
+        new_recipient: Address,
+    ) {
+        require_not_paused(&env);
+        proposer.require_auth();
+
+        let invoice = load_invoice(&env, invoice_id);
+
+        // Must be pending.
+        assert!(
+            invoice.status == InvoiceStatus::Pending,
+            "replacement blocked: invoice is not pending"
+        );
+
+        // Stream invoices are immutable.
+        assert!(
+            invoice.drip_duration.is_none(),
+            "replacement blocked: stream invoices are immutable"
+        );
+
+        // Proposer must be creator or co-creator.
+        let is_authorized = invoice.creator == proposer
+            || invoice.co_creators.iter().any(|cc| cc == proposer);
+        assert!(is_authorized, "proposer is not a creator or co-creator");
+
+        // old_recipient must actually be on the invoice.
+        assert!(
+            invoice.recipients.iter().any(|r| r == old_recipient),
+            "old_recipient not found on invoice"
+        );
+
+        // new_recipient must not already be on the invoice.
+        assert!(
+            !invoice.recipients.iter().any(|r| r == new_recipient),
+            "new_recipient is already a recipient"
+        );
+
+        // Build proposal; proposer's approval is counted immediately.
+        let mut approvals: Vec<Address> = Vec::new(&env);
+        approvals.push_back(proposer.clone());
+
+        // Quorum threshold: reuse required_signatures when > 0, else default to 1.
+        let required = if invoice.required_signatures > 0 {
+            invoice.required_signatures
+        } else {
+            1u32
+        };
+
+        if approvals.len() >= required {
+            // Threshold already met — execute replacement immediately.
+            let mut new_recipients: Vec<Address> = Vec::new(&env);
+            for r in invoice.recipients.iter() {
+                if r == old_recipient {
+                    new_recipients.push_back(new_recipient.clone());
+                } else {
+                    new_recipients.push_back(r.clone());
+                }
+            }
+            invoice.recipients = new_recipients;
+            save_invoice(&env, invoice_id, &invoice);
+            append_audit_entry(&env, invoice_id, symbol_short!("repl_exe"), &proposer);
+        } else {
+            let proposal = RecipientReplacement {
+                proposer: proposer.clone(),
+                new_recipient: new_recipient.clone(),
+                approvals,
+            };
+
+            env.storage()
+                .persistent()
+                .set(&repl_proposal_key(invoice_id, &old_recipient), &proposal);
+
+            append_audit_entry(&env, invoice_id, symbol_short!("repl_prp"), &proposer);
+        }
+    }
+
+    /// Approve a pending recipient-replacement proposal.
+    ///
+    /// * Only the invoice creator or a co-creator may approve.
+    /// * Once the number of unique approvals reaches `required_signatures`
+    ///   (or 1 when no co-signers are configured), the replacement is executed
+    ///   immediately:
+    ///   - the new recipient takes the old recipient's slot in `recipients`
+    ///   - `amounts` and `claimed` slots are preserved at the same index
+    ///   - the invoice is saved back to storage
+    pub fn approve_recipient_replacement(
+        env: Env,
+        approver: Address,
+        invoice_id: u64,
+        old_recipient: Address,
+    ) {
+        require_not_paused(&env);
+        approver.require_auth();
+
+        let mut invoice = load_invoice(&env, invoice_id);
+
+        // Must be pending.
+        assert!(
+            invoice.status == InvoiceStatus::Pending,
+            "replacement blocked: invoice is not pending"
+        );
+
+        // Stream invoices are immutable.
+        assert!(
+            invoice.drip_duration.is_none(),
+            "replacement blocked: stream invoices are immutable"
+        );
+
+        // Approver must be creator or co-creator.
+        let is_authorized = invoice.creator == approver
+            || invoice.co_creators.iter().any(|cc| cc == approver);
+        assert!(is_authorized, "approver is not a creator or co-creator");
+
+        // Load the proposal.
+        let mut proposal: RecipientReplacement = env
+            .storage()
+            .persistent()
+            .get(&repl_proposal_key(invoice_id, &old_recipient))
+            .expect("no replacement proposal found for old_recipient");
+
+        // Prevent double-approval.
+        assert!(
+            !proposal.approvals.iter().any(|a| a == approver),
+            "already approved"
+        );
+
+        proposal.approvals.push_back(approver.clone());
+
+        // Quorum threshold: reuse required_signatures when > 0, else default to 1.
+        let required = if invoice.required_signatures > 0 {
+            invoice.required_signatures
+        } else {
+            1u32
+        };
+
+        if proposal.approvals.len() >= required {
+            // Execute replacement.
+            let new_recipient = proposal.new_recipient.clone();
+
+            // Find the index of old_recipient.
+            let mut slot: Option<u32> = None;
+            for (i, r) in invoice.recipients.iter().enumerate() {
+                if r == old_recipient {
+                    slot = Some(i as u32);
+                    break;
+                }
+            }
+            let idx = slot.expect("old_recipient not found on invoice");
+
+            // Swap recipient at that index.
+            let mut new_recipients: Vec<Address> = Vec::new(&env);
+            for (i, r) in invoice.recipients.iter().enumerate() {
+                if i as u32 == idx {
+                    new_recipients.push_back(new_recipient.clone());
+                } else {
+                    new_recipients.push_back(r.clone());
+                }
+            }
+            invoice.recipients = new_recipients;
+
+            // amounts and claimed slots are preserved by index — no change needed.
+
+            // Clean up proposal.
+            env.storage()
+                .persistent()
+                .remove(&repl_proposal_key(invoice_id, &old_recipient));
+
+            save_invoice(&env, invoice_id, &invoice);
+            append_audit_entry(&env, invoice_id, symbol_short!("repl_exe"), &approver);
+        } else {
+            // Not yet enough approvals — save updated proposal.
+            env.storage()
+                .persistent()
+                .set(&repl_proposal_key(invoice_id, &old_recipient), &proposal);
+
+            append_audit_entry(&env, invoice_id, symbol_short!("repl_apv"), &approver);
         }
     }
 }

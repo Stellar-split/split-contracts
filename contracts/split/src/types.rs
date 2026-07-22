@@ -203,6 +203,21 @@ pub struct InvoiceOptions {
     pub cross_chain_ref: Option<String>,
     /// Issue #98: restrict payments to this allowlist; None = open.
     pub allowed_payers: Option<Vec<Address>>,
+    /// Maximum number of recipients allowed on this invoice; None = unlimited.
+    pub max_recipients: Option<u32>,
+}
+
+/// Pending proposal to replace one recipient with another.
+/// Stored per-invoice, keyed by the old recipient address.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct RecipientReplacement {
+    /// The address that submitted the proposal.
+    pub proposer: Address,
+    /// The new recipient that will take the old recipient's slot.
+    pub new_recipient: Address,
+    /// Addresses (creator / co-creators) that have approved this proposal.
+    pub approvals: Vec<Address>,
 }
 
 /// Legacy invoice layout used by stored invoices created before the `version`

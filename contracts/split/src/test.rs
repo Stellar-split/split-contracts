@@ -69,6 +69,7 @@ fn default_options(env: &Env) -> InvoiceOptions {
         oracle_address: None,
         cross_chain_ref: None,
         allowed_payers: None,
+        max_recipients: None,
     }
 }
 
@@ -4117,4 +4118,192 @@ fn test_creator_stats_increments_on_operations() {
     assert_eq!(volume, 400);
     assert_eq!(released, 2);
     assert_eq!(refunded, 1);
+}
+
+// ---------------------------------------------------------------------------
+// Recipient cap & replacement tests
+// ---------------------------------------------------------------------------
+
+/// Invoice creation must panic when the recipient count exceeds max_recipients.
+#[test]
+#[should_panic(expected = "exceeds max recipients")]
+fn test_recipient_cap_enforced_at_creation() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let r1 = Address::generate(&env);
+    let r2 = Address::generate(&env);
+    let r3 = Address::generate(&env);
+
+    env.ledger().set_timestamp(1_000);
+
+    // 3 recipients but cap is 2 — must panic.
+    let mut recipients = Vec::new(&env);
+    recipients.push_back(r1.clone());
+    recipients.push_back(r2.clone());
+    recipients.push_back(r3.clone());
+
+    let mut amounts = Vec::new(&env);
+    amounts.push_back(100_i128);
+    amounts.push_back(100_i128);
+    amounts.push_back(100_i128);
+
+    let mut opts = default_options(&env);
+    opts.max_recipients = Some(2);
+
+    c.create_invoice(&creator, &recipients, &amounts, &token_id, &9_999_u64, &opts);
+}
+
+/// Replacement must not execute until the quorum threshold is met.
+/// With required_signatures = 2 and only 1 approval, the recipient must be unchanged.
+/// After the second approval the replacement executes.
+#[test]
+fn test_recipient_replacement_requires_quorum() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let co_creator = Address::generate(&env);
+    let old_recipient = Address::generate(&env);
+    let new_recipient = Address::generate(&env);
+
+    env.ledger().set_timestamp(1_000);
+
+    let mut recipients = Vec::new(&env);
+    recipients.push_back(old_recipient.clone());
+    let mut amounts = Vec::new(&env);
+    amounts.push_back(300_i128);
+
+    // Two co-creators: creator + co_creator, require 2 approvals.
+    let mut co_creators = Vec::new(&env);
+    co_creators.push_back(co_creator.clone());
+
+    let mut opts = default_options(&env);
+    opts.co_creators = co_creators;
+    opts.required_signatures = 2;
+    opts.max_recipients = None;
+
+    let id = c.create_invoice(&creator, &recipients, &amounts, &token_id, &9_999_u64, &opts);
+
+    // Propose (counts as 1 approval from creator).
+    c.propose_recipient_replacement(&creator, &id, &old_recipient, &new_recipient);
+
+    // After 1/2 approvals — recipient must still be the old one.
+    let inv = c.get_invoice(&id);
+    assert_eq!(inv.recipients.get(0).unwrap(), old_recipient);
+
+    // Second approval from co_creator — reaches quorum, executes replacement.
+    c.approve_recipient_replacement(&co_creator, &id, &old_recipient);
+
+    let inv = c.get_invoice(&id);
+    assert_eq!(
+        inv.recipients.get(0).unwrap(),
+        new_recipient,
+        "new_recipient should be at slot 0 after quorum"
+    );
+}
+
+/// After a replacement the `amounts` slot and the `claimed` slot at the replaced
+/// index must be identical to what they were before the replacement — i.e. the
+/// new recipient inherits exactly the old slot.
+#[test]
+fn test_recipient_replacement_preserves_claimed_amounts() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let old_recipient = Address::generate(&env);
+    let new_recipient = Address::generate(&env);
+    // A second recipient so we can verify the other slot is untouched.
+    let other_recipient = Address::generate(&env);
+
+    env.ledger().set_timestamp(1_000);
+
+    let mut recipients = Vec::new(&env);
+    recipients.push_back(old_recipient.clone());
+    recipients.push_back(other_recipient.clone());
+    let mut amounts = Vec::new(&env);
+    amounts.push_back(200_i128);
+    amounts.push_back(100_i128);
+
+    let id = c.create_invoice(
+        &creator,
+        &recipients,
+        &amounts,
+        &token_id,
+        &9_999_u64,
+        &default_options(&env),
+    );
+
+    // Capture state before replacement.
+    let inv_before = c.get_invoice(&id);
+    let amount_slot0_before = inv_before.amounts.get(0).unwrap();
+    let claimed_slot0_before = inv_before.claimed.get(0).unwrap();
+    let amount_slot1_before = inv_before.amounts.get(1).unwrap();
+
+    // Propose + approve in one step (required_signatures defaults to 0 → threshold 1).
+    c.propose_recipient_replacement(&creator, &id, &old_recipient, &new_recipient);
+
+    let inv_after = c.get_invoice(&id);
+
+    // Recipient at slot 0 should now be new_recipient.
+    assert_eq!(inv_after.recipients.get(0).unwrap(), new_recipient);
+
+    // amounts slot 0 must be unchanged.
+    assert_eq!(
+        inv_after.amounts.get(0).unwrap(),
+        amount_slot0_before,
+        "amounts[0] must be preserved after replacement"
+    );
+
+    // claimed slot 0 must be unchanged.
+    assert_eq!(
+        inv_after.claimed.get(0).unwrap(),
+        claimed_slot0_before,
+        "claimed[0] must be preserved after replacement"
+    );
+
+    // Slot 1 (other_recipient) must be completely untouched.
+    assert_eq!(inv_after.recipients.get(1).unwrap(), other_recipient);
+    assert_eq!(inv_after.amounts.get(1).unwrap(), amount_slot1_before);
+}
+
+/// Recipient replacement must be blocked when the invoice is no longer Pending
+/// (e.g. it has been Released).
+#[test]
+#[should_panic(expected = "replacement blocked: invoice is not pending")]
+fn test_recipient_replacement_blocked_on_released_invoice() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let payer = Address::generate(&env);
+    let old_recipient = Address::generate(&env);
+    let new_recipient = Address::generate(&env);
+
+    StellarAssetClient::new(&env, &token_id).mint(&payer, &500);
+    env.ledger().set_timestamp(1_000);
+
+    // Create and fully fund the invoice so it auto-releases.
+    let mut recipients = Vec::new(&env);
+    recipients.push_back(old_recipient.clone());
+    let mut amounts = Vec::new(&env);
+    amounts.push_back(200_i128);
+
+    let id = c.create_invoice(
+        &creator,
+        &recipients,
+        &amounts,
+        &token_id,
+        &9_999_u64,
+        &default_options(&env),
+    );
+
+    // Pay in full — triggers auto-release.
+    c.pay(&payer, &id, &200_i128, &0_u64, &false);
+    assert_eq!(c.get_invoice(&id).status, InvoiceStatus::Released);
+
+    // Attempt to propose replacement on a Released invoice — must panic.
+    c.propose_recipient_replacement(&creator, &id, &old_recipient, &new_recipient);
 }
