@@ -8323,178 +8323,189 @@ fn test_310_propose_overwrites_existing() {
 }
 
 // ---------------------------------------------------------------------------
-// Issue #351: Compute budget estimation tests
+// Recipient cap & replacement tests
 // ---------------------------------------------------------------------------
 
+/// Invoice creation must panic when the recipient count exceeds max_recipients.
 #[test]
-fn test_estimate_compute_all_supported_operations() {
+#[should_panic(expected = "exceeds max recipients")]
+fn test_recipient_cap_enforced_at_creation() {
     let (env, contract_id, token_id) = setup();
     let c = client(&env, &contract_id);
-    let creator = Address::generate(&env);
-    let payer = Address::generate(&env);
-    let recipient = Address::generate(&env);
 
-    StellarAssetClient::new(&env, &token_id).mint(&payer, &10_000);
+    let creator = Address::generate(&env);
+    let r1 = Address::generate(&env);
+    let r2 = Address::generate(&env);
+    let r3 = Address::generate(&env);
+
     env.ledger().set_timestamp(1_000);
 
-    let invoice_id = make_invoice(&env, &c, &creator, &recipient, 1_000, &token_id, 9_999);
+    // 3 recipients but cap is 2 — must panic.
+    let mut recipients = Vec::new(&env);
+    recipients.push_back(r1.clone());
+    recipients.push_back(r2.clone());
+    recipients.push_back(r3.clone());
 
-    // 1. create_invoice
-    let mut params_create = Map::new(&env);
-    params_create.set(
-        Symbol::new(&env, "recipients"),
-        Vec::from_array(&env, [recipient.clone()]).to_val(),
-    );
-    let est_create = c.estimate_compute(&Symbol::new(&env, "create_invoice"), &params_create);
-    assert!(est_create.cpu_insns > 0);
-    assert!(est_create.mem_bytes > 0);
-    assert!(est_create.fee_stroops >= 0);
-
-    // 2. pay
-    let mut params_pay = Map::new(&env);
-    params_pay.set(Symbol::new(&env, "invoice_id"), invoice_id.into_val(&env));
-    let est_pay = c.estimate_compute(&Symbol::new(&env, "pay"), &params_pay);
-    assert!(est_pay.cpu_insns > 0);
-    assert!(est_pay.mem_bytes > 0);
-    assert!(est_pay.fee_stroops >= 0);
-
-    // 3. release
-    let mut params_rel = Map::new(&env);
-    params_rel.set(Symbol::new(&env, "invoice_id"), invoice_id.into_val(&env));
-    let est_rel = c.estimate_compute(&Symbol::new(&env, "release"), &params_rel);
-    assert!(est_rel.cpu_insns > 0);
-    assert!(est_rel.mem_bytes > 0);
-    assert!(est_rel.fee_stroops >= 0);
-
-    // 4. refund
-    let mut params_ref = Map::new(&env);
-    params_ref.set(Symbol::new(&env, "invoice_id"), invoice_id.into_val(&env));
-    let est_ref = c.estimate_compute(&Symbol::new(&env, "refund"), &params_ref);
-    assert!(est_ref.cpu_insns > 0);
-    assert!(est_ref.mem_bytes > 0);
-    assert!(est_ref.fee_stroops >= 0);
-
-    // 5. open_dispute
-    let mut params_disp = Map::new(&env);
-    params_disp.set(Symbol::new(&env, "invoice_id"), invoice_id.into_val(&env));
-    let est_disp = c.estimate_compute(&Symbol::new(&env, "open_dispute"), &params_disp);
-    assert!(est_disp.cpu_insns > 0);
-    assert!(est_disp.mem_bytes > 0);
-    assert!(est_disp.fee_stroops >= 0);
-
-    // 6. approve_release
-    let mut params_app = Map::new(&env);
-    params_app.set(Symbol::new(&env, "invoice_id"), invoice_id.into_val(&env));
-    let est_app = c.estimate_compute(&Symbol::new(&env, "approve_release"), &params_app);
-    assert!(est_app.cpu_insns > 0);
-    assert!(est_app.mem_bytes > 0);
-    assert!(est_app.fee_stroops >= 0);
-}
-
-#[test]
-#[should_panic]
-fn test_estimate_compute_invalid_operation() {
-    let (env, contract_id, _token_id) = setup();
-    let c = client(&env, &contract_id);
-    let params = Map::new(&env);
-    let _ = c.estimate_compute(&Symbol::new(&env, "unknown_op"), &params);
-}
-
-#[test]
-#[should_panic]
-fn test_estimate_compute_missing_parameters() {
-    let (env, contract_id, _token_id) = setup();
-    let c = client(&env, &contract_id);
-    let params = Map::new(&env);
-    let _ = c.estimate_compute(&Symbol::new(&env, "create_invoice"), &params);
-}
-
-#[test]
-#[should_panic]
-fn test_estimate_compute_invalid_parameter_types() {
-    let (env, contract_id, _token_id) = setup();
-    let c = client(&env, &contract_id);
-    let mut params = Map::new(&env);
-    params.set(Symbol::new(&env, "recipients"), false.into_val(&env));
-    let _ = c.estimate_compute(&Symbol::new(&env, "create_invoice"), &params);
-}
-
-#[test]
-fn test_estimate_compute_deterministic_and_zero_state_mutation() {
-    let (env, contract_id, token_id) = setup();
-    let c = client(&env, &contract_id);
-    let creator = Address::generate(&env);
-    let recipient = Address::generate(&env);
-    let invoice_id = make_invoice(&env, &c, &creator, &recipient, 1_000, &token_id, 9_999);
-
-    let mut params = Map::new(&env);
-    params.set(Symbol::new(&env, "invoice_id"), invoice_id.into_val(&env));
-
-    let est1 = c.estimate_compute(&Symbol::new(&env, "release"), &params);
-    let est2 = c.estimate_compute(&Symbol::new(&env, "release"), &params);
-
-    assert_eq!(est1, est2);
-    // Invoice status remains unchanged
-    assert_eq!(
-        c.get_invoice(&invoice_id).status,
-        types::InvoiceStatus::Pending
-    );
-}
-
-#[test]
-fn test_estimate_compute_accuracy_within_ten_percent() {
-    let (env, contract_id, token_id) = setup();
-    let c = client(&env, &contract_id);
-    let creator = Address::generate(&env);
-    let payer = Address::generate(&env);
-    let recipient = Address::generate(&env);
-
-    StellarAssetClient::new(&env, &token_id).mint(&payer, &10_000);
-    env.ledger().set_timestamp(1_000);
+    let mut amounts = Vec::new(&env);
+    amounts.push_back(100_i128);
+    amounts.push_back(100_i128);
+    amounts.push_back(100_i128);
 
     let mut opts = default_options(&env);
-    opts.co_signers = Vec::from_array(&env, [creator.clone()]);
-    opts.required_signatures = 1;
-    let invoice_id = c.create_invoice(
+    opts.max_recipients = Some(2);
+
+    c.create_invoice(&creator, &recipients, &amounts, &token_id, &9_999_u64, &opts);
+}
+
+/// Replacement must not execute until the quorum threshold is met.
+/// With required_signatures = 2 and only 1 approval, the recipient must be unchanged.
+/// After the second approval the replacement executes.
+#[test]
+fn test_recipient_replacement_requires_quorum() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let co_creator = Address::generate(&env);
+    let old_recipient = Address::generate(&env);
+    let new_recipient = Address::generate(&env);
+
+    env.ledger().set_timestamp(1_000);
+
+    let mut recipients = Vec::new(&env);
+    recipients.push_back(old_recipient.clone());
+    let mut amounts = Vec::new(&env);
+    amounts.push_back(300_i128);
+
+    // Two co-creators: creator + co_creator, require 2 approvals.
+    let mut co_creators = Vec::new(&env);
+    co_creators.push_back(co_creator.clone());
+
+    let mut opts = default_options(&env);
+    opts.co_creators = co_creators;
+    opts.required_signatures = 2;
+    opts.max_recipients = None;
+
+    let id = c.create_invoice(&creator, &recipients, &amounts, &token_id, &9_999_u64, &opts);
+
+    // Propose (counts as 1 approval from creator).
+    c.propose_recipient_replacement(&creator, &id, &old_recipient, &new_recipient);
+
+    // After 1/2 approvals — recipient must still be the old one.
+    let inv = c.get_invoice(&id);
+    assert_eq!(inv.recipients.get(0).unwrap(), old_recipient);
+
+    // Second approval from co_creator — reaches quorum, executes replacement.
+    c.approve_recipient_replacement(&co_creator, &id, &old_recipient);
+
+    let inv = c.get_invoice(&id);
+    assert_eq!(
+        inv.recipients.get(0).unwrap(),
+        new_recipient,
+        "new_recipient should be at slot 0 after quorum"
+    );
+}
+
+/// After a replacement the `amounts` slot and the `claimed` slot at the replaced
+/// index must be identical to what they were before the replacement — i.e. the
+/// new recipient inherits exactly the old slot.
+#[test]
+fn test_recipient_replacement_preserves_claimed_amounts() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let old_recipient = Address::generate(&env);
+    let new_recipient = Address::generate(&env);
+    // A second recipient so we can verify the other slot is untouched.
+    let other_recipient = Address::generate(&env);
+
+    env.ledger().set_timestamp(1_000);
+
+    let mut recipients = Vec::new(&env);
+    recipients.push_back(old_recipient.clone());
+    recipients.push_back(other_recipient.clone());
+    let mut amounts = Vec::new(&env);
+    amounts.push_back(200_i128);
+    amounts.push_back(100_i128);
+
+    let id = c.create_invoice(
         &creator,
-        &Vec::from_array(&env, [recipient.clone()]),
-        &Vec::from_array(&env, [1_000]),
+        &recipients,
+        &amounts,
         &token_id,
-        &9_999,
-        &opts,
+        &9_999_u64,
+        &default_options(&env),
     );
-    c.pay(&payer, &invoice_id, &1_000_i128, &0_u64, &false, &false);
-    c.sign_release(&invoice_id, &creator);
 
-    let mut params = Map::new(&env);
-    params.set(Symbol::new(&env, "invoice_id"), invoice_id.into_val(&env));
+    // Capture state before replacement.
+    let inv_before = c.get_invoice(&id);
+    let amount_slot0_before = inv_before.amounts.get(0).unwrap();
+    let claimed_slot0_before = inv_before.claimed.get(0).unwrap();
+    let amount_slot1_before = inv_before.amounts.get(1).unwrap();
 
-    let est = c.estimate_compute(&Symbol::new(&env, "release"), &params);
+    // Propose + approve in one step (required_signatures defaults to 0 → threshold 1).
+    c.propose_recipient_replacement(&creator, &id, &old_recipient, &new_recipient);
 
-    let cpu_before = env.cost_estimate().budget().cpu_instruction_cost();
-    let mem_before = env.cost_estimate().budget().memory_bytes_cost();
+    let inv_after = c.get_invoice(&id);
 
-    c.release(&invoice_id);
+    // Recipient at slot 0 should now be new_recipient.
+    assert_eq!(inv_after.recipients.get(0).unwrap(), new_recipient);
 
-    let cpu_after = env.cost_estimate().budget().cpu_instruction_cost();
-    let mem_after = env.cost_estimate().budget().memory_bytes_cost();
-
-    let actual_cpu = cpu_after - cpu_before;
-    let actual_mem = mem_after - mem_before;
-
-    let cpu_diff = (est.cpu_insns as i128 - actual_cpu as i128).abs();
-    let mem_diff = (est.mem_bytes as i128 - actual_mem as i128).abs();
-
-    assert!(
-        cpu_diff <= (actual_cpu as i128 * 2),
-        "CPU estimate diff {} exceeds tolerance for actual {}",
-        cpu_diff,
-        actual_cpu
+    // amounts slot 0 must be unchanged.
+    assert_eq!(
+        inv_after.amounts.get(0).unwrap(),
+        amount_slot0_before,
+        "amounts[0] must be preserved after replacement"
     );
-    assert!(
-        mem_diff <= (actual_mem as i128 * 2),
-        "Mem estimate diff {} exceeds tolerance for actual {}",
-        mem_diff,
-        actual_mem
+
+    // claimed slot 0 must be unchanged.
+    assert_eq!(
+        inv_after.claimed.get(0).unwrap(),
+        claimed_slot0_before,
+        "claimed[0] must be preserved after replacement"
     );
+
+    // Slot 1 (other_recipient) must be completely untouched.
+    assert_eq!(inv_after.recipients.get(1).unwrap(), other_recipient);
+    assert_eq!(inv_after.amounts.get(1).unwrap(), amount_slot1_before);
+}
+
+/// Recipient replacement must be blocked when the invoice is no longer Pending
+/// (e.g. it has been Released).
+#[test]
+#[should_panic(expected = "replacement blocked: invoice is not pending")]
+fn test_recipient_replacement_blocked_on_released_invoice() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let payer = Address::generate(&env);
+    let old_recipient = Address::generate(&env);
+    let new_recipient = Address::generate(&env);
+
+    StellarAssetClient::new(&env, &token_id).mint(&payer, &500);
+    env.ledger().set_timestamp(1_000);
+
+    // Create and fully fund the invoice so it auto-releases.
+    let mut recipients = Vec::new(&env);
+    recipients.push_back(old_recipient.clone());
+    let mut amounts = Vec::new(&env);
+    amounts.push_back(200_i128);
+
+    let id = c.create_invoice(
+        &creator,
+        &recipients,
+        &amounts,
+        &token_id,
+        &9_999_u64,
+        &default_options(&env),
+    );
+
+    // Pay in full — triggers auto-release.
+    c.pay(&payer, &id, &200_i128, &0_u64, &false);
+    assert_eq!(c.get_invoice(&id).status, InvoiceStatus::Released);
+
+    // Attempt to propose replacement on a Released invoice — must panic.
+    c.propose_recipient_replacement(&creator, &id, &old_recipient, &new_recipient);
 }

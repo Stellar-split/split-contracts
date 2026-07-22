@@ -396,7 +396,7 @@ fn kyc_contract_key() -> Symbol {
     symbol_short!("kyc_ctr")
 }
 
-/// Issue: per-creator invoice creation count key (cancellation rate limit).
+/// Per-creator invoice creation count key (issue #106).
 fn invoice_count_key(creator: &Address) -> (Symbol, Address) {
     (symbol_short!("inv_count"), creator.clone())
 }
@@ -404,6 +404,12 @@ fn invoice_count_key(creator: &Address) -> (Symbol, Address) {
 /// Issue: per-creator invoice cancellation count key (cancellation rate limit).
 fn cancel_count_key(creator: &Address) -> (Symbol, Address) {
     (symbol_short!("cnl_count"), creator.clone())
+}
+
+/// Storage key for a pending recipient-replacement proposal.
+/// Keyed by (invoice_id, old_recipient).
+fn repl_proposal_key(invoice_id: u64, old_recipient: &Address) -> (Symbol, u64, Address) {
+    (symbol_short!("repl_prp"), invoice_id, old_recipient.clone())
 }
 
 /// Issue: maximum cancellation rate in basis points, stored globally.
