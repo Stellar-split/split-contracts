@@ -995,14 +995,13 @@ pub struct ProtocolFeeConfig {
     pub treasury: Address,
 }
 
-/// Issue #316: Compute budget estimate for a contract function.
+/// Issue #316 / #351: Compute budget estimate for a contract function.
 #[contracttype]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ComputeEstimate {
-    pub instructions: u64,
+    pub cpu_insns: u64,
     pub mem_bytes: u64,
-    pub read_entries: u32,
-    pub write_entries: u32,
+    pub fee_stroops: i128,
 }
 
 /// Issue #297: Circuit breaker status returned by get_circuit_breaker_status().

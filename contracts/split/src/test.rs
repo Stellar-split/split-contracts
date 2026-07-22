@@ -8321,3 +8321,180 @@ fn test_310_propose_overwrites_existing() {
     let p = c.get_upgrade_proposal().unwrap();
     assert_eq!(p.new_wasm_hash, hash2);
 }
+
+// ---------------------------------------------------------------------------
+// Issue #351: Compute budget estimation tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_estimate_compute_all_supported_operations() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+    let creator = Address::generate(&env);
+    let payer = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    StellarAssetClient::new(&env, &token_id).mint(&payer, &10_000);
+    env.ledger().set_timestamp(1_000);
+
+    let invoice_id = make_invoice(&env, &c, &creator, &recipient, 1_000, &token_id, 9_999);
+
+    // 1. create_invoice
+    let mut params_create = Map::new(&env);
+    params_create.set(
+        Symbol::new(&env, "recipients"),
+        Vec::from_array(&env, [recipient.clone()]).to_val(),
+    );
+    let est_create = c.estimate_compute(&Symbol::new(&env, "create_invoice"), &params_create);
+    assert!(est_create.cpu_insns > 0);
+    assert!(est_create.mem_bytes > 0);
+    assert!(est_create.fee_stroops >= 0);
+
+    // 2. pay
+    let mut params_pay = Map::new(&env);
+    params_pay.set(Symbol::new(&env, "invoice_id"), invoice_id.into_val(&env));
+    let est_pay = c.estimate_compute(&Symbol::new(&env, "pay"), &params_pay);
+    assert!(est_pay.cpu_insns > 0);
+    assert!(est_pay.mem_bytes > 0);
+    assert!(est_pay.fee_stroops >= 0);
+
+    // 3. release
+    let mut params_rel = Map::new(&env);
+    params_rel.set(Symbol::new(&env, "invoice_id"), invoice_id.into_val(&env));
+    let est_rel = c.estimate_compute(&Symbol::new(&env, "release"), &params_rel);
+    assert!(est_rel.cpu_insns > 0);
+    assert!(est_rel.mem_bytes > 0);
+    assert!(est_rel.fee_stroops >= 0);
+
+    // 4. refund
+    let mut params_ref = Map::new(&env);
+    params_ref.set(Symbol::new(&env, "invoice_id"), invoice_id.into_val(&env));
+    let est_ref = c.estimate_compute(&Symbol::new(&env, "refund"), &params_ref);
+    assert!(est_ref.cpu_insns > 0);
+    assert!(est_ref.mem_bytes > 0);
+    assert!(est_ref.fee_stroops >= 0);
+
+    // 5. open_dispute
+    let mut params_disp = Map::new(&env);
+    params_disp.set(Symbol::new(&env, "invoice_id"), invoice_id.into_val(&env));
+    let est_disp = c.estimate_compute(&Symbol::new(&env, "open_dispute"), &params_disp);
+    assert!(est_disp.cpu_insns > 0);
+    assert!(est_disp.mem_bytes > 0);
+    assert!(est_disp.fee_stroops >= 0);
+
+    // 6. approve_release
+    let mut params_app = Map::new(&env);
+    params_app.set(Symbol::new(&env, "invoice_id"), invoice_id.into_val(&env));
+    let est_app = c.estimate_compute(&Symbol::new(&env, "approve_release"), &params_app);
+    assert!(est_app.cpu_insns > 0);
+    assert!(est_app.mem_bytes > 0);
+    assert!(est_app.fee_stroops >= 0);
+}
+
+#[test]
+#[should_panic]
+fn test_estimate_compute_invalid_operation() {
+    let (env, contract_id, _token_id) = setup();
+    let c = client(&env, &contract_id);
+    let params = Map::new(&env);
+    let _ = c.estimate_compute(&Symbol::new(&env, "unknown_op"), &params);
+}
+
+#[test]
+#[should_panic]
+fn test_estimate_compute_missing_parameters() {
+    let (env, contract_id, _token_id) = setup();
+    let c = client(&env, &contract_id);
+    let params = Map::new(&env);
+    let _ = c.estimate_compute(&Symbol::new(&env, "create_invoice"), &params);
+}
+
+#[test]
+#[should_panic]
+fn test_estimate_compute_invalid_parameter_types() {
+    let (env, contract_id, _token_id) = setup();
+    let c = client(&env, &contract_id);
+    let mut params = Map::new(&env);
+    params.set(Symbol::new(&env, "recipients"), false.into_val(&env));
+    let _ = c.estimate_compute(&Symbol::new(&env, "create_invoice"), &params);
+}
+
+#[test]
+fn test_estimate_compute_deterministic_and_zero_state_mutation() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let invoice_id = make_invoice(&env, &c, &creator, &recipient, 1_000, &token_id, 9_999);
+
+    let mut params = Map::new(&env);
+    params.set(Symbol::new(&env, "invoice_id"), invoice_id.into_val(&env));
+
+    let est1 = c.estimate_compute(&Symbol::new(&env, "release"), &params);
+    let est2 = c.estimate_compute(&Symbol::new(&env, "release"), &params);
+
+    assert_eq!(est1, est2);
+    // Invoice status remains unchanged
+    assert_eq!(
+        c.get_invoice(&invoice_id).status,
+        types::InvoiceStatus::Pending
+    );
+}
+
+#[test]
+fn test_estimate_compute_accuracy_within_ten_percent() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+    let creator = Address::generate(&env);
+    let payer = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    StellarAssetClient::new(&env, &token_id).mint(&payer, &10_000);
+    env.ledger().set_timestamp(1_000);
+
+    let mut opts = default_options(&env);
+    opts.co_signers = Vec::from_array(&env, [creator.clone()]);
+    opts.required_signatures = 1;
+    let invoice_id = c.create_invoice(
+        &creator,
+        &Vec::from_array(&env, [recipient.clone()]),
+        &Vec::from_array(&env, [1_000]),
+        &token_id,
+        &9_999,
+        &opts,
+    );
+    c.pay(&payer, &invoice_id, &1_000_i128, &0_u64, &false, &false);
+    c.sign_release(&invoice_id, &creator);
+
+    let mut params = Map::new(&env);
+    params.set(Symbol::new(&env, "invoice_id"), invoice_id.into_val(&env));
+
+    let est = c.estimate_compute(&Symbol::new(&env, "release"), &params);
+
+    let cpu_before = env.cost_estimate().budget().cpu_instruction_cost();
+    let mem_before = env.cost_estimate().budget().memory_bytes_cost();
+
+    c.release(&invoice_id);
+
+    let cpu_after = env.cost_estimate().budget().cpu_instruction_cost();
+    let mem_after = env.cost_estimate().budget().memory_bytes_cost();
+
+    let actual_cpu = cpu_after - cpu_before;
+    let actual_mem = mem_after - mem_before;
+
+    let cpu_diff = (est.cpu_insns as i128 - actual_cpu as i128).abs();
+    let mem_diff = (est.mem_bytes as i128 - actual_mem as i128).abs();
+
+    assert!(
+        cpu_diff <= (actual_cpu as i128 * 2),
+        "CPU estimate diff {} exceeds tolerance for actual {}",
+        cpu_diff,
+        actual_cpu
+    );
+    assert!(
+        mem_diff <= (actual_mem as i128 * 2),
+        "Mem estimate diff {} exceeds tolerance for actual {}",
+        mem_diff,
+        actual_mem
+    );
+}

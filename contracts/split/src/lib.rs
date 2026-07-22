@@ -34,10 +34,11 @@ mod fuzz_tests;
 #[cfg(test)]
 mod storage_snapshot;
 
+use error::ContractError;
 use soroban_sdk::xdr::ToXdr;
 use soroban_sdk::{
     contract, contractimpl, symbol_short, token, Address, Bytes, BytesN, Env, IntoVal, Map, String,
-    Symbol, Val, Vec,
+    Symbol, TryFromVal, Val, Vec,
 };
 use types::{
     AdminRole, AuditEntry, Bid, CircuitBreakerStatus, CloneOverrides, CompactInvoice,
@@ -8923,73 +8924,264 @@ impl SplitContract {
     // -----------------------------------------------------------------------
     // Issue #316: Compute budget estimation utility
     // -----------------------------------------------------------------------
+    // Issue #316 / #351: Compute budget estimation utility
+    // -----------------------------------------------------------------------
 
-    /// Estimate the compute budget for a given public function and recipient count.
-    /// Off-chain callers use this to size transactions before submission.
+    /// Helper for estimate_compute parameter extraction.
+    fn get_u64_param(
+        env: &Env,
+        params: &Map<Symbol, Val>,
+        keys: &[Symbol],
+    ) -> Result<Option<u64>, ContractError> {
+        for k in keys.iter() {
+            if let Some(val) = params.get(k.clone()) {
+                if let Ok(v) = u64::try_from_val(env, &val) {
+                    return Ok(Some(v));
+                } else if let Ok(v) = u32::try_from_val(env, &val) {
+                    return Ok(Some(v as u64));
+                } else if let Ok(v) = i128::try_from_val(env, &val) {
+                    if v >= 0 {
+                        return Ok(Some(v as u64));
+                    } else {
+                        return Err(ContractError::InvalidAmount);
+                    }
+                } else {
+                    return Err(ContractError::InvalidAmount);
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// Helper for estimate_compute recipient list/count extraction.
+    fn get_recipients_len(
+        env: &Env,
+        params: &Map<Symbol, Val>,
+    ) -> Result<Option<u64>, ContractError> {
+        let keys = [
+            Symbol::new(env, "recipients"),
+            symbol_short!("recip"),
+            Symbol::new(env, "recipient_count"),
+            symbol_short!("count"),
+        ];
+        for k in keys.iter() {
+            if let Some(val) = params.get(k.clone()) {
+                if let Ok(vec) = Vec::<Address>::try_from_val(env, &val) {
+                    return Ok(Some(vec.len() as u64));
+                } else if let Ok(vec) = Vec::<Val>::try_from_val(env, &val) {
+                    return Ok(Some(vec.len() as u64));
+                } else if let Ok(c) = u32::try_from_val(env, &val) {
+                    return Ok(Some(c as u64));
+                } else if let Ok(c) = u64::try_from_val(env, &val) {
+                    return Ok(Some(c));
+                } else {
+                    return Err(ContractError::InvalidRecipients);
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// Helper for estimate_compute invoice verification.
+    fn load_invoice_opt(env: &Env, invoice_id: u64) -> Result<InvoiceCore, ContractError> {
+        if let Some(core) = env.storage().persistent().get(&invoice_key(invoice_id)) {
+            Ok(core)
+        } else if let Some(core) = env.storage().instance().get(&invoice_key(invoice_id)) {
+            Ok(core)
+        } else {
+            Err(ContractError::InvoiceNotFound)
+        }
+    }
+
+    /// Estimate the compute budget for a given public contract function and parameters.
+    /// Returns `Result<ComputeEstimate, ContractError>` without mutating state.
     pub fn estimate_compute(
         env: Env,
-        function_name: Symbol,
-        recipient_count: u32,
-    ) -> ComputeEstimate {
-        let recipients = recipient_count as u64;
+        operation: Symbol,
+        params: Map<Symbol, Val>,
+    ) -> Result<ComputeEstimate, ContractError> {
+        let sym_create_full = Symbol::new(&env, "create_invoice");
+        let sym_create_short = symbol_short!("create");
+        let sym_create_alt = symbol_short!("create_i");
 
-        let sym_create = symbol_short!("create_i");
         let sym_pay = symbol_short!("pay");
+        let sym_pay_full = Symbol::new(&env, "pay");
         let sym_dlgt = symbol_short!("pay_dlgt");
-        let sym_release = symbol_short!("release");
-        let sym_get_inv = symbol_short!("get_inv");
-        let sym_stats = symbol_short!("get_stat");
 
-        let (instructions, mem_bytes, read_entries, write_entries): (u64, u64, u32, u32) =
-            if function_name == sym_create {
-                (
-                    INSTRUCTIONS_BASE + recipients * 200_000,
-                    (128 + recipients * 64) * 1024,
-                    (2 + recipients) as u32,
-                    (4 + recipients) as u32,
-                )
-            } else if function_name == sym_pay || function_name == sym_dlgt {
-                (
-                    INSTRUCTIONS_BASE + INSTRUCTIONS_PER_SHARD * SHARD_COUNT,
-                    256 * 1024,
-                    4,
-                    4,
-                )
-            } else if function_name == sym_release {
-                (
-                    INSTRUCTIONS_BASE
-                        + recipients * INSTRUCTIONS_PER_RECIPIENT
-                        + INSTRUCTIONS_PER_SHARD * SHARD_COUNT,
-                    (256 + recipients * 32) * 1024,
-                    4 + SHARD_COUNT as u32 + recipients as u32,
-                    2 + recipients as u32,
-                )
-            } else if function_name == sym_get_inv {
-                (INSTRUCTIONS_BASE / 4, 64 * 1024, 3, 0)
-            } else if function_name == sym_stats {
-                (INSTRUCTIONS_BASE / 2, 128 * 1024, 2, 0)
-            } else {
-                (INSTRUCTIONS_BASE, 128 * 1024, 2, 2)
+        let sym_release = symbol_short!("release");
+        let sym_release_full = Symbol::new(&env, "release");
+
+        let sym_refund = symbol_short!("refund");
+        let sym_refund_full = Symbol::new(&env, "refund");
+
+        let sym_dispute_full = Symbol::new(&env, "open_dispute");
+        let sym_dispute_raise = Symbol::new(&env, "raise_dispute");
+        let sym_dispute_short = symbol_short!("dispute");
+
+        let sym_approve_full = Symbol::new(&env, "approve_release");
+        let sym_approve_inv = Symbol::new(&env, "approve_invoice");
+        let sym_approve_short = symbol_short!("approve");
+
+        let (cpu_insns, mem_bytes): (u64, u64) = if operation == sym_create_full
+            || operation == sym_create_short
+            || operation == sym_create_alt
+        {
+            let r = Self::get_recipients_len(&env, &params)?;
+            let recip_count = match r {
+                Some(cnt) => cnt,
+                None => return Err(ContractError::InvalidRecipients),
+            };
+            if recip_count == 0 {
+                return Err(ContractError::InvalidRecipients);
+            }
+            (
+                INSTRUCTIONS_BASE + recip_count * 200_000,
+                (128 + recip_count * 64) * 1024,
+            )
+        } else if operation == sym_pay || operation == sym_pay_full || operation == sym_dlgt {
+            let inv_id_opt = Self::get_u64_param(
+                &env,
+                &params,
+                &[
+                    Symbol::new(&env, "invoice_id"),
+                    symbol_short!("id"),
+                    Symbol::new(&env, "invoice"),
+                ],
+            )?;
+            let recip_cnt_opt = Self::get_recipients_len(&env, &params)?;
+
+            let recip_cnt = match (inv_id_opt, recip_cnt_opt) {
+                (Some(id), _) => {
+                    let inv = Self::load_invoice_opt(&env, id)?;
+                    inv.recipients.len() as u64
+                }
+                (None, Some(cnt)) => cnt,
+                (None, None) => return Err(ContractError::InvoiceNotFound),
             };
 
-        let budget_pct = instructions * 100 / INSTRUCTION_BUDGET_LIMIT;
+            (
+                INSTRUCTIONS_BASE
+                    + INSTRUCTIONS_PER_SHARD * SHARD_COUNT
+                    + recip_cnt * (INSTRUCTIONS_PER_RECIPIENT / 2),
+                (256 + recip_cnt * 16) * 1024,
+            )
+        } else if operation == sym_release || operation == sym_release_full {
+            let inv_id_opt = Self::get_u64_param(
+                &env,
+                &params,
+                &[
+                    Symbol::new(&env, "invoice_id"),
+                    symbol_short!("id"),
+                    Symbol::new(&env, "invoice"),
+                ],
+            )?;
+            let recip_cnt_opt = Self::get_recipients_len(&env, &params)?;
+
+            let recip_cnt = match (inv_id_opt, recip_cnt_opt) {
+                (Some(id), _) => {
+                    let inv = Self::load_invoice_opt(&env, id)?;
+                    inv.recipients.len() as u64
+                }
+                (None, Some(cnt)) => cnt,
+                (None, None) => return Err(ContractError::InvoiceNotFound),
+            };
+
+            (
+                INSTRUCTIONS_BASE
+                    + recip_cnt * INSTRUCTIONS_PER_RECIPIENT
+                    + INSTRUCTIONS_PER_SHARD * SHARD_COUNT,
+                (256 + recip_cnt * 32) * 1024,
+            )
+        } else if operation == sym_refund || operation == sym_refund_full {
+            let inv_id_opt = Self::get_u64_param(
+                &env,
+                &params,
+                &[
+                    Symbol::new(&env, "invoice_id"),
+                    symbol_short!("id"),
+                    Symbol::new(&env, "invoice"),
+                ],
+            )?;
+            let payer_cnt_opt = Self::get_u64_param(
+                &env,
+                &params,
+                &[
+                    Symbol::new(&env, "payer_count"),
+                    Symbol::new(&env, "payers"),
+                    symbol_short!("count"),
+                ],
+            )?;
+
+            let payer_cnt = match (inv_id_opt, payer_cnt_opt) {
+                (Some(id), _) => {
+                    let _inv = Self::load_invoice_opt(&env, id)?;
+                    1u64
+                }
+                (None, Some(cnt)) => cnt,
+                (None, None) => return Err(ContractError::InvoiceNotFound),
+            };
+
+            (
+                INSTRUCTIONS_BASE + INSTRUCTIONS_PER_SHARD * SHARD_COUNT + payer_cnt * 350_000,
+                (256 + payer_cnt * 32) * 1024,
+            )
+        } else if operation == sym_dispute_full
+            || operation == sym_dispute_raise
+            || operation == sym_dispute_short
+        {
+            let inv_id = match Self::get_u64_param(
+                &env,
+                &params,
+                &[
+                    Symbol::new(&env, "invoice_id"),
+                    symbol_short!("id"),
+                    Symbol::new(&env, "invoice"),
+                ],
+            )? {
+                Some(id) => id,
+                None => return Err(ContractError::InvoiceNotFound),
+            };
+
+            let _inv = Self::load_invoice_opt(&env, inv_id)?;
+            (INSTRUCTIONS_BASE + 200_000, 128 * 1024)
+        } else if operation == sym_approve_full
+            || operation == sym_approve_inv
+            || operation == sym_approve_short
+        {
+            let inv_id = match Self::get_u64_param(
+                &env,
+                &params,
+                &[
+                    Symbol::new(&env, "invoice_id"),
+                    symbol_short!("id"),
+                    Symbol::new(&env, "invoice"),
+                ],
+            )? {
+                Some(id) => id,
+                None => return Err(ContractError::InvoiceNotFound),
+            };
+
+            let _inv = Self::load_invoice_opt(&env, inv_id)?;
+            (INSTRUCTIONS_BASE + 150_000, 128 * 1024)
+        } else {
+            return Err(ContractError::InvalidStatus);
+        };
+
+        let budget_pct = cpu_insns * 100 / INSTRUCTION_BUDGET_LIMIT;
         if budget_pct > 80 {
             env.events().publish(
-                (
-                    symbol_short!("split"),
-                    symbol_short!("bdgt_w"),
-                    function_name,
-                ),
-                (instructions, INSTRUCTION_BUDGET_LIMIT),
+                (symbol_short!("split"), symbol_short!("bdgt_w"), operation),
+                (cpu_insns, INSTRUCTION_BUDGET_LIMIT),
             );
         }
 
-        ComputeEstimate {
-            instructions,
+        let fee_stroops = (cpu_insns as i128 / 10_000) * STROOPS_PER_10K_INSTRUCTIONS as i128;
+
+        Ok(ComputeEstimate {
+            cpu_insns,
             mem_bytes,
-            read_entries,
-            write_entries,
-        }
+            fee_stroops,
+        })
     }
 
     // -----------------------------------------------------------------------
