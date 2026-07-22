@@ -1,4 +1,4 @@
-use soroban_sdk::{contracttype, Address, Bytes, BytesN, Env, Symbol, Vec, String};
+use soroban_sdk::{contracttype, Address, Bytes, BytesN, Env, String, Symbol, Vec};
 
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
@@ -187,6 +187,16 @@ pub struct Tranche {
     pub basis_points: u32,
 }
 
+/// On-chain reputation scoring metrics for an address (issue #349).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct RepScore {
+    pub paid_on_time: u32,
+    pub late_pays: u32,
+    pub invoices_released: u32,
+    pub invoices_refunded: u32,
+}
+
 /// Optional parameters for `create_invoice`, grouped to keep the function
 /// within Soroban's 10-parameter limit.
 #[contracttype]
@@ -261,6 +271,8 @@ pub struct InvoiceOptions {
     pub scheduled_release_at: Option<u64>,
     /// KYC verification requirement.
     pub require_kyc: bool,
+    /// Minimum required payer reputation score to pay this invoice (issue #349).
+    pub min_payer_rep: Option<u32>,
 }
 
 /// Overflow options for `create_invoice`, split off from [`InvoiceOptions`] to stay within
@@ -407,6 +419,8 @@ pub struct InvoiceExt2 {
     pub target_usd_cents: Option<u64>,
     /// Issue #308: addresses that have already claimed a per-payer refund on this invoice.
     pub refunded_addresses: Vec<Address>,
+    /// Issue #349: minimum required payer reputation score.
+    pub min_payer_rep: Option<u32>,
 }
 
 /// Issue #211: A single escalating penalty tier (seconds_after_deadline, bps).
@@ -521,6 +535,8 @@ pub struct Invoice {
     pub target_usd_cents: Option<u64>,
     /// Issue #308: addresses that have already claimed a per-payer refund on this invoice.
     pub refunded_addresses: Vec<Address>,
+    /// Issue #349: minimum required payer reputation score.
+    pub min_payer_rep: Option<u32>,
 }
 
 impl Invoice {
@@ -608,6 +624,7 @@ impl Invoice {
                 priorities: self.priorities,
                 target_usd_cents: self.target_usd_cents,
                 refunded_addresses: self.refunded_addresses,
+                min_payer_rep: self.min_payer_rep,
             },
         )
     }
@@ -691,6 +708,7 @@ impl Invoice {
             priorities: ext2.priorities,
             target_usd_cents: ext2.target_usd_cents,
             refunded_addresses: ext2.refunded_addresses,
+            min_payer_rep: ext2.min_payer_rep,
         }
     }
 }
@@ -763,7 +781,7 @@ impl Invoice {
     /// Convert Invoice to compact byte representation.
     pub fn to_compact(&self, env: &Env) -> CompactInvoice {
         let mut bytes = Bytes::new(env);
-        
+
         // Pack status as 1 byte
         let status_byte: u8 = match self.status {
             InvoiceStatus::Pending => 0,
@@ -772,26 +790,31 @@ impl Invoice {
             InvoiceStatus::Cancelled => 3,
         };
         bytes.push_back(status_byte);
-        
+
         // Pack funded as 16 bytes (i128)
         let funded_bytes = self.funded.to_be_bytes();
         for byte in funded_bytes.iter() {
             bytes.push_back(*byte);
         }
-        
+
         // Pack deadline as 8 bytes (u64)
         let deadline_bytes = self.deadline.to_be_bytes();
         for byte in deadline_bytes.iter() {
             bytes.push_back(*byte);
         }
-        
+
         CompactInvoice { data: bytes }
     }
-    
+
     /// Restore Invoice from compact byte representation.
-    pub fn from_compact(compact: &CompactInvoice, core: InvoiceCore, ext: InvoiceExt, ext2: InvoiceExt2) -> Self {
+    pub fn from_compact(
+        compact: &CompactInvoice,
+        core: InvoiceCore,
+        ext: InvoiceExt,
+        ext2: InvoiceExt2,
+    ) -> Self {
         let bytes = &compact.data;
-        
+
         // Unpack status (1 byte)
         let status_byte = bytes.get(0).unwrap();
         let status = match status_byte {
@@ -801,21 +824,21 @@ impl Invoice {
             3 => InvoiceStatus::Cancelled,
             _ => InvoiceStatus::Pending,
         };
-        
+
         // Unpack funded (16 bytes)
         let mut funded_bytes = [0u8; 16];
-        for i in 0..16 {
-            funded_bytes[i] = bytes.get((1 + i) as u32).unwrap();
+        for (i, byte) in funded_bytes.iter_mut().enumerate() {
+            *byte = bytes.get((1 + i) as u32).unwrap();
         }
         let funded = i128::from_be_bytes(funded_bytes);
-        
+
         // Unpack deadline (8 bytes)
         let mut deadline_bytes = [0u8; 8];
-        for i in 0..8 {
-            deadline_bytes[i] = bytes.get((17 + i) as u32).unwrap();
+        for (i, byte) in deadline_bytes.iter_mut().enumerate() {
+            *byte = bytes.get((17 + i) as u32).unwrap();
         }
         let deadline = u64::from_be_bytes(deadline_bytes);
-        
+
         // Reconstruct full invoice with updated fields
         let mut invoice = Invoice::assemble(core, ext, ext2);
         invoice.status = status;
@@ -905,10 +928,10 @@ impl Invoice {
             priorities: Vec::new(env),
             target_usd_cents: None,
             refunded_addresses: Vec::new(env),
+            min_payer_rep: None,
         }
     }
 }
-
 
 /// Issue #327 / #329 / #330: Extended invoice fields for new features.
 /// Stored in separate persistent storage (key: inv_ex3 + invoice_id) so existing
@@ -1047,9 +1070,9 @@ impl InvoiceStatus {
     /// Encode as a single byte — saves XDR overhead vs. the full enum variant.
     pub fn to_u8(&self) -> u8 {
         match self {
-            InvoiceStatus::Pending   => 0,
-            InvoiceStatus::Released  => 1,
-            InvoiceStatus::Refunded  => 2,
+            InvoiceStatus::Pending => 0,
+            InvoiceStatus::Released => 1,
+            InvoiceStatus::Refunded => 2,
             InvoiceStatus::Cancelled => 3,
         }
     }
