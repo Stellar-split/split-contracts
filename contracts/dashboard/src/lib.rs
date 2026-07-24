@@ -44,17 +44,17 @@ impl DashboardContract {
         authorized.require_auth();
 
         let key = creator_dashboard_key(&creator);
-        let mut dashboard: CreatorDashboard = env
-            .storage()
-            .persistent()
-            .get(&key)
-            .unwrap_or(CreatorDashboard {
-                invoice_count: 0,
-                total_volume: 0,
-                released_count: 0,
-                refunded_count: 0,
-                released_volume: 0,
-            });
+        let mut dashboard: CreatorDashboard =
+            env.storage()
+                .persistent()
+                .get(&key)
+                .unwrap_or(CreatorDashboard {
+                    invoice_count: 0,
+                    total_volume: 0,
+                    released_count: 0,
+                    refunded_count: 0,
+                    released_volume: 0,
+                });
         dashboard.invoice_count = dashboard
             .invoice_count
             .checked_add(1)
@@ -75,17 +75,17 @@ impl DashboardContract {
         authorized.require_auth();
 
         let key = creator_dashboard_key(&creator);
-        let mut dashboard: CreatorDashboard = env
-            .storage()
-            .persistent()
-            .get(&key)
-            .unwrap_or(CreatorDashboard {
-                invoice_count: 0,
-                total_volume: 0,
-                released_count: 0,
-                refunded_count: 0,
-                released_volume: 0,
-            });
+        let mut dashboard: CreatorDashboard =
+            env.storage()
+                .persistent()
+                .get(&key)
+                .unwrap_or(CreatorDashboard {
+                    invoice_count: 0,
+                    total_volume: 0,
+                    released_count: 0,
+                    refunded_count: 0,
+                    released_volume: 0,
+                });
         dashboard.released_count = dashboard
             .released_count
             .checked_add(1)
@@ -106,17 +106,17 @@ impl DashboardContract {
         authorized.require_auth();
 
         let key = creator_dashboard_key(&creator);
-        let mut dashboard: CreatorDashboard = env
-            .storage()
-            .persistent()
-            .get(&key)
-            .unwrap_or(CreatorDashboard {
-                invoice_count: 0,
-                total_volume: 0,
-                released_count: 0,
-                refunded_count: 0,
-                released_volume: 0,
-            });
+        let mut dashboard: CreatorDashboard =
+            env.storage()
+                .persistent()
+                .get(&key)
+                .unwrap_or(CreatorDashboard {
+                    invoice_count: 0,
+                    total_volume: 0,
+                    released_count: 0,
+                    refunded_count: 0,
+                    released_volume: 0,
+                });
         dashboard.refunded_count = dashboard
             .refunded_count
             .checked_add(1)
