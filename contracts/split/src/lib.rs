@@ -39,6 +39,10 @@ use soroban_sdk::xdr::ToXdr;
 use soroban_sdk::{
     contract, contractimpl, symbol_short, token, Address, Bytes, BytesN, Env, IntoVal, Map, String,
     Symbol, TryFromVal, Val, Vec,
+use soroban_sdk::xdr::ToXdr;
+use soroban_sdk::{
+    contract, contractimpl, symbol_short, token, Address, Bytes, BytesN, Env, IntoVal, Map, String,
+    Symbol, Val, Vec,
 };
 use types::{
     AdminRole, AuditEntry, Bid, CircuitBreakerStatus, CloneOverrides, CompactInvoice,
@@ -9165,6 +9169,52 @@ impl SplitContract {
             )? {
                 Some(id) => id,
                 None => return Err(ContractError::InvoiceNotFound),
+    /// Estimate the compute budget for a given public function and recipient count.
+    /// Off-chain callers use this to size transactions before submission.
+    pub fn estimate_compute(
+        env: Env,
+        function_name: Symbol,
+        recipient_count: u32,
+    ) -> ComputeEstimate {
+        let recipients = recipient_count as u64;
+
+        let sym_create = symbol_short!("create_i");
+        let sym_pay = symbol_short!("pay");
+        let sym_dlgt = symbol_short!("pay_dlgt");
+        let sym_release = symbol_short!("release");
+        let sym_get_inv = symbol_short!("get_inv");
+        let sym_stats = symbol_short!("get_stat");
+
+        let (instructions, mem_bytes, read_entries, write_entries): (u64, u64, u32, u32) =
+            if function_name == sym_create {
+                (
+                    INSTRUCTIONS_BASE + recipients * 200_000,
+                    (128 + recipients * 64) * 1024,
+                    (2 + recipients) as u32,
+                    (4 + recipients) as u32,
+                )
+            } else if function_name == sym_pay || function_name == sym_dlgt {
+                (
+                    INSTRUCTIONS_BASE + INSTRUCTIONS_PER_SHARD * SHARD_COUNT,
+                    256 * 1024,
+                    4,
+                    4,
+                )
+            } else if function_name == sym_release {
+                (
+                    INSTRUCTIONS_BASE
+                        + recipients * INSTRUCTIONS_PER_RECIPIENT
+                        + INSTRUCTIONS_PER_SHARD * SHARD_COUNT,
+                    (256 + recipients * 32) * 1024,
+                    4 + SHARD_COUNT as u32 + recipients as u32,
+                    2 + recipients as u32,
+                )
+            } else if function_name == sym_get_inv {
+                (INSTRUCTIONS_BASE / 4, 64 * 1024, 3, 0)
+            } else if function_name == sym_stats {
+                (INSTRUCTIONS_BASE / 2, 128 * 1024, 2, 0)
+            } else {
+                (INSTRUCTIONS_BASE, 128 * 1024, 2, 2)
             };
 
             let _inv = Self::load_invoice_opt(&env, inv_id)?;
@@ -9178,6 +9228,12 @@ impl SplitContract {
             env.events().publish(
                 (symbol_short!("split"), symbol_short!("bdgt_w"), operation),
                 (cpu_insns, INSTRUCTION_BUDGET_LIMIT),
+                (
+                    symbol_short!("split"),
+                    symbol_short!("bdgt_w"),
+                    function_name,
+                ),
+                (instructions, INSTRUCTION_BUDGET_LIMIT),
             );
         }
 
