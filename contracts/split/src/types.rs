@@ -257,12 +257,6 @@ pub struct InvoiceOptions {
     pub cross_chain_ref: Option<String>,
     /// Issue #98: restrict payments to this allowlist; None = open.
     pub allowed_payers: Option<Vec<Address>>,
-    /// Per-payer cooldown window in seconds (issue #168).
-    pub payment_cooldown_secs: Option<u64>,
-    /// Maximum payments allowed per window (issue #168).
-    pub max_payments_per_window: Option<u32>,
-    /// Window duration in seconds for payment rate limiting (issue #168).
-    pub payment_window_secs: Option<u64>,
     /// Issue: per-recipient release priorities (parallel to recipients); empty = no ordering.
     pub priorities: Vec<u32>,
     /// Issue #199: grace period in seconds after deadline before refund is allowed.
@@ -271,16 +265,9 @@ pub struct InvoiceOptions {
     pub scheduled_release_at: Option<u64>,
     /// KYC verification requirement.
     pub require_kyc: bool,
-    /// Oracle contract used for oracle-priced invoices: the funding target is
-    /// computed at payment time from a live exchange rate instead of being
-    /// fixed at creation. When set, `oracle_asset_pair` must also be set and
-    /// `amounts` is interpreted as the USD-cents funding target.
-    pub oracle: Option<Address>,
-    /// (base, quote) asset symbols passed to the oracle's `price(asset_pair)`
-    /// call, e.g. (XLM, USD).
-    pub oracle_asset_pair: Option<(Symbol, Symbol)>,
-    /// Minimum required payer reputation score to pay this invoice (issue #349).
-    pub min_payer_rep: Option<u32>,
+    /// Overflow fields that would otherwise push this struct past Soroban's
+    /// 40-field `#[contracttype]` limit — see [`InvoiceOptions2`].
+    pub ext: InvoiceOptions2,
 }
 
 /// Overflow options for `create_invoice`, split off from [`InvoiceOptions`] to stay within
@@ -296,6 +283,22 @@ pub struct InvoiceOptions2 {
     pub release_delay_ledgers: Option<u32>,
     /// Issue #329: optional IPFS CID / SHA-256 hash of off-chain invoice metadata.
     pub metadata_hash: Option<BytesN<32>>,
+    /// Per-payer cooldown window in seconds (issue #168).
+    pub payment_cooldown_secs: Option<u64>,
+    /// Maximum payments allowed per window (issue #168).
+    pub max_payments_per_window: Option<u32>,
+    /// Window duration in seconds for payment rate limiting (issue #168).
+    pub payment_window_secs: Option<u64>,
+    /// Oracle contract used for oracle-priced invoices: the funding target is
+    /// computed at payment time from a live exchange rate instead of being
+    /// fixed at creation. When set, `oracle_asset_pair` must also be set and
+    /// `amounts` is interpreted as the USD-cents funding target.
+    pub oracle: Option<Address>,
+    /// (base, quote) asset symbols passed to the oracle's `price(asset_pair)`
+    /// call, e.g. (XLM, USD).
+    pub oracle_asset_pair: Option<(Symbol, Symbol)>,
+    /// Minimum required payer reputation score to pay this invoice (issue #349).
+    pub min_payer_rep: Option<u32>,
 }
 
 /// Legacy invoice layout used by stored invoices created before the `version`

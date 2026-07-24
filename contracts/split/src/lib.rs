@@ -28,7 +28,7 @@ const ORACLE_RATE_SCALE: i128 = 1_000_000;
 
 mod error;
 mod events;
-mod types;
+pub mod types;
 
 #[cfg(test)]
 mod test;
@@ -44,10 +44,6 @@ use soroban_sdk::xdr::ToXdr;
 use soroban_sdk::{
     contract, contractimpl, symbol_short, token, Address, Bytes, BytesN, Env, IntoVal, Map, String,
     Symbol, TryFromVal, Val, Vec,
-use soroban_sdk::xdr::ToXdr;
-use soroban_sdk::{
-    contract, contractimpl, symbol_short, token, Address, Bytes, BytesN, Env, IntoVal, Map, String,
-    Symbol, Val, Vec,
 };
 use types::{
     AdminRole, AuditEntry, Bid, CircuitBreakerStatus, CloneOverrides, CompactInvoice,
@@ -742,12 +738,6 @@ fn archive_invoice_storage(env: &Env, id: u64, core: &InvoiceCore) {
         .get(&invoice_ext2_key(id))
         .or_else(|| env.storage().instance().get(&invoice_ext2_key(id)))
         .unwrap_or_else(|| InvoiceExt2 {
-            notification_contract: None, overflow_behavior: OverflowBehavior::Reject,
-            cross_chain_ref: None, require_kyc: false, arbiter: None, disputed: false,
-            admin_frozen: false, auction_on_expiry: false, auction_end: 0, bids: Vec::new(env),
-            min_payment: 0, min_funding_amount: 0, priorities: Vec::new(env),
-            target_usd_cents: None, refunded_addresses: Vec::new(env),
-            oracle: None, oracle_asset_pair: None,
             notification_contract: None,
             overflow_behavior: OverflowBehavior::Reject,
             cross_chain_ref: None,
@@ -763,6 +753,8 @@ fn archive_invoice_storage(env: &Env, id: u64, core: &InvoiceCore) {
             priorities: Vec::new(env),
             target_usd_cents: None,
             refunded_addresses: Vec::new(env),
+            oracle: None,
+            oracle_asset_pair: None,
             min_payer_rep: None,
         });
 
@@ -2529,19 +2521,19 @@ impl SplitContract {
             options.auto_resolve_rules,
             options.cross_chain_ref,
             options.allowed_payers,
-            options.payment_cooldown_secs,
-            options.max_payments_per_window,
-            options.payment_window_secs,
+            options.ext.payment_cooldown_secs,
+            options.ext.max_payments_per_window,
+            options.ext.payment_window_secs,
             options.refund_grace_secs,
             options.priorities,
             options.require_kyc,
             options.scheduled_release_at,
-            options.min_payer_rep,
-            None, // release_delay_ledgers (use create_invoice_ext for this)
-            None, // metadata_hash
-            None, // target_usd_cents
-            options.oracle,
-            options.oracle_asset_pair,
+            options.ext.min_payer_rep,
+            options.ext.release_delay_ledgers,
+            options.ext.metadata_hash,
+            options.ext.target_usd_cents,
+            options.ext.oracle,
+            options.ext.oracle_asset_pair,
         )
     }
 
@@ -3116,19 +3108,14 @@ impl SplitContract {
                 None,
                 None,
                 Vec::new(&env), // priorities
-                false, // require_kyc
-                None, // scheduled_release_at
-                None, // release_delay_ledgers
-                None, // metadata_hash
-                None, // target_usd_cents
-                None, // oracle
-                None, // oracle_asset_pair
                 false,          // require_kyc
                 None,           // scheduled_release_at
+                None,           // min_payer_rep
                 None,           // release_delay_ledgers
                 None,           // metadata_hash
                 None,           // target_usd_cents
-                None,           // min_payer_rep
+                None,           // oracle
+                None,           // oracle_asset_pair
             );
             ids.push_back(id);
         }
@@ -3221,33 +3208,12 @@ impl SplitContract {
                 Vec::new(&env),   // priorities
                 false,            // require_kyc
                 None,             // scheduled_release_at
+                None,             // min_payer_rep
                 None,             // release_delay_ledgers
                 None,             // metadata_hash
                 None,             // target_usd_cents
                 None,             // oracle
                 None,             // oracle_asset_pair
-                false,          // convert_to_stream
-                Vec::new(&env), // accepted_tokens
-                None,           // forward_to
-                None,           // forward_invoice_id
-                None,           // creator_cosigner
-                0_i128,         // velocity_limit
-                0_u64,          // velocity_window
-                Vec::new(&env), // split_rules
-                Vec::new(&env), // auto_resolve_rules
-                None,           // cross_chain_ref
-                None,           // allowed_payers
-                None,           // payment_cooldown_secs
-                None,           // max_payments_per_window
-                None,           // payment_window_secs
-                None,           // refund_grace_secs
-                Vec::new(&env), // priorities
-                false,          // require_kyc
-                None,           // scheduled_release_at
-                None,           // release_delay_ledgers
-                None,           // metadata_hash
-                None,           // target_usd_cents
-                None,           // min_payer_rep
             );
             ids.push_back(id);
         }
@@ -3323,19 +3289,14 @@ impl SplitContract {
             None,
             None,
             Vec::new(&env), // priorities
-            false, // require_kyc
-            None, // scheduled_release_at
-            None, // release_delay_ledgers
-            None, // metadata_hash
-            None, // target_usd_cents
-            None, // oracle
-            None, // oracle_asset_pair
             false,          // require_kyc
             None,           // scheduled_release_at
+            None,           // min_payer_rep
             None,           // release_delay_ledgers
             None,           // metadata_hash
             None,           // target_usd_cents
-            None,           // min_payer_rep
+            None,           // oracle
+            None,           // oracle_asset_pair
         );
 
         if months > 1 {
@@ -6436,19 +6397,14 @@ impl SplitContract {
                 None,
                 None,
                 Vec::new(env), // priorities
-                false, // require_kyc
-                None, // scheduled_release_at
-                None, // release_delay_ledgers
-                None, // metadata_hash
-                None, // target_usd_cents
-                None, // oracle
-                None, // oracle_asset_pair
                 false,         // require_kyc
                 None,          // scheduled_release_at
+                None,          // min_payer_rep
                 None,          // release_delay_ledgers
                 None,          // metadata_hash
                 None,          // target_usd_cents
-                None,          // min_payer_rep
+                None,          // oracle
+                None,          // oracle_asset_pair
             );
             env.storage()
                 .persistent()
@@ -7467,19 +7423,14 @@ impl SplitContract {
             None,
             None,
             Vec::new(&env), // priorities
-            false, // require_kyc
-            None, // scheduled_release_at
-            None, // release_delay_ledgers
-            None, // metadata_hash
-            None, // target_usd_cents
-            None, // oracle
-            None, // oracle_asset_pair
             false,          // require_kyc
             None,           // scheduled_release_at
+            None,           // min_payer_rep
             None,           // release_delay_ledgers
             None,           // metadata_hash
             None,           // target_usd_cents
-            None,           // min_payer_rep
+            None,           // oracle
+            None,           // oracle_asset_pair
         )
     }
 
@@ -8028,10 +7979,6 @@ impl SplitContract {
                 arbiter: None,
                 disputed: false,
                 admin_frozen: false,
-                auction_on_expiry: false, auction_end: 0, bids: Vec::new(&env),
-                min_payment: 0, min_funding_amount: 0, priorities: Vec::new(&env),
-                target_usd_cents: None, refunded_addresses: Vec::new(&env),
-                oracle: None, oracle_asset_pair: None,
                 auction_on_expiry: false,
                 auction_end: 0,
                 bids: Vec::new(&env),
@@ -8040,6 +7987,8 @@ impl SplitContract {
                 priorities: Vec::new(&env),
                 target_usd_cents: None,
                 refunded_addresses: Vec::new(&env),
+                oracle: None,
+                oracle_asset_pair: None,
                 min_payer_rep: None,
             });
 
@@ -8138,10 +8087,6 @@ impl SplitContract {
                         arbiter: None,
                         disputed: false,
                         admin_frozen: false,
-                        auction_on_expiry: false, auction_end: 0, bids: Vec::new(&env),
-                        min_payment: 0, min_funding_amount: 0, priorities: Vec::new(&env),
-                        target_usd_cents: None, refunded_addresses: Vec::new(&env),
-                        oracle: None, oracle_asset_pair: None,
                         auction_on_expiry: false,
                         auction_end: 0,
                         bids: Vec::new(&env),
@@ -8150,6 +8095,8 @@ impl SplitContract {
                         priorities: Vec::new(&env),
                         target_usd_cents: None,
                         refunded_addresses: Vec::new(&env),
+                        oracle: None,
+                        oracle_asset_pair: None,
                         min_payer_rep: None,
                     });
 
@@ -9374,52 +9321,6 @@ impl SplitContract {
             )? {
                 Some(id) => id,
                 None => return Err(ContractError::InvoiceNotFound),
-    /// Estimate the compute budget for a given public function and recipient count.
-    /// Off-chain callers use this to size transactions before submission.
-    pub fn estimate_compute(
-        env: Env,
-        function_name: Symbol,
-        recipient_count: u32,
-    ) -> ComputeEstimate {
-        let recipients = recipient_count as u64;
-
-        let sym_create = symbol_short!("create_i");
-        let sym_pay = symbol_short!("pay");
-        let sym_dlgt = symbol_short!("pay_dlgt");
-        let sym_release = symbol_short!("release");
-        let sym_get_inv = symbol_short!("get_inv");
-        let sym_stats = symbol_short!("get_stat");
-
-        let (instructions, mem_bytes, read_entries, write_entries): (u64, u64, u32, u32) =
-            if function_name == sym_create {
-                (
-                    INSTRUCTIONS_BASE + recipients * 200_000,
-                    (128 + recipients * 64) * 1024,
-                    (2 + recipients) as u32,
-                    (4 + recipients) as u32,
-                )
-            } else if function_name == sym_pay || function_name == sym_dlgt {
-                (
-                    INSTRUCTIONS_BASE + INSTRUCTIONS_PER_SHARD * SHARD_COUNT,
-                    256 * 1024,
-                    4,
-                    4,
-                )
-            } else if function_name == sym_release {
-                (
-                    INSTRUCTIONS_BASE
-                        + recipients * INSTRUCTIONS_PER_RECIPIENT
-                        + INSTRUCTIONS_PER_SHARD * SHARD_COUNT,
-                    (256 + recipients * 32) * 1024,
-                    4 + SHARD_COUNT as u32 + recipients as u32,
-                    2 + recipients as u32,
-                )
-            } else if function_name == sym_get_inv {
-                (INSTRUCTIONS_BASE / 4, 64 * 1024, 3, 0)
-            } else if function_name == sym_stats {
-                (INSTRUCTIONS_BASE / 2, 128 * 1024, 2, 0)
-            } else {
-                (INSTRUCTIONS_BASE, 128 * 1024, 2, 2)
             };
 
             let _inv = Self::load_invoice_opt(&env, inv_id)?;
@@ -9433,12 +9334,6 @@ impl SplitContract {
             env.events().publish(
                 (symbol_short!("split"), symbol_short!("bdgt_w"), operation),
                 (cpu_insns, INSTRUCTION_BUDGET_LIMIT),
-                (
-                    symbol_short!("split"),
-                    symbol_short!("bdgt_w"),
-                    function_name,
-                ),
-                (instructions, INSTRUCTION_BUDGET_LIMIT),
             );
         }
 

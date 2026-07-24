@@ -726,6 +726,9 @@ pub fn tranche_released(env: &Env, invoice_id: u64, tranche_index: u32, amount: 
     env.events().publish(
         (symbol_short!("split"), symbol_short!("tr_rel"), invoice_id),
         (tranche_index, amount, env.ledger().sequence()),
+    );
+}
+
 /// Issue #349: Emitted when an address's reputation score is updated.
 /// Topics: (split, rep_upd, address)
 /// Data: score
