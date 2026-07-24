@@ -76,6 +76,8 @@ fn default_options(env: &Env) -> InvoiceOptions {
         priorities: Vec::new(env),
         require_kyc: false,
         scheduled_release_at: None,
+        oracle: None,
+        oracle_asset_pair: None,
     }
 }
 
@@ -125,6 +127,8 @@ fn invoice_options(
         priorities: Vec::new(env),
         require_kyc: false,
         scheduled_release_at: None,
+        oracle: None,
+        oracle_asset_pair: None,
     }
 }
 
@@ -3236,6 +3240,238 @@ fn test_create_invoice_stores_price_oracle_and_base_amounts() {
     assert_eq!(c.get_invoice_ext(&id).base_amounts.get(0).unwrap(), 500);
     // amounts field also preserved
     assert_eq!(invoice.amounts.get(0).unwrap(), 500);
+}
+
+// ---------------------------------------------------------------------------
+// Oracle-priced invoices — funding target computed at payment time.
+//
+// A "$100 worth of XLM" invoice: `amounts` holds the fixed USD-cents target
+// (10_000 = $100.00) and the oracle's `price(asset_pair)` call returns USD
+// cents per 1 whole token scaled by ORACLE_RATE_SCALE (1_000_000), e.g.
+// 1 XLM at $0.10 is rate = 10 * 1_000_000 = 10_000_000. The required token
+// total is `usd_cents_target * ORACLE_RATE_SCALE / rate`.
+// ---------------------------------------------------------------------------
+
+/// Configurable mock oracle: `price()` returns whatever rate was last set via
+/// `set_rate`, defaulting to 0 (used for the "oracle returns zero" scenario).
+#[contract]
+struct MockConfigurableOracle;
+
+#[contractimpl]
+impl MockConfigurableOracle {
+    pub fn set_rate(env: Env, rate: i128) {
+        env.storage().instance().set(&symbol_short!("rate"), &rate);
+    }
+
+    pub fn price(env: Env, _asset_pair: (Symbol, Symbol)) -> i128 {
+        env.storage()
+            .instance()
+            .get(&symbol_short!("rate"))
+            .unwrap_or(0i128)
+    }
+}
+
+/// Oracle mock that always traps — simulates a stale/unreachable price feed.
+#[contract]
+struct MockTrapOracle;
+
+#[contractimpl]
+impl MockTrapOracle {
+    pub fn price(_env: Env, _asset_pair: (Symbol, Symbol)) -> i128 {
+        panic!("oracle feed stale");
+    }
+}
+
+fn xlm_usd_pair() -> (Symbol, Symbol) {
+    (symbol_short!("XLM"), symbol_short!("USD"))
+}
+
+#[test]
+fn test_oracle_create_invoice_stores_oracle_address() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    env.ledger().set_timestamp(1_000);
+
+    let oracle_id = env.register(MockConfigurableOracle, ());
+
+    let mut opts = default_options(&env);
+    opts.oracle = Some(oracle_id.clone());
+    opts.oracle_asset_pair = Some(xlm_usd_pair());
+
+    let mut recipients = Vec::new(&env);
+    recipients.push_back(recipient.clone());
+    let mut amounts = Vec::new(&env);
+    amounts.push_back(10_000_i128); // $100.00 target, in USD cents
+
+    let id = c.create_invoice(&creator, &recipients, &amounts, &token_id, &9_999, &opts);
+
+    let ext2 = c.get_invoice_ext2(&id);
+    assert_eq!(ext2.oracle, Some(oracle_id));
+    assert_eq!(ext2.oracle_asset_pair, Some(xlm_usd_pair()));
+}
+
+#[test]
+fn test_oracle_create_invoice_requires_asset_pair() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    env.ledger().set_timestamp(1_000);
+
+    let oracle_id = env.register(MockConfigurableOracle, ());
+
+    let mut opts = default_options(&env);
+    opts.oracle = Some(oracle_id);
+    // oracle_asset_pair intentionally left None.
+
+    let mut recipients = Vec::new(&env);
+    recipients.push_back(recipient.clone());
+    let mut amounts = Vec::new(&env);
+    amounts.push_back(10_000_i128);
+
+    let result = c.try_create_invoice(&creator, &recipients, &amounts, &token_id, &9_999, &opts);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_oracle_price_changes_between_payments() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let payer = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    env.ledger().set_timestamp(1_000);
+    StellarAssetClient::new(&env, &token_id).mint(&payer, &2_000);
+
+    let oracle_id = env.register(MockConfigurableOracle, ());
+    let oracle_client = MockConfigurableOracleClient::new(&env, &oracle_id);
+    oracle_client.set_rate(&10_000_000_i128); // 1 XLM = $0.10
+
+    let mut opts = default_options(&env);
+    opts.oracle = Some(oracle_id);
+    opts.oracle_asset_pair = Some(xlm_usd_pair());
+
+    let mut recipients = Vec::new(&env);
+    recipients.push_back(recipient.clone());
+    let mut amounts = Vec::new(&env);
+    amounts.push_back(10_000_i128); // $100.00 target
+
+    let id = c.create_invoice(&creator, &recipients, &amounts, &token_id, &9_999, &opts);
+
+    // At $0.10/XLM, $100 requires 1000 XLM. Pay 400 of it.
+    c.pay(&payer, &id, &400_i128, &0_u64, &false, &false);
+    let invoice = c.get_invoice(&id);
+    assert_eq!(invoice.funded, 400);
+    assert_eq!(invoice.status, InvoiceStatus::Pending);
+
+    // Price rises to $0.20/XLM -> only 500 XLM needed in total; remaining = 100.
+    oracle_client.set_rate(&20_000_000_i128);
+    c.pay(&payer, &id, &100_i128, &1_u64, &false, &false);
+    let invoice = c.get_invoice(&id);
+    assert_eq!(invoice.funded, 500);
+    assert_eq!(invoice.status, InvoiceStatus::Released);
+}
+
+#[test]
+fn test_oracle_emits_price_fetched_event() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let payer = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    env.ledger().set_timestamp(1_000);
+    StellarAssetClient::new(&env, &token_id).mint(&payer, &1_000);
+
+    let oracle_id = env.register(MockConfigurableOracle, ());
+    MockConfigurableOracleClient::new(&env, &oracle_id).set_rate(&10_000_000_i128);
+
+    let mut opts = default_options(&env);
+    opts.oracle = Some(oracle_id);
+    opts.oracle_asset_pair = Some(xlm_usd_pair());
+
+    let mut recipients = Vec::new(&env);
+    recipients.push_back(recipient.clone());
+    let mut amounts = Vec::new(&env);
+    amounts.push_back(10_000_i128); // $100.00 target -> 1000 XLM at $0.10
+
+    let id = c.create_invoice(&creator, &recipients, &amounts, &token_id, &9_999, &opts);
+    c.pay(&payer, &id, &1_000_i128, &0_u64, &false, &false);
+
+    let found = env
+        .events()
+        .all()
+        .iter()
+        .any(|(_c, topics, _d)| topic1_is(&env, &topics, "orc_pf"));
+    assert!(found, "expected OraclePriceFetched event to be published");
+}
+
+#[test]
+#[should_panic(expected = "OracleUnavailable")]
+fn test_oracle_unavailable_panics() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let payer = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    env.ledger().set_timestamp(1_000);
+    StellarAssetClient::new(&env, &token_id).mint(&payer, &1_000);
+
+    let oracle_id = env.register(MockTrapOracle, ());
+
+    let mut opts = default_options(&env);
+    opts.oracle = Some(oracle_id);
+    opts.oracle_asset_pair = Some(xlm_usd_pair());
+
+    let mut recipients = Vec::new(&env);
+    recipients.push_back(recipient.clone());
+    let mut amounts = Vec::new(&env);
+    amounts.push_back(10_000_i128);
+
+    let id = c.create_invoice(&creator, &recipients, &amounts, &token_id, &9_999, &opts);
+
+    c.pay(&payer, &id, &100_i128, &0_u64, &false, &false);
+}
+
+#[test]
+#[should_panic(expected = "OracleUnavailable")]
+fn test_oracle_zero_rate_panics() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let payer = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    env.ledger().set_timestamp(1_000);
+    StellarAssetClient::new(&env, &token_id).mint(&payer, &1_000);
+
+    // MockConfigurableOracle defaults to a rate of 0 until set_rate is called.
+    let oracle_id = env.register(MockConfigurableOracle, ());
+
+    let mut opts = default_options(&env);
+    opts.oracle = Some(oracle_id);
+    opts.oracle_asset_pair = Some(xlm_usd_pair());
+
+    let mut recipients = Vec::new(&env);
+    recipients.push_back(recipient.clone());
+    let mut amounts = Vec::new(&env);
+    amounts.push_back(10_000_i128);
+
+    let id = c.create_invoice(&creator, &recipients, &amounts, &token_id, &9_999, &opts);
+
+    c.pay(&payer, &id, &100_i128, &0_u64, &false, &false);
 }
 
 // ---------------------------------------------------------------------------

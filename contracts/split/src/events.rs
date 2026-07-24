@@ -550,3 +550,17 @@ pub fn fee_paid(env: &Env, invoice_id: u64, amount: i128, treasury: &Address) {
         (amount, treasury.clone(), env.ledger().sequence()),
     );
 }
+
+/// Emitted when an oracle-priced invoice fetches a fresh rate at payment time.
+/// `rate` is the raw price returned by the oracle (USD cents per 1 whole token,
+/// scaled by `ORACLE_RATE_SCALE`); `computed_amount` is the resulting required
+/// token total derived from the invoice's fixed USD-cents target.
+///
+/// Topics: (split, orc_pf, invoice_id)
+/// Data: (rate, computed_amount, ledger)
+pub fn oracle_price_fetched(env: &Env, invoice_id: u64, rate: i128, computed_amount: i128) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("orc_pf"), invoice_id),
+        (rate, computed_amount, env.ledger().sequence()),
+    );
+}

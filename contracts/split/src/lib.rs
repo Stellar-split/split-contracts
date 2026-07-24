@@ -21,6 +21,11 @@ const STROOPS_PER_10K_INSTRUCTIONS: u64 = 1;
 /// Issue #296: Maximum entries in the per-creator fee waiver list.
 const MAX_FEE_WAIVER_ENTRIES: usize = 100;
 
+/// Fixed-point scale for oracle-priced invoices: the oracle's `price()` return
+/// value is USD cents per 1 whole token, scaled by this factor (e.g. 1 XLM at
+/// $0.12 = 12 cents is reported as `12 * ORACLE_RATE_SCALE` = `12_000_000`).
+const ORACLE_RATE_SCALE: i128 = 1_000_000;
+
 mod error;
 mod events;
 mod types;
@@ -647,6 +652,7 @@ fn archive_invoice_storage(env: &Env, id: u64, core: &InvoiceCore) {
             admin_frozen: false, auction_on_expiry: false, auction_end: 0, bids: Vec::new(env),
             min_payment: 0, min_funding_amount: 0, priorities: Vec::new(env),
             target_usd_cents: None, refunded_addresses: Vec::new(env),
+            oracle: None, oracle_asset_pair: None,
         });
 
     env.storage().instance().set(&invoice_key(id), core);
@@ -801,8 +807,10 @@ fn load_invoice(env: &Env, id: u64) -> Invoice {
             priorities: Vec::new(env),
             target_usd_cents: None,
             refunded_addresses: Vec::new(env),
+            oracle: None,
+            oracle_asset_pair: None,
         });
-    
+
     // Load compact representation if available, then overlay hot fields.
     let mut invoice = if let Some(compact) = env.storage().persistent().get::<_, CompactInvoice>(&invoice_compact_key(id)) {
         Invoice::from_compact(&compact, core, ext, ext2)
@@ -1775,6 +1783,8 @@ impl SplitContract {
                         priorities: Vec::new(&env),
                         target_usd_cents: None,
                         refunded_addresses: Vec::new(&env),
+                        oracle: None,
+                        oracle_asset_pair: None,
                     })
             });
         let audit_log: Vec<types::AuditEntry> = get_audit_log(&env, invoice_id);
@@ -2188,6 +2198,8 @@ impl SplitContract {
             None, // release_delay_ledgers (use create_invoice_ext for this)
             None, // metadata_hash
             None, // target_usd_cents
+            options.oracle,
+            options.oracle_asset_pair,
         )
     }
 
@@ -2241,6 +2253,8 @@ impl SplitContract {
         release_delay_ledgers: Option<u32>,
         metadata_hash: Option<BytesN<32>>,
         target_usd_cents: Option<u64>,
+        oracle: Option<Address>,
+        oracle_asset_pair: Option<(Symbol, Symbol)>,
     ) -> u64 {
         assert!(
             recipients.len() == amounts.len(),
@@ -2260,6 +2274,16 @@ impl SplitContract {
             assert!(
                 priorities.len() == recipients.len(),
                 "priorities length must match recipients"
+            );
+        }
+        if oracle.is_some() {
+            assert!(
+                oracle_asset_pair.is_some(),
+                "oracle_asset_pair required when oracle is set"
+            );
+            assert!(
+                price_oracle.is_none(),
+                "cannot set both price_oracle and oracle"
             );
         }
 
@@ -2563,6 +2587,8 @@ impl SplitContract {
             admin_frozen: false,
             min_funding_amount: 0,
             target_usd_cents,
+            oracle,
+            oracle_asset_pair,
         };
 
         save_invoice(env, id, &invoice);
@@ -2702,6 +2728,8 @@ impl SplitContract {
                 None, // release_delay_ledgers
                 None, // metadata_hash
                 None, // target_usd_cents
+                None, // oracle
+                None, // oracle_asset_pair
             );
             ids.push_back(id);
         }
@@ -2794,6 +2822,8 @@ impl SplitContract {
                 None,             // release_delay_ledgers
                 None,             // metadata_hash
                 None,             // target_usd_cents
+                None,             // oracle
+                None,             // oracle_asset_pair
             );
             ids.push_back(id);
         }
@@ -2871,6 +2901,8 @@ impl SplitContract {
             None, // release_delay_ledgers
             None, // metadata_hash
             None, // target_usd_cents
+            None, // oracle
+            None, // oracle_asset_pair
         );
 
         if months > 1 {
@@ -3044,6 +3076,8 @@ impl SplitContract {
             priorities: source.priorities.clone(),
             target_usd_cents: source.target_usd_cents,
             refunded_addresses: Vec::new(&env),
+            oracle: source.oracle.clone(),
+            oracle_asset_pair: source.oracle_asset_pair.clone(),
         };
 
         save_invoice(&env, id, &new_invoice);
@@ -3287,6 +3321,33 @@ impl SplitContract {
             );
             let base_total: i128 = invoice.base_amounts.iter().sum();
             base_total * oracle_price / 1_000_000
+        } else if let Some(ref oracle) = invoice.oracle {
+            // Oracle-priced invoice: the funding target is determined at payment
+            // time, not fixed at creation. `amounts` holds the fixed USD-cents
+            // target (e.g. "$100 worth of XLM"); the required token total is
+            // recomputed from the oracle's live exchange rate on every payment,
+            // so it tracks the market instead of being locked in at creation.
+            let pair = invoice
+                .oracle_asset_pair
+                .clone()
+                .expect("oracle_asset_pair required when oracle is set");
+            let args: Vec<Val> = (pair,).into_val(env);
+            let price_result = env.try_invoke_contract::<i128, soroban_sdk::Error>(
+                oracle,
+                &Symbol::new(env, "price"),
+                args,
+            );
+            // Any failure to reach the oracle (trap, missing contract, error
+            // result) or a non-positive rate (stale/uninitialized feed) is
+            // treated as unavailable rather than surfacing a cryptic host error.
+            let rate: i128 = match price_result {
+                Ok(Ok(r)) if r > 0 => r,
+                _ => panic!("OracleUnavailable"),
+            };
+            let usd_cents_target: i128 = invoice.amounts.iter().sum();
+            let computed_amount = usd_cents_target * ORACLE_RATE_SCALE / rate;
+            events::oracle_price_fetched(env, invoice_id, rate, computed_amount);
+            computed_amount
         } else {
             invoice.amounts.iter().sum()
         };
@@ -5416,6 +5477,8 @@ impl SplitContract {
                 None, // release_delay_ledgers
                 None, // metadata_hash
                 None, // target_usd_cents
+                None, // oracle
+                None, // oracle_asset_pair
             );
             env.storage()
                 .persistent()
@@ -6047,6 +6110,8 @@ impl SplitContract {
             None, // release_delay_ledgers
             None, // metadata_hash
             None, // target_usd_cents
+            old_invoice.oracle.clone(),
+            old_invoice.oracle_asset_pair.clone(),
         );
 
         // Copy payments from shards to new invoice (issue #177).
@@ -6320,6 +6385,8 @@ impl SplitContract {
             None, // release_delay_ledgers
             None, // metadata_hash
             None, // target_usd_cents
+            None, // oracle
+            None, // oracle_asset_pair
         )
     }
 
@@ -6813,6 +6880,7 @@ impl SplitContract {
                 auction_on_expiry: false, auction_end: 0, bids: Vec::new(&env),
                 min_payment: 0, min_funding_amount: 0, priorities: Vec::new(&env),
                 target_usd_cents: None, refunded_addresses: Vec::new(&env),
+                oracle: None, oracle_asset_pair: None,
             });
 
         // Copy to instance storage.
@@ -6868,6 +6936,7 @@ impl SplitContract {
                         auction_on_expiry: false, auction_end: 0, bids: Vec::new(&env),
                         min_payment: 0, min_funding_amount: 0, priorities: Vec::new(&env),
                         target_usd_cents: None, refunded_addresses: Vec::new(&env),
+                        oracle: None, oracle_asset_pair: None,
                     });
 
                 env.storage().instance().set(&invoice_key(id), &core);

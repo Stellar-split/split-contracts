@@ -27,4 +27,7 @@ pub enum ContractError {
     FundsLockedUntil   = 20,
     /// Issue #330: Recipient has already been paid on this invoice.
     RecipientAlreadyPaid = 19,
+    /// Oracle-priced invoice: the configured price oracle is unreachable, trapped, or
+    /// returned a non-positive rate at payment time.
+    OracleUnavailable  = 21,
 }
