@@ -1,10 +1,16 @@
-use soroban_sdk::{symbol_short, Address, BytesN, Env, Vec, String};
-use crate::types::{InvoiceStatus, TimelockAction, DisputeOutcome};
+use crate::types::{DisputeOutcome, InvoiceStatus, RepScore, TimelockAction};
+use soroban_sdk::{symbol_short, Address, BytesN, Env, String, Vec};
 
 /// Emitted when a new invoice is created.
 /// Topics: (split, created, invoice_id)
 /// Data: (creator, total)
-pub fn invoice_created(env: &Env, invoice_id: u64, creator: &Address, total: i128, cross_chain_ref: &Option<String>) {
+pub fn invoice_created(
+    env: &Env,
+    invoice_id: u64,
+    creator: &Address,
+    total: i128,
+    cross_chain_ref: &Option<String>,
+) {
     env.events().publish(
         (symbol_short!("split"), symbol_short!("created"), invoice_id),
         (creator.clone(), total, cross_chain_ref.clone()),
@@ -26,7 +32,11 @@ pub fn payment_received(env: &Env, invoice_id: u64, payer: &Address, amount: i12
 /// Data: recipients
 pub fn invoice_released(env: &Env, invoice_id: u64, recipients: &Vec<Address>) {
     env.events().publish(
-        (symbol_short!("split"), symbol_short!("released"), invoice_id),
+        (
+            symbol_short!("split"),
+            symbol_short!("released"),
+            invoice_id,
+        ),
         recipients.clone(),
     );
 }
@@ -36,7 +46,11 @@ pub fn invoice_released(env: &Env, invoice_id: u64, recipients: &Vec<Address>) {
 /// Data: ()
 pub fn invoice_refunded(env: &Env, invoice_id: u64) {
     env.events().publish(
-        (symbol_short!("split"), symbol_short!("refunded"), invoice_id),
+        (
+            symbol_short!("split"),
+            symbol_short!("refunded"),
+            invoice_id,
+        ),
         (),
     );
 }
@@ -76,7 +90,11 @@ pub fn split_adjusted(env: &Env, invoice_id: u64, creator: &Address) {
 /// Data: ()
 pub fn invoice_archived(env: &Env, invoice_id: u64) {
     env.events().publish(
-        (symbol_short!("split"), symbol_short!("archived"), invoice_id),
+        (
+            symbol_short!("split"),
+            symbol_short!("archived"),
+            invoice_id,
+        ),
         (),
     );
 }
@@ -86,7 +104,11 @@ pub fn invoice_archived(env: &Env, invoice_id: u64) {
 /// Data: delegate
 pub fn delegate_set(env: &Env, invoice_id: u64, delegate: &Address) {
     env.events().publish(
-        (symbol_short!("split"), symbol_short!("delegated"), invoice_id),
+        (
+            symbol_short!("split"),
+            symbol_short!("delegated"),
+            invoice_id,
+        ),
         delegate.clone(),
     );
 }
@@ -106,7 +128,11 @@ pub fn delegate_revoked(env: &Env, invoice_id: u64) {
 /// Data: recipients
 pub fn invoice_partially_released(env: &Env, invoice_id: u64, recipients: &Vec<Address>) {
     env.events().publish(
-        (symbol_short!("split"), symbol_short!("part_rel"), invoice_id),
+        (
+            symbol_short!("split"),
+            symbol_short!("part_rel"),
+            invoice_id,
+        ),
         recipients.clone(),
     );
 }
@@ -116,7 +142,11 @@ pub fn invoice_partially_released(env: &Env, invoice_id: u64, recipients: &Vec<A
 /// Data: who
 pub fn payment_reminder(env: &Env, invoice_id: u64, who: &Address) {
     env.events().publish(
-        (symbol_short!("split"), symbol_short!("reminder"), invoice_id),
+        (
+            symbol_short!("split"),
+            symbol_short!("reminder"),
+            invoice_id,
+        ),
         who.clone(),
     );
 }
@@ -135,10 +165,8 @@ pub fn payment_matched(env: &Env, invoice_id: u64, memo: u64, payer: &Address) {
 /// Topics: (cloned, source_id, new_id)
 /// Data: ()
 pub fn invoice_cloned(env: &Env, source_id: u64, new_id: u64) {
-    env.events().publish(
-        (symbol_short!("cloned"), source_id, new_id),
-        (),
-    );
+    env.events()
+        .publish((symbol_short!("cloned"), source_id, new_id), ());
 }
 
 /// Emitted when an invoice is paused.
@@ -182,7 +210,11 @@ pub fn invoice_force_resumed(env: &Env, invoice_id: u64, admin_addr: &Address) {
 /// Data: (recipient, amount)
 pub fn pending_payout_claimed(env: &Env, invoice_id: u64, recipient: &Address, amount: i128) {
     env.events().publish(
-        (symbol_short!("split"), symbol_short!("pend_pay"), invoice_id),
+        (
+            symbol_short!("split"),
+            symbol_short!("pend_pay"),
+            invoice_id,
+        ),
         (recipient.clone(), amount),
     );
 }
@@ -236,7 +268,13 @@ pub fn batch_archived(env: &Env, count: u32, ids: &Vec<u64>) {
     );
 }
 
-pub fn partial_refund_issued(env: &Env, invoice_id: u64, creator: &Address, bps: u32, amount: i128) {
+pub fn partial_refund_issued(
+    env: &Env,
+    invoice_id: u64,
+    creator: &Address,
+    bps: u32,
+    amount: i128,
+) {
     env.events().publish(
         (symbol_short!("split"), symbol_short!("prt_ref"), invoice_id),
         (creator.clone(), bps, amount),
@@ -246,9 +284,18 @@ pub fn partial_refund_issued(env: &Env, invoice_id: u64, creator: &Address, bps:
 /// Issue #276: Emitted when cumulative platform volume crosses a milestone threshold.
 /// Topics: (split, plt_v_ms, milestone_number)
 /// Data: (total_volume, invoice_count, ledger)
-pub fn platform_volume_milestone(env: &Env, total_volume: i128, invoice_count: u64, milestone_number: i128) {
+pub fn platform_volume_milestone(
+    env: &Env,
+    total_volume: i128,
+    invoice_count: u64,
+    milestone_number: i128,
+) {
     env.events().publish(
-        (symbol_short!("split"), symbol_short!("plt_v_ms"), milestone_number),
+        (
+            symbol_short!("split"),
+            symbol_short!("plt_v_ms"),
+            milestone_number,
+        ),
         (total_volume, invoice_count, env.ledger().sequence()),
     );
 }
@@ -256,10 +303,25 @@ pub fn platform_volume_milestone(env: &Env, total_volume: i128, invoice_count: u
 /// Issue #276: Emitted when a creator's lifetime volume crosses a milestone threshold.
 /// Topics: (split, cr_v_ms, creator)
 /// Data: (total_volume, invoice_count, milestone_number, ledger)
-pub fn creator_volume_milestone(env: &Env, creator: &Address, total_volume: i128, invoice_count: u64, milestone_number: i128) {
+pub fn creator_volume_milestone(
+    env: &Env,
+    creator: &Address,
+    total_volume: i128,
+    invoice_count: u64,
+    milestone_number: i128,
+) {
     env.events().publish(
-        (symbol_short!("split"), symbol_short!("cr_v_ms"), creator.clone()),
-        (total_volume, invoice_count, milestone_number, env.ledger().sequence()),
+        (
+            symbol_short!("split"),
+            symbol_short!("cr_v_ms"),
+            creator.clone(),
+        ),
+        (
+            total_volume,
+            invoice_count,
+            milestone_number,
+            env.ledger().sequence(),
+        ),
     );
 }
 
@@ -277,10 +339,8 @@ pub fn circuit_breaker_activated(env: &Env, reason: &String) {
 /// Topics: (split, cb_deact)
 /// Data: ()
 pub fn circuit_breaker_deactivated(env: &Env) {
-    env.events().publish(
-        (symbol_short!("split"), symbol_short!("cb_dact")),
-        (),
-    );
+    env.events()
+        .publish((symbol_short!("split"), symbol_short!("cb_dact")), ());
 }
 
 /// Issue #296: Emitted when a fee waiver is granted to a creator.
@@ -288,7 +348,11 @@ pub fn circuit_breaker_deactivated(env: &Env) {
 /// Data: ()
 pub fn fee_waiver_granted(env: &Env, creator: &Address) {
     env.events().publish(
-        (symbol_short!("split"), symbol_short!("fw_grant"), creator.clone()),
+        (
+            symbol_short!("split"),
+            symbol_short!("fw_grant"),
+            creator.clone(),
+        ),
         (),
     );
 }
@@ -298,7 +362,11 @@ pub fn fee_waiver_granted(env: &Env, creator: &Address) {
 /// Data: ()
 pub fn fee_waiver_revoked(env: &Env, creator: &Address) {
     env.events().publish(
-        (symbol_short!("split"), symbol_short!("fw_rev"), creator.clone()),
+        (
+            symbol_short!("split"),
+            symbol_short!("fw_rev"),
+            creator.clone(),
+        ),
         (),
     );
 }
@@ -317,9 +385,19 @@ pub fn fee_tiers_updated(env: &Env, tier_count: u32) {
 /// Topics: (split, fee_tier_applied, creator)
 /// Data: (tier_index, fee_bps, creator_volume)
 #[allow(dead_code)]
-pub fn fee_tier_applied(env: &Env, creator: &Address, tier_index: u32, fee_bps: u32, creator_volume: u64) {
+pub fn fee_tier_applied(
+    env: &Env,
+    creator: &Address,
+    tier_index: u32,
+    fee_bps: u32,
+    creator_volume: u64,
+) {
     env.events().publish(
-        (symbol_short!("split"), symbol_short!("fee_app"), creator.clone()),
+        (
+            symbol_short!("split"),
+            symbol_short!("fee_app"),
+            creator.clone(),
+        ),
         (tier_index, fee_bps, creator_volume),
     );
 }
@@ -328,10 +406,28 @@ pub fn fee_tier_applied(env: &Env, creator: &Address, tier_index: u32, fee_bps: 
 /// Topics: (split, creator_stats_updated, creator)
 /// Data: (total_invoices, total_raised, total_released, total_payers, avg_funding_time)
 #[allow(dead_code)]
-pub fn creator_stats_updated(env: &Env, creator: &Address, total_invoices: u32, total_raised: u64, total_released: u64, total_payers: u32, avg_funding_time_ledgers: u32) {
+pub fn creator_stats_updated(
+    env: &Env,
+    creator: &Address,
+    total_invoices: u32,
+    total_raised: u64,
+    total_released: u64,
+    total_payers: u32,
+    avg_funding_time_ledgers: u32,
+) {
     env.events().publish(
-        (symbol_short!("split"), symbol_short!("stats_upd"), creator.clone()),
-        (total_invoices, total_raised, total_released, total_payers, avg_funding_time_ledgers),
+        (
+            symbol_short!("split"),
+            symbol_short!("stats_upd"),
+            creator.clone(),
+        ),
+        (
+            total_invoices,
+            total_raised,
+            total_released,
+            total_payers,
+            avg_funding_time_ledgers,
+        ),
     );
 }
 
@@ -379,7 +475,13 @@ pub fn invoice_state_changed(
 /// Issue #309: Emitted when a payer is added/removed from an invoice's allowlist.
 /// Topics: (split, al_upd, invoice_id)
 /// Data: (creator, payer, added)
-pub fn allowlist_updated(env: &Env, invoice_id: u64, creator: &Address, payer: &Address, added: bool) {
+pub fn allowlist_updated(
+    env: &Env,
+    invoice_id: u64,
+    creator: &Address,
+    payer: &Address,
+    added: bool,
+) {
     env.events().publish(
         (symbol_short!("split"), symbol_short!("al_upd"), invoice_id),
         (creator.clone(), payer.clone(), added),
@@ -451,7 +553,11 @@ pub fn contract_unpaused(env: &Env, admin: &Address) {
 /// Data: unlock_ledger
 pub fn funds_unlocked(env: &Env, invoice_id: u64, unlock_ledger: u32) {
     env.events().publish(
-        (symbol_short!("split"), symbol_short!("fnd_unlk"), invoice_id),
+        (
+            symbol_short!("split"),
+            symbol_short!("fnd_unlk"),
+            invoice_id,
+        ),
         unlock_ledger,
     );
 }
@@ -459,9 +565,18 @@ pub fn funds_unlocked(env: &Env, invoice_id: u64, unlock_ledger: u32) {
 /// Issue #329: Emitted when a creator updates an invoice's off-chain metadata hash.
 /// Topics: (split, meta_upd, invoice_id)
 /// Data: (old_hash, new_hash, ledger)
-pub fn metadata_updated(env: &Env, invoice_id: u64, old_hash: &Option<BytesN<32>>, new_hash: &BytesN<32>) {
+pub fn metadata_updated(
+    env: &Env,
+    invoice_id: u64,
+    old_hash: &Option<BytesN<32>>,
+    new_hash: &BytesN<32>,
+) {
     env.events().publish(
-        (symbol_short!("split"), symbol_short!("meta_upd"), invoice_id),
+        (
+            symbol_short!("split"),
+            symbol_short!("meta_upd"),
+            invoice_id,
+        ),
         (old_hash.clone(), new_hash.clone(), env.ledger().sequence()),
     );
 }
@@ -471,7 +586,11 @@ pub fn metadata_updated(env: &Env, invoice_id: u64, old_hash: &Option<BytesN<32>
 /// Data: (recipient, amount, ledger)
 pub fn recipient_paid(env: &Env, invoice_id: u64, recipient: &Address, amount: i128) {
     env.events().publish(
-        (symbol_short!("split"), symbol_short!("rec_paid"), invoice_id),
+        (
+            symbol_short!("split"),
+            symbol_short!("rec_paid"),
+            invoice_id,
+        ),
         (recipient.clone(), amount, env.ledger().sequence()),
     );
 }
@@ -492,7 +611,11 @@ pub fn recipient_paid(env: &Env, invoice_id: u64, recipient: &Address, amount: i
 /// Data: (milestone_bps, funded_amount, ledger)
 pub fn milestone_reached(env: &Env, invoice_id: u64, milestone_bps: u32, funded_amount: i128) {
     env.events().publish(
-        (symbol_short!("split"), symbol_short!("milestone"), invoice_id),
+        (
+            symbol_short!("split"),
+            symbol_short!("milestone"),
+            invoice_id,
+        ),
         (milestone_bps, funded_amount, env.ledger().sequence()),
     );
 }
@@ -500,10 +623,25 @@ pub fn milestone_reached(env: &Env, invoice_id: u64, milestone_bps: u32, funded_
 /// Issue #315: Emitted when a delegated payment is executed.
 /// Topics: (split, dlgt_pay, invoice_id)
 /// Data: (payer, executor, amount, ledger)
-pub fn delegated_payment(env: &Env, invoice_id: u64, payer: &Address, executor: &Address, amount: i128) {
+pub fn delegated_payment(
+    env: &Env,
+    invoice_id: u64,
+    payer: &Address,
+    executor: &Address,
+    amount: i128,
+) {
     env.events().publish(
-        (symbol_short!("split"), symbol_short!("dlgt_pay"), invoice_id),
-        (payer.clone(), executor.clone(), amount, env.ledger().sequence()),
+        (
+            symbol_short!("split"),
+            symbol_short!("dlgt_pay"),
+            invoice_id,
+        ),
+        (
+            payer.clone(),
+            executor.clone(),
+            amount,
+            env.ledger().sequence(),
+        ),
     );
 }
 
@@ -512,7 +650,11 @@ pub fn delegated_payment(env: &Env, invoice_id: u64, payer: &Address, executor: 
 /// Data: (payer, reason_hash, ledger)
 pub fn dispute_raised(env: &Env, invoice_id: u64, payer: &Address, reason_hash: &BytesN<32>) {
     env.events().publish(
-        (symbol_short!("split"), symbol_short!("disp_rsd"), invoice_id),
+        (
+            symbol_short!("split"),
+            symbol_short!("disp_rsd"),
+            invoice_id,
+        ),
         (payer.clone(), reason_hash.clone(), env.ledger().sequence()),
     );
 }
@@ -526,7 +668,11 @@ pub fn dispute_resolved(env: &Env, invoice_id: u64, admin: &Address, outcome: &D
         DisputeOutcome::Refunded => symbol_short!("refunded"),
     };
     env.events().publish(
-        (symbol_short!("split"), symbol_short!("disp_res"), invoice_id),
+        (
+            symbol_short!("split"),
+            symbol_short!("disp_res"),
+            invoice_id,
+        ),
         (admin.clone(), outcome_sym, env.ledger().sequence()),
     );
 }
@@ -536,7 +682,11 @@ pub fn dispute_resolved(env: &Env, invoice_id: u64, admin: &Address, outcome: &D
 /// Data: ledger
 pub fn dispute_expired(env: &Env, invoice_id: u64) {
     env.events().publish(
-        (symbol_short!("split"), symbol_short!("disp_exp"), invoice_id),
+        (
+            symbol_short!("split"),
+            symbol_short!("disp_exp"),
+            invoice_id,
+        ),
         env.ledger().sequence(),
     );
 }
@@ -546,7 +696,11 @@ pub fn dispute_expired(env: &Env, invoice_id: u64) {
 /// Data: (amount, treasury, ledger)
 pub fn fee_paid(env: &Env, invoice_id: u64, amount: i128, treasury: &Address) {
     env.events().publish(
-        (symbol_short!("split"), symbol_short!("fee_paid"), invoice_id),
+        (
+            symbol_short!("split"),
+            symbol_short!("fee_paid"),
+            invoice_id,
+        ),
         (amount, treasury.clone(), env.ledger().sequence()),
     );
 }
@@ -572,5 +726,16 @@ pub fn tranche_released(env: &Env, invoice_id: u64, tranche_index: u32, amount: 
     env.events().publish(
         (symbol_short!("split"), symbol_short!("tr_rel"), invoice_id),
         (tranche_index, amount, env.ledger().sequence()),
+/// Issue #349: Emitted when an address's reputation score is updated.
+/// Topics: (split, rep_upd, address)
+/// Data: score
+pub fn rep_updated(env: &Env, address: &Address, score: &RepScore) {
+    env.events().publish(
+        (
+            symbol_short!("split"),
+            symbol_short!("rep_upd"),
+            address.clone(),
+        ),
+        score.clone(),
     );
 }

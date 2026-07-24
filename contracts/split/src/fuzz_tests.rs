@@ -1,4 +1,5 @@
 #![cfg(test)]
+#![allow(clippy::all)]
 
 extern crate std;
 
@@ -13,7 +14,13 @@ const MAX_BPS: u32 = 10_000;
 
 /// Proportional share of `funded` for one recipient (mirrors `_release_full`
 /// and `partial_release` distribution).
-fn proportional_share(amount: i128, total: i128, funded: i128, is_last: bool, distributed: i128) -> i128 {
+fn proportional_share(
+    amount: i128,
+    total: i128,
+    funded: i128,
+    is_last: bool,
+    distributed: i128,
+) -> i128 {
     if total == 0 {
         return 0;
     }
@@ -25,7 +32,12 @@ fn proportional_share(amount: i128, total: i128, funded: i128, is_last: bool, di
 }
 
 /// Platform fee and tax deduction (mirrors `_release_full` fee logic).
-fn deduct_fees(proportional: i128, platform_fee_bps: u32, tax_bps: u32, is_waived: bool) -> (i128, i128, i128) {
+fn deduct_fees(
+    proportional: i128,
+    platform_fee_bps: u32,
+    tax_bps: u32,
+    is_waived: bool,
+) -> (i128, i128, i128) {
     let tax = (proportional as u128 * tax_bps as u128 / MAX_BPS as u128) as i128;
     let post_tax = proportional.saturating_sub(tax);
     let fee = if is_waived {
@@ -121,9 +133,7 @@ fn zero_or_pos_i128() -> impl Strategy<Value = i128> {
 }
 
 fn invoice_amounts() -> impl Strategy<Value = Vec<i128>> {
-    (1usize..=20usize).prop_flat_map(|n| {
-        proptest::collection::vec(pos_i128(), n)
-    })
+    (1usize..=20usize).prop_flat_map(|n| proptest::collection::vec(pos_i128(), n))
 }
 
 // ---------------------------------------------------------------------------
