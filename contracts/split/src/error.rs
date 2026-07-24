@@ -5,6 +5,15 @@ use soroban_sdk::contracterror;
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 #[repr(u32)]
 pub enum ContractError {
+    NotAuthorized = 1,
+    InvoiceNotFound = 2,
+    DeadlinePassed = 3,
+    AlreadyFunded = 4,
+    InvalidAmount = 5,
+    InvoiceFrozen = 6,
+    InvalidStatus = 7,
+    PayerNotAllowed = 8,
+    FundingInsufficient = 9,
     NotAuthorized       = 1,
     InvoiceNotFound     = 2,
     DeadlinePassed      = 3,
@@ -47,6 +56,12 @@ pub enum ContractError {
     InvalidRecipients = 16,
     PrerequisiteNotMet = 17,
     BatchLimitExceeded = 18,
+    /// Issue #330: Recipient has already been paid on this invoice.
+    RecipientAlreadyPaid = 19,
+    /// Issue #327: Funds are still time-locked and cannot be released yet.
+    FundsLockedUntil = 20,
+    /// Aggregate protocol statistics would overflow their storage type.
+    StatsOverflow = 21,
     /// Issue #327: Funds are still time-locked and cannot be released yet.
     FundsLockedUntil = 20,
     /// Issue #330: Recipient has already been paid on this invoice.
