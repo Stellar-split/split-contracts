@@ -271,6 +271,14 @@ pub struct InvoiceOptions {
     pub scheduled_release_at: Option<u64>,
     /// KYC verification requirement.
     pub require_kyc: bool,
+    /// Oracle contract used for oracle-priced invoices: the funding target is
+    /// computed at payment time from a live exchange rate instead of being
+    /// fixed at creation. When set, `oracle_asset_pair` must also be set and
+    /// `amounts` is interpreted as the USD-cents funding target.
+    pub oracle: Option<Address>,
+    /// (base, quote) asset symbols passed to the oracle's `price(asset_pair)`
+    /// call, e.g. (XLM, USD).
+    pub oracle_asset_pair: Option<(Symbol, Symbol)>,
     /// Minimum required payer reputation score to pay this invoice (issue #349).
     pub min_payer_rep: Option<u32>,
 }
@@ -419,6 +427,10 @@ pub struct InvoiceExt2 {
     pub target_usd_cents: Option<u64>,
     /// Issue #308: addresses that have already claimed a per-payer refund on this invoice.
     pub refunded_addresses: Vec<Address>,
+    /// Oracle-priced invoices: oracle contract queried at payment time.
+    pub oracle: Option<Address>,
+    /// Oracle-priced invoices: (base, quote) asset pair passed to the oracle.
+    pub oracle_asset_pair: Option<(Symbol, Symbol)>,
     /// Issue #349: minimum required payer reputation score.
     pub min_payer_rep: Option<u32>,
 }
@@ -535,6 +547,10 @@ pub struct Invoice {
     pub target_usd_cents: Option<u64>,
     /// Issue #308: addresses that have already claimed a per-payer refund on this invoice.
     pub refunded_addresses: Vec<Address>,
+    /// Oracle-priced invoices: oracle contract queried at payment time.
+    pub oracle: Option<Address>,
+    /// Oracle-priced invoices: (base, quote) asset pair passed to the oracle.
+    pub oracle_asset_pair: Option<(Symbol, Symbol)>,
     /// Issue #349: minimum required payer reputation score.
     pub min_payer_rep: Option<u32>,
 }
@@ -624,6 +640,8 @@ impl Invoice {
                 priorities: self.priorities,
                 target_usd_cents: self.target_usd_cents,
                 refunded_addresses: self.refunded_addresses,
+                oracle: self.oracle,
+                oracle_asset_pair: self.oracle_asset_pair,
                 min_payer_rep: self.min_payer_rep,
             },
         )
@@ -708,6 +726,8 @@ impl Invoice {
             priorities: ext2.priorities,
             target_usd_cents: ext2.target_usd_cents,
             refunded_addresses: ext2.refunded_addresses,
+            oracle: ext2.oracle,
+            oracle_asset_pair: ext2.oracle_asset_pair,
             min_payer_rep: ext2.min_payer_rep,
         }
     }
@@ -928,6 +948,8 @@ impl Invoice {
             priorities: Vec::new(env),
             target_usd_cents: None,
             refunded_addresses: Vec::new(env),
+            oracle: None,
+            oracle_asset_pair: None,
             min_payer_rep: None,
         }
     }

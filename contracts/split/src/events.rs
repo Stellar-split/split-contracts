@@ -705,6 +705,27 @@ pub fn fee_paid(env: &Env, invoice_id: u64, amount: i128, treasury: &Address) {
     );
 }
 
+/// Emitted when an oracle-priced invoice fetches a fresh rate at payment time.
+/// `rate` is the raw price returned by the oracle (USD cents per 1 whole token,
+/// scaled by `ORACLE_RATE_SCALE`); `computed_amount` is the resulting required
+/// token total derived from the invoice's fixed USD-cents target.
+///
+/// Topics: (split, orc_pf, invoice_id)
+/// Data: (rate, computed_amount, ledger)
+pub fn oracle_price_fetched(env: &Env, invoice_id: u64, rate: i128, computed_amount: i128) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("orc_pf"), invoice_id),
+        (rate, computed_amount, env.ledger().sequence()),
+    );
+}
+
+/// Emitted when a single graduated tranche is released via `release_tranche()`.
+/// Topics: (split, tr_rel, invoice_id)
+/// Data: (tranche_index, amount, ledger)
+pub fn tranche_released(env: &Env, invoice_id: u64, tranche_index: u32, amount: i128) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("tr_rel"), invoice_id),
+        (tranche_index, amount, env.ledger().sequence()),
 /// Issue #349: Emitted when an address's reputation score is updated.
 /// Topics: (split, rep_upd, address)
 /// Data: score

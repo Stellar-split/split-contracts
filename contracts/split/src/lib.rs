@@ -21,6 +21,11 @@ const STROOPS_PER_10K_INSTRUCTIONS: u64 = 1;
 /// Issue #296: Maximum entries in the per-creator fee waiver list.
 const MAX_FEE_WAIVER_ENTRIES: usize = 100;
 
+/// Fixed-point scale for oracle-priced invoices: the oracle's `price()` return
+/// value is USD cents per 1 whole token, scaled by this factor (e.g. 1 XLM at
+/// $0.12 = 12 cents is reported as `12 * ORACLE_RATE_SCALE` = `12_000_000`).
+const ORACLE_RATE_SCALE: i128 = 1_000_000;
+
 mod error;
 mod events;
 mod types;
@@ -157,6 +162,13 @@ fn paid_flags_key(id: u64) -> (Symbol, u64) {
 /// Bit 0 = 25 %, Bit 1 = 50 %, Bit 2 = 75 %, Bit 3 = 100 %.
 fn milestone_flags_key(id: u64) -> (Symbol, u64) {
     (symbol_short!("ms_flgs"), id)
+}
+
+/// Cliff + vesting schedule: bitmask (u32) of tranche indices already released
+/// via `release_tranche()` — bit N set means `tranches[N]` has been paid out.
+/// Supports up to 32 tranches per invoice (matches `paid_flags_key` convention).
+fn released_tranche_idx_key(id: u64) -> (Symbol, u64) {
+    (symbol_short!("tr_rel_ix"), id)
 }
 
 /// Issue #334: compact status byte (u8) — persistent storage.
@@ -730,6 +742,12 @@ fn archive_invoice_storage(env: &Env, id: u64, core: &InvoiceCore) {
         .get(&invoice_ext2_key(id))
         .or_else(|| env.storage().instance().get(&invoice_ext2_key(id)))
         .unwrap_or_else(|| InvoiceExt2 {
+            notification_contract: None, overflow_behavior: OverflowBehavior::Reject,
+            cross_chain_ref: None, require_kyc: false, arbiter: None, disputed: false,
+            admin_frozen: false, auction_on_expiry: false, auction_end: 0, bids: Vec::new(env),
+            min_payment: 0, min_funding_amount: 0, priorities: Vec::new(env),
+            target_usd_cents: None, refunded_addresses: Vec::new(env),
+            oracle: None, oracle_asset_pair: None,
             notification_contract: None,
             overflow_behavior: OverflowBehavior::Reject,
             cross_chain_ref: None,
@@ -940,6 +958,8 @@ fn load_invoice(env: &Env, id: u64) -> Invoice {
             priorities: Vec::new(env),
             target_usd_cents: None,
             refunded_addresses: Vec::new(env),
+            oracle: None,
+            oracle_asset_pair: None,
             min_payer_rep: None,
         });
 
@@ -2056,6 +2076,8 @@ impl SplitContract {
                         priorities: Vec::new(&env),
                         target_usd_cents: None,
                         refunded_addresses: Vec::new(&env),
+                        oracle: None,
+                        oracle_asset_pair: None,
                         min_payer_rep: None,
                     })
             });
@@ -2518,6 +2540,8 @@ impl SplitContract {
             None, // release_delay_ledgers (use create_invoice_ext for this)
             None, // metadata_hash
             None, // target_usd_cents
+            options.oracle,
+            options.oracle_asset_pair,
         )
     }
 
@@ -2572,6 +2596,8 @@ impl SplitContract {
         release_delay_ledgers: Option<u32>,
         metadata_hash: Option<BytesN<32>>,
         target_usd_cents: Option<u64>,
+        oracle: Option<Address>,
+        oracle_asset_pair: Option<(Symbol, Symbol)>,
     ) -> u64 {
         assert!(
             recipients.len() == amounts.len(),
@@ -2600,6 +2626,16 @@ impl SplitContract {
             assert!(
                 priorities.len() == recipients.len(),
                 "priorities length must match recipients"
+            );
+        }
+        if oracle.is_some() {
+            assert!(
+                oracle_asset_pair.is_some(),
+                "oracle_asset_pair required when oracle is set"
+            );
+            assert!(
+                price_oracle.is_none(),
+                "cannot set both price_oracle and oracle"
             );
         }
 
@@ -2939,6 +2975,8 @@ impl SplitContract {
             admin_frozen: false,
             min_funding_amount: 0,
             target_usd_cents,
+            oracle,
+            oracle_asset_pair,
             min_payer_rep,
         };
 
@@ -3078,6 +3116,13 @@ impl SplitContract {
                 None,
                 None,
                 Vec::new(&env), // priorities
+                false, // require_kyc
+                None, // scheduled_release_at
+                None, // release_delay_ledgers
+                None, // metadata_hash
+                None, // target_usd_cents
+                None, // oracle
+                None, // oracle_asset_pair
                 false,          // require_kyc
                 None,           // scheduled_release_at
                 None,           // release_delay_ledgers
@@ -3158,6 +3203,29 @@ impl SplitContract {
                 false,          // smart_route
                 None,           // notification_contract
                 OverflowBehavior::Reject,
+                false,            // convert_to_stream
+                Vec::new(&env),   // accepted_tokens
+                None,             // forward_to
+                None,             // forward_invoice_id
+                None,             // creator_cosigner
+                0_i128,           // velocity_limit
+                0_u64,            // velocity_window
+                Vec::new(&env),   // split_rules
+                Vec::new(&env),   // auto_resolve_rules
+                None,             // cross_chain_ref
+                None,             // allowed_payers
+                None,             // payment_cooldown_secs
+                None,             // max_payments_per_window
+                None,             // payment_window_secs
+                None,             // refund_grace_secs
+                Vec::new(&env),   // priorities
+                false,            // require_kyc
+                None,             // scheduled_release_at
+                None,             // release_delay_ledgers
+                None,             // metadata_hash
+                None,             // target_usd_cents
+                None,             // oracle
+                None,             // oracle_asset_pair
                 false,          // convert_to_stream
                 Vec::new(&env), // accepted_tokens
                 None,           // forward_to
@@ -3255,6 +3323,13 @@ impl SplitContract {
             None,
             None,
             Vec::new(&env), // priorities
+            false, // require_kyc
+            None, // scheduled_release_at
+            None, // release_delay_ledgers
+            None, // metadata_hash
+            None, // target_usd_cents
+            None, // oracle
+            None, // oracle_asset_pair
             false,          // require_kyc
             None,           // scheduled_release_at
             None,           // release_delay_ledgers
@@ -3436,6 +3511,8 @@ impl SplitContract {
             priorities: source.priorities.clone(),
             target_usd_cents: source.target_usd_cents,
             refunded_addresses: Vec::new(&env),
+            oracle: source.oracle.clone(),
+            oracle_asset_pair: source.oracle_asset_pair.clone(),
             min_payer_rep: source.min_payer_rep,
         };
 
@@ -3778,6 +3855,33 @@ impl SplitContract {
                 env.invoke_contract(oracle, &Symbol::new(env, "get_price"), Vec::new(env));
             let base_total: i128 = invoice.base_amounts.iter().sum();
             base_total * oracle_price / 1_000_000
+        } else if let Some(ref oracle) = invoice.oracle {
+            // Oracle-priced invoice: the funding target is determined at payment
+            // time, not fixed at creation. `amounts` holds the fixed USD-cents
+            // target (e.g. "$100 worth of XLM"); the required token total is
+            // recomputed from the oracle's live exchange rate on every payment,
+            // so it tracks the market instead of being locked in at creation.
+            let pair = invoice
+                .oracle_asset_pair
+                .clone()
+                .expect("oracle_asset_pair required when oracle is set");
+            let args: Vec<Val> = (pair,).into_val(env);
+            let price_result = env.try_invoke_contract::<i128, soroban_sdk::Error>(
+                oracle,
+                &Symbol::new(env, "price"),
+                args,
+            );
+            // Any failure to reach the oracle (trap, missing contract, error
+            // result) or a non-positive rate (stale/uninitialized feed) is
+            // treated as unavailable rather than surfacing a cryptic host error.
+            let rate: i128 = match price_result {
+                Ok(Ok(r)) if r > 0 => r,
+                _ => panic!("OracleUnavailable"),
+            };
+            let usd_cents_target: i128 = invoice.amounts.iter().sum();
+            let computed_amount = usd_cents_target * ORACLE_RATE_SCALE / rate;
+            events::oracle_price_fetched(env, invoice_id, rate, computed_amount);
+            computed_amount
         } else {
             invoice.amounts.iter().sum()
         };
@@ -5419,6 +5523,83 @@ impl SplitContract {
         save_invoice(env, invoice_id, invoice);
     }
 
+    /// Release a single tranche of a graduated schedule by index.
+    ///
+    /// Unlike `release()` (which distributes every tranche unlocked so far in one
+    /// call), this lets any caller trigger exactly one tranche once its
+    /// `release_time` has passed. Requires the invoice to be fully funded and the
+    /// tranche not to have been released already. Pays each recipient their
+    /// pro-rata share of that tranche's basis points.
+    pub fn release_tranche(env: Env, invoice_id: u64, tranche_index: u32) {
+        require_fn_not_paused(&env, &symbol_short!("release"));
+        let mut invoice = load_invoice(&env, invoice_id);
+        let actor = env.current_contract_address();
+
+        assert!(!invoice.frozen, "invoice is frozen");
+        assert!(!invoice.admin_frozen, "invoice frozen by admin");
+        assert!(invoice.status == InvoiceStatus::Pending, "invoice is not pending");
+
+        let total: i128 = invoice.amounts.iter().sum();
+        assert!(invoice.funded >= total, "invoice not fully funded");
+
+        assert!(tranche_index < invoice.tranches.len(), "tranche index out of range");
+        assert!(tranche_index < 32, "tranche index exceeds bitmask capacity");
+        let tranche = invoice.tranches.get(tranche_index).unwrap();
+
+        let now = env.ledger().timestamp();
+        assert!(now >= tranche.timestamp, "tranche not yet releasable");
+
+        let mut released_idx: u32 = env
+            .storage()
+            .persistent()
+            .get(&released_tranche_idx_key(invoice_id))
+            .unwrap_or(0u32);
+        let bit = 1u32 << tranche_index;
+        assert!(released_idx & bit == 0, "tranche already released");
+
+        let token_client = token::Client::new(&env, &invoice.tokens.get(0).expect("no token"));
+        let funded = invoice.funded;
+        let n = invoice.recipients.len();
+        let mut total_paid: i128 = 0;
+        for i in 0..n {
+            let recipient = invoice.recipients.get(i).unwrap();
+            let amount = invoice.amounts.get(i).unwrap();
+            let payout = ((amount as u128)
+                .saturating_mul(tranche.basis_points as u128)
+                .saturating_mul(funded as u128)
+                / (10_000u128 * total as u128)) as i128;
+            if payout > 0 {
+                token_client.transfer(&env.current_contract_address(), &recipient, &payout);
+                total_paid += payout;
+            }
+        }
+
+        released_idx |= bit;
+        env.storage().persistent().set(&released_tranche_idx_key(invoice_id), &released_idx);
+
+        invoice.released_bps += tranche.basis_points;
+
+        if invoice.released_bps >= 10_000 {
+            invoice.status = InvoiceStatus::Released;
+            invoice.completion_time = Some(now);
+            if invoice.insurance_fund > 0 {
+                token_client.transfer(&env.current_contract_address(), &invoice.creator, &invoice.insurance_fund);
+                invoice.insurance_fund = 0;
+            }
+            append_audit_entry(&env, invoice_id, symbol_short!("release"), &actor);
+            events::invoice_released(&env, invoice_id, &invoice.recipients);
+            events::invoice_state_changed(&env, invoice_id, Some(&InvoiceStatus::Pending), &InvoiceStatus::Released, &actor);
+            notify_invoice(&env, invoice_id, symbol_short!("release"), &invoice.notification_contract);
+            maybe_record_released(&env, &invoice.creator, total_paid);
+            update_creator_stats_on_release(&env, &invoice.creator, total_paid);
+        }
+
+        save_invoice(&env, invoice_id, &invoice);
+
+        append_audit_entry(&env, invoice_id, symbol_short!("tr_rel"), &actor);
+        events::tranche_released(&env, invoice_id, tranche_index, total_paid);
+    }
+
     // -----------------------------------------------------------------------
     // Stage release (#86)
     // -----------------------------------------------------------------------
@@ -6255,6 +6436,13 @@ impl SplitContract {
                 None,
                 None,
                 Vec::new(env), // priorities
+                false, // require_kyc
+                None, // scheduled_release_at
+                None, // release_delay_ledgers
+                None, // metadata_hash
+                None, // target_usd_cents
+                None, // oracle
+                None, // oracle_asset_pair
                 false,         // require_kyc
                 None,          // scheduled_release_at
                 None,          // release_delay_ledgers
@@ -6999,6 +7187,8 @@ impl SplitContract {
             None, // release_delay_ledgers
             None, // metadata_hash
             None, // target_usd_cents
+            old_invoice.oracle.clone(),
+            old_invoice.oracle_asset_pair.clone(),
         );
 
         // Copy payments from shards to new invoice (issue #177).
@@ -7277,6 +7467,13 @@ impl SplitContract {
             None,
             None,
             Vec::new(&env), // priorities
+            false, // require_kyc
+            None, // scheduled_release_at
+            None, // release_delay_ledgers
+            None, // metadata_hash
+            None, // target_usd_cents
+            None, // oracle
+            None, // oracle_asset_pair
             false,          // require_kyc
             None,           // scheduled_release_at
             None,           // release_delay_ledgers
@@ -7831,6 +8028,10 @@ impl SplitContract {
                 arbiter: None,
                 disputed: false,
                 admin_frozen: false,
+                auction_on_expiry: false, auction_end: 0, bids: Vec::new(&env),
+                min_payment: 0, min_funding_amount: 0, priorities: Vec::new(&env),
+                target_usd_cents: None, refunded_addresses: Vec::new(&env),
+                oracle: None, oracle_asset_pair: None,
                 auction_on_expiry: false,
                 auction_end: 0,
                 bids: Vec::new(&env),
@@ -7937,6 +8138,10 @@ impl SplitContract {
                         arbiter: None,
                         disputed: false,
                         admin_frozen: false,
+                        auction_on_expiry: false, auction_end: 0, bids: Vec::new(&env),
+                        min_payment: 0, min_funding_amount: 0, priorities: Vec::new(&env),
+                        target_usd_cents: None, refunded_addresses: Vec::new(&env),
+                        oracle: None, oracle_asset_pair: None,
                         auction_on_expiry: false,
                         auction_end: 0,
                         bids: Vec::new(&env),
