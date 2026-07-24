@@ -564,3 +564,13 @@ pub fn oracle_price_fetched(env: &Env, invoice_id: u64, rate: i128, computed_amo
         (rate, computed_amount, env.ledger().sequence()),
     );
 }
+
+/// Emitted when a single graduated tranche is released via `release_tranche()`.
+/// Topics: (split, tr_rel, invoice_id)
+/// Data: (tranche_index, amount, ledger)
+pub fn tranche_released(env: &Env, invoice_id: u64, tranche_index: u32, amount: i128) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("tr_rel"), invoice_id),
+        (tranche_index, amount, env.ledger().sequence()),
+    );
+}

@@ -1551,6 +1551,187 @@ fn test_release_before_any_tranche_unlocked_panics() {
 }
 
 // ---------------------------------------------------------------------------
+// release_tranche — cliff + per-index graduated release
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_release_tranche_full_vesting_schedule() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+    let tk = token_client(&env, &token_id);
+
+    let creator = Address::generate(&env);
+    let payer = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    StellarAssetClient::new(&env, &token_id).mint(&payer, &1_000);
+    env.ledger().set_timestamp(1_000);
+
+    // Cliff at t=2_000 (30%), then t=3_000 (30%), then t=4_000 (40%).
+    let mut tranches = Vec::new(&env);
+    tranches.push_back(types::Tranche { timestamp: 2_000, basis_points: 3_000 });
+    tranches.push_back(types::Tranche { timestamp: 3_000, basis_points: 3_000 });
+    tranches.push_back(types::Tranche { timestamp: 4_000, basis_points: 4_000 });
+
+    let mut recipients = Vec::new(&env);
+    recipients.push_back(recipient.clone());
+    let mut amounts = Vec::new(&env);
+    amounts.push_back(1_000_i128);
+
+    let id = c.create_invoice(
+        &creator,
+        &recipients,
+        &amounts,
+        &token_id,
+        &9_999_u64,
+        &InvoiceOptions {
+            tranches: tranches.clone(),
+            ..default_options(&env)
+        },
+    );
+
+    c.pay(&payer, &id, &1_000_i128, &0_u64, &false, &false);
+
+    // Before the cliff, nothing has been released.
+    assert_eq!(c.get_invoice(&id).released_bps, 0);
+    assert_eq!(tk.balance(&recipient), 0);
+
+    // First tranche unlocks.
+    env.ledger().set_timestamp(2_000);
+    c.release_tranche(&id, &0_u32);
+    assert_eq!(tk.balance(&recipient), 300);
+    assert_eq!(c.get_invoice(&id).released_bps, 3_000);
+    assert_eq!(c.get_invoice(&id).status, InvoiceStatus::Pending);
+
+    // Second tranche unlocks.
+    env.ledger().set_timestamp(3_000);
+    c.release_tranche(&id, &1_u32);
+    assert_eq!(tk.balance(&recipient), 600);
+    assert_eq!(c.get_invoice(&id).released_bps, 6_000);
+    assert_eq!(c.get_invoice(&id).status, InvoiceStatus::Pending);
+
+    // Final tranche unlocks — invoice becomes fully Released.
+    env.ledger().set_timestamp(4_000);
+    c.release_tranche(&id, &2_u32);
+    assert_eq!(tk.balance(&recipient), 1_000);
+    assert_eq!(c.get_invoice(&id).released_bps, 10_000);
+    assert_eq!(c.get_invoice(&id).status, InvoiceStatus::Released);
+}
+
+#[test]
+#[should_panic(expected = "tranche not yet releasable")]
+fn test_release_tranche_before_time_panics() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let payer = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    StellarAssetClient::new(&env, &token_id).mint(&payer, &500);
+    env.ledger().set_timestamp(1_000);
+
+    let mut tranches = Vec::new(&env);
+    tranches.push_back(types::Tranche { timestamp: 5_000, basis_points: 10_000 });
+
+    let mut recipients = Vec::new(&env);
+    recipients.push_back(recipient.clone());
+    let mut amounts = Vec::new(&env);
+    amounts.push_back(500_i128);
+
+    let id = c.create_invoice(
+        &creator,
+        &recipients,
+        &amounts,
+        &token_id,
+        &9_999_u64,
+        &InvoiceOptions {
+            tranches: tranches.clone(),
+            ..default_options(&env)
+        },
+    );
+
+    c.pay(&payer, &id, &500_i128, &0_u64, &false, &false);
+
+    // t=2_000 < tranche timestamp 5_000 — should panic.
+    env.ledger().set_timestamp(2_000);
+    c.release_tranche(&id, &0_u32);
+}
+
+#[test]
+#[should_panic(expected = "tranche already released")]
+fn test_release_tranche_double_release_panics() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let payer = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    StellarAssetClient::new(&env, &token_id).mint(&payer, &1_000);
+    env.ledger().set_timestamp(1_000);
+
+    let mut tranches = Vec::new(&env);
+    tranches.push_back(types::Tranche { timestamp: 1_500, basis_points: 5_000 });
+    tranches.push_back(types::Tranche { timestamp: 2_500, basis_points: 5_000 });
+
+    let mut recipients = Vec::new(&env);
+    recipients.push_back(recipient.clone());
+    let mut amounts = Vec::new(&env);
+    amounts.push_back(1_000_i128);
+
+    let id = c.create_invoice(
+        &creator,
+        &recipients,
+        &amounts,
+        &token_id,
+        &9_999_u64,
+        &InvoiceOptions {
+            tranches: tranches.clone(),
+            ..default_options(&env)
+        },
+    );
+
+    c.pay(&payer, &id, &1_000_i128, &0_u64, &false, &false);
+
+    env.ledger().set_timestamp(1_600);
+    c.release_tranche(&id, &0_u32);
+    // Same index again — should panic even though it's unlocked.
+    c.release_tranche(&id, &0_u32);
+}
+
+#[test]
+#[should_panic(expected = "tranches must sum to 10000 basis points")]
+fn test_create_invoice_tranches_bps_not_10000_panics() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    let mut tranches = Vec::new(&env);
+    tranches.push_back(types::Tranche { timestamp: 1_000, basis_points: 4_000 });
+    tranches.push_back(types::Tranche { timestamp: 2_000, basis_points: 4_000 });
+
+    let mut recipients = Vec::new(&env);
+    recipients.push_back(recipient.clone());
+    let mut amounts = Vec::new(&env);
+    amounts.push_back(1_000_i128);
+
+    c.create_invoice(
+        &creator,
+        &recipients,
+        &amounts,
+        &token_id,
+        &9_999_u64,
+        &InvoiceOptions {
+            tranches: tranches.clone(),
+            ..default_options(&env)
+        },
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Issue #24 — on-chain reputation counter
 // ---------------------------------------------------------------------------
 

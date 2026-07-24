@@ -159,6 +159,13 @@ fn milestone_flags_key(id: u64) -> (Symbol, u64) {
     (symbol_short!("ms_flgs"), id)
 }
 
+/// Cliff + vesting schedule: bitmask (u32) of tranche indices already released
+/// via `release_tranche()` — bit N set means `tranches[N]` has been paid out.
+/// Supports up to 32 tranches per invoice (matches `paid_flags_key` convention).
+fn released_tranche_idx_key(id: u64) -> (Symbol, u64) {
+    (symbol_short!("tr_rel_ix"), id)
+}
+
 /// Issue #334: compact status byte (u8) — persistent storage.
 fn compact_status_key(id: u64) -> (Symbol, u64) {
     (symbol_short!("cpt_sts"), id)
@@ -4747,6 +4754,83 @@ impl SplitContract {
         }
 
         save_invoice(env, invoice_id, invoice);
+    }
+
+    /// Release a single tranche of a graduated schedule by index.
+    ///
+    /// Unlike `release()` (which distributes every tranche unlocked so far in one
+    /// call), this lets any caller trigger exactly one tranche once its
+    /// `release_time` has passed. Requires the invoice to be fully funded and the
+    /// tranche not to have been released already. Pays each recipient their
+    /// pro-rata share of that tranche's basis points.
+    pub fn release_tranche(env: Env, invoice_id: u64, tranche_index: u32) {
+        require_fn_not_paused(&env, &symbol_short!("release"));
+        let mut invoice = load_invoice(&env, invoice_id);
+        let actor = env.current_contract_address();
+
+        assert!(!invoice.frozen, "invoice is frozen");
+        assert!(!invoice.admin_frozen, "invoice frozen by admin");
+        assert!(invoice.status == InvoiceStatus::Pending, "invoice is not pending");
+
+        let total: i128 = invoice.amounts.iter().sum();
+        assert!(invoice.funded >= total, "invoice not fully funded");
+
+        assert!(tranche_index < invoice.tranches.len(), "tranche index out of range");
+        assert!(tranche_index < 32, "tranche index exceeds bitmask capacity");
+        let tranche = invoice.tranches.get(tranche_index).unwrap();
+
+        let now = env.ledger().timestamp();
+        assert!(now >= tranche.timestamp, "tranche not yet releasable");
+
+        let mut released_idx: u32 = env
+            .storage()
+            .persistent()
+            .get(&released_tranche_idx_key(invoice_id))
+            .unwrap_or(0u32);
+        let bit = 1u32 << tranche_index;
+        assert!(released_idx & bit == 0, "tranche already released");
+
+        let token_client = token::Client::new(&env, &invoice.tokens.get(0).expect("no token"));
+        let funded = invoice.funded;
+        let n = invoice.recipients.len();
+        let mut total_paid: i128 = 0;
+        for i in 0..n {
+            let recipient = invoice.recipients.get(i).unwrap();
+            let amount = invoice.amounts.get(i).unwrap();
+            let payout = ((amount as u128)
+                .saturating_mul(tranche.basis_points as u128)
+                .saturating_mul(funded as u128)
+                / (10_000u128 * total as u128)) as i128;
+            if payout > 0 {
+                token_client.transfer(&env.current_contract_address(), &recipient, &payout);
+                total_paid += payout;
+            }
+        }
+
+        released_idx |= bit;
+        env.storage().persistent().set(&released_tranche_idx_key(invoice_id), &released_idx);
+
+        invoice.released_bps += tranche.basis_points;
+
+        if invoice.released_bps >= 10_000 {
+            invoice.status = InvoiceStatus::Released;
+            invoice.completion_time = Some(now);
+            if invoice.insurance_fund > 0 {
+                token_client.transfer(&env.current_contract_address(), &invoice.creator, &invoice.insurance_fund);
+                invoice.insurance_fund = 0;
+            }
+            append_audit_entry(&env, invoice_id, symbol_short!("release"), &actor);
+            events::invoice_released(&env, invoice_id, &invoice.recipients);
+            events::invoice_state_changed(&env, invoice_id, Some(&InvoiceStatus::Pending), &InvoiceStatus::Released, &actor);
+            notify_invoice(&env, invoice_id, symbol_short!("release"), &invoice.notification_contract);
+            maybe_record_released(&env, &invoice.creator, total_paid);
+            update_creator_stats_on_release(&env, &invoice.creator, total_paid);
+        }
+
+        save_invoice(&env, invoice_id, &invoice);
+
+        append_audit_entry(&env, invoice_id, symbol_short!("tr_rel"), &actor);
+        events::tranche_released(&env, invoice_id, tranche_index, total_paid);
     }
 
     // -----------------------------------------------------------------------
