@@ -317,6 +317,36 @@ fn nonce_key(invoice_id: u64, payer: &Address) -> (Symbol, u64, Address) {
     (symbol_short!("nonce"), invoice_id, payer.clone())
 }
 
+/// Contract-wide per-caller nonce key for off-chain signed authorisations (issue #424).
+/// Unlike `nonce_key`, this is not scoped to a single invoice: it tracks one
+/// monotonically increasing sequence per caller across every nonce-protected
+/// entry point, so a signed authorisation cannot be replayed against a
+/// different invoice or a different call.
+fn global_nonce_key(caller: &Address) -> (Symbol, Address) {
+    (symbol_short!("g_nonce"), caller.clone())
+}
+
+/// Returns the current expected contract-wide nonce for `caller`. Starts at 0.
+fn get_global_nonce_internal(env: &Env, caller: &Address) -> u64 {
+    env.storage()
+        .persistent()
+        .get(&global_nonce_key(caller))
+        .unwrap_or(0u64)
+}
+
+/// Validates `nonce` against the stored contract-wide nonce for `caller` and,
+/// on success, atomically increments it so the same nonce cannot be reused.
+/// Panics with "InvalidNonce" on a stale or out-of-order nonce.
+fn consume_global_nonce(env: &Env, caller: &Address, nonce: u64) {
+    let stored = get_global_nonce_internal(env, caller);
+    if nonce != stored {
+        panic!("InvalidNonce");
+    }
+    env.storage()
+        .persistent()
+        .set(&global_nonce_key(caller), &(stored + 1));
+}
+
 /// Per-payer velocity window state key: (window_start, window_total)
 fn vel_key(invoice_id: u64, payer: &Address) -> (Symbol, u64, Address) {
     (symbol_short!("vel"), invoice_id, payer.clone())
@@ -7731,6 +7761,16 @@ impl SplitContract {
             .unwrap_or(0u64)
     }
 
+    /// Returns the current expected contract-wide nonce for `caller` (issue #424).
+    ///
+    /// This is separate from `get_nonce`: it is not scoped to a single invoice, but
+    /// tracks one sequence per caller across every entry point that accepts an
+    /// off-chain signed authorisation (e.g. `pay_invoice_delegated`). Starts at 0
+    /// and increments by 1 after each successful nonce-protected call.
+    pub fn get_global_nonce(env: Env, caller: Address) -> u64 {
+        get_global_nonce_internal(&env, &caller)
+    }
+
     /// Generate a completion proof for a finalized invoice.
     pub fn get_completion_proof(env: Env, invoice_id: u64) -> CompletionProof {
         let invoice = load_invoice(&env, invoice_id);
@@ -8864,16 +8904,10 @@ impl SplitContract {
         let remaining = total - invoice.funded;
         assert!(amount <= remaining, "payment exceeds remaining balance");
 
-        // Nonce replay protection for on_behalf_of address.
-        let stored_nonce: u64 = env
-            .storage()
-            .persistent()
-            .get(&nonce_key(invoice_id, &on_behalf_of))
-            .unwrap_or(0u64);
-        assert!(nonce == stored_nonce, "invalid nonce");
-        env.storage()
-            .persistent()
-            .set(&nonce_key(invoice_id, &on_behalf_of), &(stored_nonce + 1));
+        // Contract-wide nonce replay protection for on_behalf_of's delegated
+        // authorisation (issue #424). Scoped to the caller across all invoices,
+        // so a given nonce cannot be replayed against a different invoice_id.
+        consume_global_nonce(&env, &on_behalf_of, nonce);
 
         let token_client = token::Client::new(&env, &invoice.tokens.get(0).expect("no token"));
         token_client.transfer(&executor, &env.current_contract_address(), &amount);

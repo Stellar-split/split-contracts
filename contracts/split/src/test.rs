@@ -1377,6 +1377,83 @@ fn test_nonce_is_independent_per_invoice() {
 }
 
 // ---------------------------------------------------------------------------
+// Issue #424 — contract-wide nonce tracker (replay protection)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_global_nonce_valid_succeeds_and_increments() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let delegate = Address::generate(&env);
+    let on_behalf_of = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    StellarAssetClient::new(&env, &token_id).mint(&delegate, &1_000);
+    env.ledger().set_timestamp(1_000);
+
+    let id = make_invoice(&env, &c, &creator, &recipient, 300, &token_id, 9_999);
+
+    assert_eq!(c.get_global_nonce(&on_behalf_of), 0);
+
+    c.set_delegation(&id, &on_behalf_of, &delegate);
+    c.pay_invoice_delegated(&delegate, &id, &300_i128, &0_u64, &on_behalf_of);
+
+    assert_eq!(c.get_global_nonce(&on_behalf_of), 1);
+    assert_eq!(c.get_invoice(&id).status, InvoiceStatus::Released);
+}
+
+#[test]
+#[should_panic(expected = "InvalidNonce")]
+fn test_global_nonce_replay_fails() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let delegate = Address::generate(&env);
+    let on_behalf_of = Address::generate(&env);
+    let r1 = Address::generate(&env);
+    let r2 = Address::generate(&env);
+
+    StellarAssetClient::new(&env, &token_id).mint(&delegate, &1_000);
+    env.ledger().set_timestamp(1_000);
+
+    let id1 = make_invoice(&env, &c, &creator, &r1, 100, &token_id, 9_999);
+    let id2 = make_invoice(&env, &c, &creator, &r2, 100, &token_id, 9_999);
+
+    c.set_delegation(&id1, &on_behalf_of, &delegate);
+    c.pay_invoice_delegated(&delegate, &id1, &100_i128, &0_u64, &on_behalf_of);
+    assert_eq!(c.get_global_nonce(&on_behalf_of), 1);
+
+    // Replaying nonce 0 against a different invoice must still fail: the
+    // nonce is scoped to the caller contract-wide, not per invoice.
+    c.set_delegation(&id2, &on_behalf_of, &delegate);
+    c.pay_invoice_delegated(&delegate, &id2, &100_i128, &0_u64, &on_behalf_of);
+}
+
+#[test]
+#[should_panic(expected = "InvalidNonce")]
+fn test_global_nonce_out_of_order_fails() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let delegate = Address::generate(&env);
+    let on_behalf_of = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    StellarAssetClient::new(&env, &token_id).mint(&delegate, &1_000);
+    env.ledger().set_timestamp(1_000);
+
+    let id = make_invoice(&env, &c, &creator, &recipient, 100, &token_id, 9_999);
+
+    c.set_delegation(&id, &on_behalf_of, &delegate);
+    // Expected nonce is 0; submitting 5 must panic.
+    c.pay_invoice_delegated(&delegate, &id, &100_i128, &5_u64, &on_behalf_of);
+}
+
+// ---------------------------------------------------------------------------
 // Issue #22 — prerequisite invoice linking
 // ---------------------------------------------------------------------------
 
