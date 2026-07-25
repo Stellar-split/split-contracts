@@ -2550,10 +2550,10 @@ impl SplitContract {
         amounts: Vec<i128>,
         token: Address,
         deadline: u64,
-        mut options: InvoiceOptions,
+        options: InvoiceOptions,
         options2: InvoiceOptions2,
     ) -> u64 {
-        options.ext = options2;
+        let options = InvoiceOptions { ext: options2, ..options };
         Self::create_invoice(env, creator, recipients, amounts, token, deadline, options)
     }
 

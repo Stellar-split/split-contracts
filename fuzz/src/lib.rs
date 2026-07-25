@@ -94,7 +94,8 @@ pub fn default_options(env: &Env) -> InvoiceOptions {
             max_payments_per_window: None,
             payment_window_secs: None,
             oracle: None,
-            oracle_asset_pair: None,
+            oracle_asset_pair_base: None,
+            oracle_asset_pair_quote: None,
             min_payer_rep: None,
         },
     }
