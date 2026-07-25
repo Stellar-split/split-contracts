@@ -65,6 +65,14 @@ pub struct FeeTier {
     pub fee_bps: u32,
 }
 
+/// Issue #409: Rebate tier for high-volume creators.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct RebateTier {
+    pub min_volume: i128,
+    pub rebate_bps: u32,
+}
+
 /// Issue #299: Per-creator analytics aggregator.
 #[contracttype]
 #[derive(Clone, Debug)]
@@ -102,6 +110,7 @@ pub enum InvoiceStatus {
     Pending,
     Released,
     Refunded,
+    Expired,
     Cancelled,
 }
 
@@ -308,6 +317,10 @@ pub struct InvoiceOptions2 {
     pub oracle_asset_pair_quote: Option<Symbol>,
     /// Minimum required payer reputation score to pay this invoice (issue #349).
     pub min_payer_rep: Option<u32>,
+    /// Issue #416: SHA-256 hash of the required off-chain release preimage.
+    pub release_condition_hash: Option<BytesN<32>>,
+    /// Issue #417: enable recipient whitelist enforcement for this invoice.
+    pub recipient_whitelist_enabled: bool,
 }
 
 /// Legacy invoice layout used by stored invoices created before the `version`
@@ -447,6 +460,10 @@ pub struct InvoiceExt2 {
     pub oracle_asset_pair_quote: Option<Symbol>,
     /// Issue #349: minimum required payer reputation score.
     pub min_payer_rep: Option<u32>,
+    /// Issue #416: SHA-256 hash required to release the invoice.
+    pub release_condition_hash: Option<BytesN<32>>,
+    /// Issue #417: recipient whitelist enforcement flag.
+    pub recipient_whitelist_enabled: bool,
 }
 
 /// Issue #211: A single escalating penalty tier (seconds_after_deadline, bps).
@@ -569,6 +586,10 @@ pub struct Invoice {
     pub oracle_asset_pair_quote: Option<Symbol>,
     /// Issue #349: minimum required payer reputation score.
     pub min_payer_rep: Option<u32>,
+    /// Issue #416: SHA-256 hash required to release the invoice.
+    pub release_condition_hash: Option<BytesN<32>>,
+    /// Issue #417: recipient whitelist enforcement flag.
+    pub recipient_whitelist_enabled: bool,
 }
 
 impl Invoice {
@@ -660,6 +681,8 @@ impl Invoice {
                 oracle_asset_pair_base: self.oracle_asset_pair_base,
                 oracle_asset_pair_quote: self.oracle_asset_pair_quote,
                 min_payer_rep: self.min_payer_rep,
+                release_condition_hash: self.release_condition_hash,
+                recipient_whitelist_enabled: self.recipient_whitelist_enabled,
             },
         )
     }
@@ -747,6 +770,8 @@ impl Invoice {
             oracle_asset_pair_base: ext2.oracle_asset_pair_base,
             oracle_asset_pair_quote: ext2.oracle_asset_pair_quote,
             min_payer_rep: ext2.min_payer_rep,
+            release_condition_hash: ext2.release_condition_hash,
+            recipient_whitelist_enabled: ext2.recipient_whitelist_enabled,
         }
     }
 }
@@ -826,6 +851,7 @@ impl Invoice {
             InvoiceStatus::Released => 1,
             InvoiceStatus::Refunded => 2,
             InvoiceStatus::Cancelled => 3,
+            InvoiceStatus::Expired => 4,
         };
         bytes.push_back(status_byte);
 
@@ -860,6 +886,7 @@ impl Invoice {
             1 => InvoiceStatus::Released,
             2 => InvoiceStatus::Refunded,
             3 => InvoiceStatus::Cancelled,
+            4 => InvoiceStatus::Expired,
             _ => InvoiceStatus::Pending,
         };
 
@@ -970,6 +997,8 @@ impl Invoice {
             oracle_asset_pair_base: None,
             oracle_asset_pair_quote: None,
             min_payer_rep: None,
+            release_condition_hash: None,
+            recipient_whitelist_enabled: false,
         }
     }
 }
@@ -1114,6 +1143,7 @@ impl InvoiceStatus {
             InvoiceStatus::Released => 1,
             InvoiceStatus::Refunded => 2,
             InvoiceStatus::Cancelled => 3,
+            InvoiceStatus::Expired => 4,
         }
     }
 
@@ -1123,6 +1153,7 @@ impl InvoiceStatus {
             1 => InvoiceStatus::Released,
             2 => InvoiceStatus::Refunded,
             3 => InvoiceStatus::Cancelled,
+            4 => InvoiceStatus::Expired,
             _ => InvoiceStatus::Pending,
         }
     }
