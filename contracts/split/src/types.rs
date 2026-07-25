@@ -1,5 +1,13 @@
 use soroban_sdk::{contracttype, Address, Bytes, BytesN, Env, String, Symbol, Vec};
 
+/// (base, quote) asset pair for oracle-priced invoices.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct AssetPair {
+    pub base: Symbol,
+    pub quote: Symbol,
+}
+
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub enum OverflowBehavior {
@@ -297,6 +305,10 @@ pub struct InvoiceOptions2 {
     /// (base, quote) asset symbols passed to the oracle's `price(asset_pair)`
     /// call, e.g. (XLM, USD).
     pub oracle_asset_pair: Option<(Symbol, Symbol)>,
+    /// Base asset symbol passed to the oracle's `price` call (e.g. XLM).
+    pub oracle_asset_pair_base: Option<Symbol>,
+    /// Quote asset symbol passed to the oracle's `price` call (e.g. USD).
+    pub oracle_asset_pair_quote: Option<Symbol>,
     /// Minimum required payer reputation score to pay this invoice (issue #349).
     pub min_payer_rep: Option<u32>,
 }
@@ -432,8 +444,10 @@ pub struct InvoiceExt2 {
     pub refunded_addresses: Vec<Address>,
     /// Oracle-priced invoices: oracle contract queried at payment time.
     pub oracle: Option<Address>,
-    /// Oracle-priced invoices: (base, quote) asset pair passed to the oracle.
-    pub oracle_asset_pair: Option<(Symbol, Symbol)>,
+    /// Oracle-priced invoices: base asset symbol passed to the oracle.
+    pub oracle_asset_pair_base: Option<Symbol>,
+    /// Oracle-priced invoices: quote asset symbol passed to the oracle.
+    pub oracle_asset_pair_quote: Option<Symbol>,
     /// Issue #349: minimum required payer reputation score.
     pub min_payer_rep: Option<u32>,
 }
@@ -552,8 +566,10 @@ pub struct Invoice {
     pub refunded_addresses: Vec<Address>,
     /// Oracle-priced invoices: oracle contract queried at payment time.
     pub oracle: Option<Address>,
-    /// Oracle-priced invoices: (base, quote) asset pair passed to the oracle.
-    pub oracle_asset_pair: Option<(Symbol, Symbol)>,
+    /// Oracle-priced invoices: base asset symbol passed to the oracle.
+    pub oracle_asset_pair_base: Option<Symbol>,
+    /// Oracle-priced invoices: quote asset symbol passed to the oracle.
+    pub oracle_asset_pair_quote: Option<Symbol>,
     /// Issue #349: minimum required payer reputation score.
     pub min_payer_rep: Option<u32>,
 }
@@ -644,7 +660,8 @@ impl Invoice {
                 target_usd_cents: self.target_usd_cents,
                 refunded_addresses: self.refunded_addresses,
                 oracle: self.oracle,
-                oracle_asset_pair: self.oracle_asset_pair,
+                oracle_asset_pair_base: self.oracle_asset_pair_base,
+                oracle_asset_pair_quote: self.oracle_asset_pair_quote,
                 min_payer_rep: self.min_payer_rep,
             },
         )
@@ -730,7 +747,8 @@ impl Invoice {
             target_usd_cents: ext2.target_usd_cents,
             refunded_addresses: ext2.refunded_addresses,
             oracle: ext2.oracle,
-            oracle_asset_pair: ext2.oracle_asset_pair,
+            oracle_asset_pair_base: ext2.oracle_asset_pair_base,
+            oracle_asset_pair_quote: ext2.oracle_asset_pair_quote,
             min_payer_rep: ext2.min_payer_rep,
         }
     }
@@ -952,7 +970,8 @@ impl Invoice {
             target_usd_cents: None,
             refunded_addresses: Vec::new(env),
             oracle: None,
-            oracle_asset_pair: None,
+            oracle_asset_pair_base: None,
+            oracle_asset_pair_quote: None,
             min_payer_rep: None,
         }
     }

@@ -49,7 +49,7 @@ use types::{
     AdminRole, AuditEntry, Bid, CircuitBreakerStatus, CloneOverrides, CompactInvoice,
     CompactMigrateResult, CompletionProof, ComputeEstimate, ConfidentialPayment,
     CreateInvoiceParams, CreatorStats, DisputeOutcome, DisputeRecord, DisputeStatus, FeeTier,
-    Invoice, InvoiceCore, InvoiceExt, InvoiceExt2, InvoiceExt3, InvoiceHot, InvoiceOptions,
+    Invoice, InvoiceCore, InvoiceExt, InvoiceExt2, InvoiceExt3, InvoiceHot, InvoiceOptions, InvoiceOptions2,
     InvoicePayment, InvoiceStatus, InvoiceTemplate, LegacyInvoice, OverflowBehavior, Payment,
     PaymentCertificate, PaymentProof, ProtocolFeeConfig, QueuedAction, RepScore, ResolveAction,
     ResolveRule, SimulateReleaseResult, SplitRule, SubscriptionParams, TimelockAction, Tranche,
@@ -755,6 +755,8 @@ fn archive_invoice_storage(env: &Env, id: u64, core: &InvoiceCore) {
             refunded_addresses: Vec::new(env),
             oracle: None,
             oracle_asset_pair: None,
+            oracle_asset_pair_base: None,
+            oracle_asset_pair_quote: None,
             min_payer_rep: None,
         });
 
@@ -951,7 +953,8 @@ fn load_invoice(env: &Env, id: u64) -> Invoice {
             target_usd_cents: None,
             refunded_addresses: Vec::new(env),
             oracle: None,
-            oracle_asset_pair: None,
+            oracle_asset_pair_base: None,
+            oracle_asset_pair_quote: None,
             min_payer_rep: None,
         });
 
@@ -2069,7 +2072,8 @@ impl SplitContract {
                         target_usd_cents: None,
                         refunded_addresses: Vec::new(&env),
                         oracle: None,
-                        oracle_asset_pair: None,
+                        oracle_asset_pair_base: None,
+            oracle_asset_pair_quote: None,
                         min_payer_rep: None,
                     })
             });
@@ -2534,6 +2538,107 @@ impl SplitContract {
             options.ext.target_usd_cents,
             options.ext.oracle,
             options.ext.oracle_asset_pair,
+            None, // min_payer_rep (use create_invoice_ext for this)
+            None, // release_delay_ledgers (use create_invoice_ext for this)
+            None, // metadata_hash
+            None, // target_usd_cents
+            None, // oracle (use create_invoice_ext for this)
+            None, // oracle_asset_pair_base (use create_invoice_ext for this)
+            None, // oracle_asset_pair_quote (use create_invoice_ext for this)
+        )
+    }
+
+    /// Like `create_invoice` but also accepts `InvoiceOptions2` for oracle, min_payer_rep, etc.
+    pub fn create_invoice_ext(
+        env: Env,
+        creator: Address,
+        recipients: Vec<Address>,
+        amounts: Vec<i128>,
+        token: Address,
+        deadline: u64,
+        options: InvoiceOptions,
+        options2: InvoiceOptions2,
+    ) -> u64 {
+        let cb_active: bool = env
+            .storage()
+            .persistent()
+            .get(&circuit_breaker_key())
+            .unwrap_or(false);
+        assert!(!cb_active, "ContractPaused");
+        let is_paused = is_paused(&env);
+        let is_exempt = env
+            .storage()
+            .persistent()
+            .get::<_, bool>(&pause_exempt_key(&creator))
+            .unwrap_or(false);
+        if is_paused && !is_exempt {
+            panic!("contract is paused");
+        }
+        creator.require_auth();
+        Self::_apply_rate_limit(&env, &creator);
+
+        let wl: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&creator_whitelist_key())
+            .unwrap_or_else(|| Vec::new(&env));
+        if !wl.is_empty() {
+            assert!(wl.iter().any(|a| a == creator), "creator not whitelisted");
+        }
+
+        Self::_create_invoice_inner(
+            &env,
+            creator,
+            recipients,
+            amounts,
+            token,
+            deadline,
+            options.co_creators,
+            options.allow_early_withdrawal,
+            options.bonus_pool,
+            options.bonus_max_payers,
+            options.prerequisite_id,
+            options.tranches,
+            options.co_signers,
+            options.required_signatures,
+            options.penalty_bps.unwrap_or(0),
+            options.penalty_deadline.unwrap_or(0),
+            options.min_funding_bps.unwrap_or(0),
+            options.release_stages,
+            options.price_oracle,
+            options.swap_tokens,
+            options.oracle_address,
+            options.tax_bps.unwrap_or(0),
+            options.tax_authority,
+            options.insurance_premium_bps.unwrap_or(0),
+            options.smart_route.unwrap_or(false),
+            options.notification_contract.clone(),
+            options.overflow_behavior.clone(),
+            options.convert_to_stream,
+            options.accepted_tokens,
+            options.forward_to,
+            options.forward_invoice_id,
+            options.creator_cosigner,
+            options.velocity_limit,
+            options.velocity_window,
+            options.split_rules,
+            options.auto_resolve_rules,
+            options.cross_chain_ref,
+            options.allowed_payers,
+            options.payment_cooldown_secs,
+            options.max_payments_per_window,
+            options.payment_window_secs,
+            options.refund_grace_secs,
+            options.priorities,
+            options.require_kyc,
+            options.scheduled_release_at,
+            options2.min_payer_rep,
+            options2.release_delay_ledgers,
+            options2.metadata_hash,
+            options2.target_usd_cents,
+            options2.oracle,
+            options2.oracle_asset_pair_base,
+            options2.oracle_asset_pair_quote,
         )
     }
 
@@ -2589,7 +2694,8 @@ impl SplitContract {
         metadata_hash: Option<BytesN<32>>,
         target_usd_cents: Option<u64>,
         oracle: Option<Address>,
-        oracle_asset_pair: Option<(Symbol, Symbol)>,
+        oracle_asset_pair_base: Option<Symbol>,
+        oracle_asset_pair_quote: Option<Symbol>,
     ) -> u64 {
         assert!(
             recipients.len() == amounts.len(),
@@ -2622,7 +2728,7 @@ impl SplitContract {
         }
         if oracle.is_some() {
             assert!(
-                oracle_asset_pair.is_some(),
+                oracle_asset_pair_base.is_some() && oracle_asset_pair_quote.is_some(),
                 "oracle_asset_pair required when oracle is set"
             );
             assert!(
@@ -2968,7 +3074,8 @@ impl SplitContract {
             min_funding_amount: 0,
             target_usd_cents,
             oracle,
-            oracle_asset_pair,
+            oracle_asset_pair_base,
+            oracle_asset_pair_quote,
             min_payer_rep,
         };
 
@@ -3116,6 +3223,8 @@ impl SplitContract {
                 None,           // target_usd_cents
                 None,           // oracle
                 None,           // oracle_asset_pair
+                None,           // oracle_asset_pair_base
+                None,           // oracle_asset_pair_quote
             );
             ids.push_back(id);
         }
@@ -3214,6 +3323,8 @@ impl SplitContract {
                 None,             // target_usd_cents
                 None,             // oracle
                 None,             // oracle_asset_pair
+                None,             // oracle_asset_pair_base
+                None,             // oracle_asset_pair_quote
             );
             ids.push_back(id);
         }
@@ -3297,6 +3408,8 @@ impl SplitContract {
             None,           // target_usd_cents
             None,           // oracle
             None,           // oracle_asset_pair
+            None,           // oracle_asset_pair_base
+            None,           // oracle_asset_pair_quote
         );
 
         if months > 1 {
@@ -3473,7 +3586,8 @@ impl SplitContract {
             target_usd_cents: source.target_usd_cents,
             refunded_addresses: Vec::new(&env),
             oracle: source.oracle.clone(),
-            oracle_asset_pair: source.oracle_asset_pair.clone(),
+            oracle_asset_pair_base: source.oracle_asset_pair_base.clone(),
+            oracle_asset_pair_quote: source.oracle_asset_pair_quote.clone(),
             min_payer_rep: source.min_payer_rep,
         };
 
@@ -3822,11 +3936,11 @@ impl SplitContract {
             // target (e.g. "$100 worth of XLM"); the required token total is
             // recomputed from the oracle's live exchange rate on every payment,
             // so it tracks the market instead of being locked in at creation.
-            let pair = invoice
-                .oracle_asset_pair
-                .clone()
+            let pair_base = invoice.oracle_asset_pair_base.clone()
                 .expect("oracle_asset_pair required when oracle is set");
-            let args: Vec<Val> = (pair,).into_val(env);
+            let pair_quote = invoice.oracle_asset_pair_quote.clone()
+                .expect("oracle_asset_pair required when oracle is set");
+            let args: Vec<Val> = ((pair_base, pair_quote),).into_val(env);
             let price_result = env.try_invoke_contract::<i128, soroban_sdk::Error>(
                 oracle,
                 &Symbol::new(env, "price"),
@@ -6405,6 +6519,8 @@ impl SplitContract {
                 None,          // target_usd_cents
                 None,          // oracle
                 None,          // oracle_asset_pair
+                None,          // oracle_asset_pair_base
+                None,          // oracle_asset_pair_quote
             );
             env.storage()
                 .persistent()
@@ -7144,7 +7260,8 @@ impl SplitContract {
             None, // metadata_hash
             None, // target_usd_cents
             old_invoice.oracle.clone(),
-            old_invoice.oracle_asset_pair.clone(),
+            old_invoice.oracle_asset_pair_base.clone(),
+            old_invoice.oracle_asset_pair_quote.clone(),
         );
 
         // Copy payments from shards to new invoice (issue #177).
@@ -7431,6 +7548,8 @@ impl SplitContract {
             None,           // target_usd_cents
             None,           // oracle
             None,           // oracle_asset_pair
+            None,           // oracle_asset_pair_base
+            None,           // oracle_asset_pair_quote
         )
     }
 
@@ -7989,6 +8108,8 @@ impl SplitContract {
                 refunded_addresses: Vec::new(&env),
                 oracle: None,
                 oracle_asset_pair: None,
+                oracle_asset_pair_base: None,
+            oracle_asset_pair_quote: None,
                 min_payer_rep: None,
             });
 
@@ -8097,6 +8218,8 @@ impl SplitContract {
                         refunded_addresses: Vec::new(&env),
                         oracle: None,
                         oracle_asset_pair: None,
+                        oracle_asset_pair_base: None,
+            oracle_asset_pair_quote: None,
                         min_payer_rep: None,
                     });
 

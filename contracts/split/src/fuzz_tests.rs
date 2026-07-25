@@ -7,13 +7,38 @@ use proptest::prelude::*;
 use std::{vec, vec::Vec};
 
 const TOTAL_BPS: u32 = 10_000;
+const MAX_BPS: u32 = 10_000;
 
 fn percentage_weights() -> impl Strategy<Value = Vec<u32>> {
     proptest::collection::vec(0u32..=TOTAL_BPS, 1..=16)
 }
 
+fn pos_i128() -> impl Strategy<Value = i128> {
+    1i128..=1_000_000_000_000_000i128
+}
+
 fn normalize_percentages(weights: &[u32]) -> Vec<u32> {
     let total_weight: u64 = weights.iter().map(|weight| *weight as u64).sum();
+
+    if total_weight == 0 {
+        let mut percentages = vec![0; weights.len()];
+        percentages[0] = TOTAL_BPS;
+        return percentages;
+    }
+
+    let mut percentages = Vec::with_capacity(weights.len());
+    let mut assigned = 0u32;
+
+    for weight in weights.iter().take(weights.len() - 1) {
+        let percentage = ((*weight as u64 * TOTAL_BPS as u64) / total_weight) as u32;
+        percentages.push(percentage);
+        assigned += percentage;
+    }
+
+    percentages.push(TOTAL_BPS - assigned);
+    percentages
+}
+
 // ---------------------------------------------------------------------------
 // Pure arithmetic helpers that mirror the contract's logic.
 // ---------------------------------------------------------------------------
@@ -89,23 +114,6 @@ fn distribute_split(
     (payouts, fees, taxes, total_fee, total_tax)
 }
 
-    if total_weight == 0 {
-        let mut percentages = vec![0; weights.len()];
-        percentages[0] = TOTAL_BPS;
-        return percentages;
-    }
-
-    let mut percentages = Vec::with_capacity(weights.len());
-    let mut assigned = 0u32;
-
-    for weight in weights.iter().take(weights.len() - 1) {
-        let percentage = ((*weight as u64 * TOTAL_BPS as u64) / total_weight) as u32;
-        percentages.push(percentage);
-        assigned += percentage;
-    }
-
-    percentages.push(TOTAL_BPS - assigned);
-    percentages
 fn invoice_amounts() -> impl Strategy<Value = Vec<i128>> {
     (1usize..=20usize).prop_flat_map(|n| proptest::collection::vec(pos_i128(), n))
 }
@@ -207,8 +215,8 @@ proptest! {
         release_funds(&mut state, invoice_amount, &percentages);
 
         prop_assert!(state.released);
-        prop_assert_eq!(state.payouts, payouts_after_first_release);
         prop_assert_eq!(state.payouts.iter().sum::<u128>(), invoice_amount);
+        prop_assert_eq!(state.payouts, payouts_after_first_release);
     }
 
     #[test]
