@@ -146,6 +146,24 @@ fn metadata_hash_key(id: u64) -> (Symbol, u64) {
 fn paid_recipients_key(id: u64) -> (Symbol, u64) {
     (symbol_short!("paid_rec"), id)
 }
+/// Issue #430: creator-defined payment window open timestamp.
+fn payment_open_at_key(id: u64) -> (Symbol, u64) {
+    (symbol_short!("pay_open"), id)
+}
+/// Issue #430: creator-defined payment window close timestamp.
+fn payment_close_at_key(id: u64) -> (Symbol, u64) {
+    (symbol_short!("pay_close"), id)
+}
+
+/// Issue #430: read the configured payment-window open timestamp, if any.
+fn get_payment_open_at_internal(env: &Env, id: u64) -> Option<u64> {
+    env.storage().persistent().get(&payment_open_at_key(id))
+}
+
+/// Issue #430: read the configured payment-window close timestamp, if any.
+fn get_payment_close_at_internal(env: &Env, id: u64) -> Option<u64> {
+    env.storage().persistent().get(&payment_close_at_key(id))
+}
 
 /// Issue #332: contiguous Vec<Address> of all recipients — persistent storage.
 fn recipients_list_key(id: u64) -> (Symbol, u64) {
@@ -2207,6 +2225,15 @@ impl SplitContract {
         }
     }
 
+    /// Returns the creator-defined payment window `(open_at, close_at)` for an
+    /// invoice, if configured (issue #430). Either or both may be `None`.
+    pub fn get_payment_window(env: Env, invoice_id: u64) -> (Option<u64>, Option<u64>) {
+        (
+            get_payment_open_at_internal(&env, invoice_id),
+            get_payment_close_at_internal(&env, invoice_id),
+        )
+    }
+
     /// Return the current creation fee.
     pub fn get_creation_fee(env: Env) -> i128 {
         env.storage()
@@ -2628,6 +2655,8 @@ impl SplitContract {
             options.ext.oracle,
             options.ext.oracle_asset_pair_base,
             options.ext.oracle_asset_pair_quote,
+            options.ext.payment_open_at,
+            options.ext.payment_close_at,
         )
     }
 
@@ -2701,6 +2730,8 @@ impl SplitContract {
         oracle: Option<Address>,
         oracle_asset_pair_base: Option<Symbol>,
         oracle_asset_pair_quote: Option<Symbol>,
+        payment_open_at: Option<u64>,
+        payment_close_at: Option<u64>,
     ) -> u64 {
         assert!(
             recipients.len() == amounts.len(),
@@ -2711,6 +2742,19 @@ impl SplitContract {
             deadline > env.ledger().timestamp(),
             "deadline must be in the future"
         );
+        // Issue #430: creator-defined payment window.
+        if let Some(close_at) = payment_close_at {
+            assert!(
+                close_at < deadline,
+                "payment_close_at must be before deadline"
+            );
+        }
+        if let (Some(open_at), Some(close_at)) = (payment_open_at, payment_close_at) {
+            assert!(
+                open_at < close_at,
+                "payment_open_at must be before payment_close_at"
+            );
+        }
         assert!(bonus_pool >= 0, "bonus_pool must be non-negative");
         assert!(penalty_bps <= 10_000, "penalty_bps must be ≤ 10000");
         assert!(min_funding_bps <= 10_000, "min_funding_bps must be ≤ 10000");
@@ -3100,6 +3144,17 @@ impl SplitContract {
         if let Some(ref hash) = metadata_hash {
             env.storage().persistent().set(&metadata_hash_key(id), hash);
         }
+        // Issue #430: store optional creator-defined payment window bounds.
+        if let Some(open_at) = payment_open_at {
+            env.storage()
+                .persistent()
+                .set(&payment_open_at_key(id), &open_at);
+        }
+        if let Some(close_at) = payment_close_at {
+            env.storage()
+                .persistent()
+                .set(&payment_close_at_key(id), &close_at);
+        }
 
         events::invoice_created(env, id, &creator, total, &invoice.cross_chain_ref);
         maybe_record_created(env, &creator, total);
@@ -3229,6 +3284,8 @@ impl SplitContract {
                 None,           // oracle
                 None,           // oracle_asset_pair_base
                 None,           // oracle_asset_pair_quote
+                None,           // payment_open_at
+                None,           // payment_close_at
             );
             ids.push_back(id);
         }
@@ -3328,6 +3385,8 @@ impl SplitContract {
                 None,             // oracle
                 None,             // oracle_asset_pair_base
                 None,             // oracle_asset_pair_quote
+                None,             // payment_open_at
+                None,             // payment_close_at
             );
             ids.push_back(id);
         }
@@ -3412,6 +3471,8 @@ impl SplitContract {
             None,           // oracle
             None,           // oracle_asset_pair_base
             None,           // oracle_asset_pair_quote
+            None,           // payment_open_at
+            None,           // payment_close_at
         );
 
         if months > 1 {
@@ -3891,6 +3952,20 @@ impl SplitContract {
             "invoice deadline has passed"
         );
         assert!(amount > 0, "payment amount must be positive");
+
+        // Issue #430: creator-defined payment window.
+        if let Some(open_at) = get_payment_open_at_internal(env, invoice_id) {
+            assert!(
+                env.ledger().timestamp() >= open_at,
+                "PaymentWindowNotOpen"
+            );
+        }
+        if let Some(close_at) = get_payment_close_at_internal(env, invoice_id) {
+            assert!(
+                env.ledger().timestamp() <= close_at,
+                "PaymentWindowClosed"
+            );
+        }
 
         // Lazy auto-resume: clear frozen if the auto-resume timestamp has passed.
         if invoice.frozen {
@@ -6522,6 +6597,8 @@ impl SplitContract {
                 None,          // oracle
                 None,          // oracle_asset_pair_base
                 None,          // oracle_asset_pair_quote
+                None,          // payment_open_at
+                None,          // payment_close_at
             );
             env.storage()
                 .persistent()
@@ -7263,6 +7340,8 @@ impl SplitContract {
             old_invoice.oracle.clone(),
             old_invoice.oracle_asset_pair_base.clone(),
             old_invoice.oracle_asset_pair_quote.clone(),
+            None, // payment_open_at (not carried over on rollover)
+            None, // payment_close_at (not carried over on rollover)
         );
 
         // Copy payments from shards to new invoice (issue #177).
@@ -7550,6 +7629,8 @@ impl SplitContract {
             None,           // oracle
             None,           // oracle_asset_pair_base
             None,           // oracle_asset_pair_quote
+            None,           // payment_open_at
+            None,           // payment_close_at
         )
     }
 
