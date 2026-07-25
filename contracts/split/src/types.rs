@@ -447,6 +447,8 @@ pub struct InvoiceExt2 {
     pub oracle_asset_pair_quote: Option<Symbol>,
     /// Issue #349: minimum required payer reputation score.
     pub min_payer_rep: Option<u32>,
+    pub escrow_hold_period: Option<u32>,
+    pub held_until: Option<u32>,
 }
 
 /// Issue #211: A single escalating penalty tier (seconds_after_deadline, bps).
@@ -569,6 +571,8 @@ pub struct Invoice {
     pub oracle_asset_pair_quote: Option<Symbol>,
     /// Issue #349: minimum required payer reputation score.
     pub min_payer_rep: Option<u32>,
+    pub escrow_hold_period: Option<u32>,
+    pub held_until: Option<u32>,
 }
 
 impl Invoice {
@@ -660,6 +664,8 @@ impl Invoice {
                 oracle_asset_pair_base: self.oracle_asset_pair_base,
                 oracle_asset_pair_quote: self.oracle_asset_pair_quote,
                 min_payer_rep: self.min_payer_rep,
+                escrow_hold_period: self.escrow_hold_period,
+                held_until: self.held_until,
             },
         )
     }
@@ -747,6 +753,8 @@ impl Invoice {
             oracle_asset_pair_base: ext2.oracle_asset_pair_base,
             oracle_asset_pair_quote: ext2.oracle_asset_pair_quote,
             min_payer_rep: ext2.min_payer_rep,
+            escrow_hold_period: ext2.escrow_hold_period,
+            held_until: ext2.held_until,
         }
     }
 }
@@ -970,6 +978,8 @@ impl Invoice {
             oracle_asset_pair_base: None,
             oracle_asset_pair_quote: None,
             min_payer_rep: None,
+            escrow_hold_period: None,
+            held_until: None,
         }
     }
 }
@@ -1148,4 +1158,25 @@ pub struct ReleaseResult {
     pub recipients_paid: u32,
     /// Total amount transferred.
     pub total_transferred: i128,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InstalmentTranche {
+    pub amount: i128,
+    pub ledger: u32,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InstalmentPlan {
+    pub tranches: Vec<InstalmentTranche>,
+    pub paid_index: u32,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FeeBracket {
+    pub max_amount: i128,
+    pub rate_bps: u32,
 }
