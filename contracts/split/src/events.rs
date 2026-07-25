@@ -742,3 +742,51 @@ pub fn rep_updated(env: &Env, address: &Address, score: &RepScore) {
         score.clone(),
     );
 }
+
+/// Issue #437: Emitted when a delayed payout is scheduled on release.
+/// Topics: (split, dlypay_s, invoice_id)
+/// Data: (recipient, claimable_at_ledger)
+pub fn delayed_payout_scheduled(env: &Env, invoice_id: u64, recipient: &Address, claimable_at: u32) {
+    env.events().publish(
+        (
+            symbol_short!("split"),
+            symbol_short!("dlypay_s"),
+            invoice_id,
+        ),
+        (recipient.clone(), claimable_at),
+    );
+}
+
+/// Issue #437: Emitted when a delayed payout is claimed by the recipient.
+/// Topics: (split, dlypay_c, invoice_id)
+/// Data: (recipient, amount)
+pub fn delayed_payout_claimed(env: &Env, invoice_id: u64, recipient: &Address, amount: i128) {
+    env.events().publish(
+        (
+            symbol_short!("split"),
+            symbol_short!("dlypay_c"),
+            invoice_id,
+        ),
+        (recipient.clone(), amount),
+    );
+}
+
+/// Issue #435: Emitted when the contract is frozen for upgrade.
+/// Topics: (split, upg_frz, ())
+/// Data: (checkpoint_hash, frozen_at_ledger)
+pub fn contract_frozen_for_upgrade(env: &Env, checkpoint_hash: &BytesN<32>) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("upg_frz"), symbol_short!("")),
+        (checkpoint_hash.clone(), env.ledger().sequence()),
+    );
+}
+
+/// Issue #435: Emitted when the contract is thawed (upgrade freeze removed).
+/// Topics: (split, upg_thw, ())
+/// Data: admin
+pub fn contract_thawed(env: &Env, admin: &Address) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("upg_thw"), symbol_short!("")),
+        admin.clone(),
+    );
+}

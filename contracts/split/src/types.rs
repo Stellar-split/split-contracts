@@ -205,6 +205,16 @@ pub struct RepScore {
     pub invoices_refunded: u32,
 }
 
+/// Issue #437: A recipient with optional payout delay.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct Recipient {
+    /// The recipient's address.
+    pub address: Address,
+    /// Optional payout delay in ledgers after release.
+    pub payout_delay_ledgers: Option<u32>,
+}
+
 /// Optional parameters for `create_invoice`, grouped to keep the function
 /// within Soroban's 10-parameter limit.
 #[contracttype]
@@ -1148,4 +1158,14 @@ pub struct ReleaseResult {
     pub recipients_paid: u32,
     /// Total amount transferred.
     pub total_transferred: i128,
+}
+
+/// Issue #437: Delayed payout stored per recipient until claimable.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct DelayedPayout {
+    /// Amount to be transferred to recipient.
+    pub amount: i128,
+    /// Ledger sequence at which this payout becomes claimable.
+    pub claimable_at_ledger: u32,
 }

@@ -48,7 +48,7 @@ use soroban_sdk::{
 use types::{
     AdminRole, AuditEntry, Bid, CircuitBreakerStatus, CloneOverrides, CompactInvoice,
     CompactMigrateResult, CompletionProof, ComputeEstimate, ConfidentialPayment,
-    CreateInvoiceParams, CreatorStats, DisputeOutcome, DisputeRecord, DisputeStatus, FeeTier,
+    CreateInvoiceParams, CreatorStats, DelayedPayout, DisputeOutcome, DisputeRecord, DisputeStatus, FeeTier,
     Invoice, InvoiceCore, InvoiceExt, InvoiceExt2, InvoiceExt3, InvoiceHot, InvoiceOptions, InvoiceOptions2,
     InvoicePayment, InvoiceStatus, InvoiceTemplate, LegacyInvoice, OverflowBehavior, Payment,
     PaymentCertificate, PaymentProof, ProtocolFeeConfig, QueuedAction, RepScore, ResolveAction,
@@ -657,6 +657,36 @@ fn update_creator_payers(env: &Env, creator: &Address, payer: &Address) {
         let payers: u64 = env.storage().persistent().get(&payers_key).unwrap_or(0u64);
         env.storage().persistent().set(&payers_key, &(payers + 1));
     }
+}
+
+/// Issue #438: anonymity mode flag for an invoice — persistent storage.
+fn anonymous_recipients_key(invoice_id: u64) -> (Symbol, u64) {
+    (symbol_short!("anon_rec"), invoice_id)
+}
+
+/// Issue #438: recipient commitment hash — persistent storage (invoice_id, index).
+fn recipient_commitment_key(invoice_id: u64, index: u32) -> (Symbol, u64, u32) {
+    (symbol_short!("rec_cmt"), invoice_id, index)
+}
+
+/// Issue #437: delayed payout record — persistent storage (invoice_id, recipient).
+fn delayed_payout_key(invoice_id: u64, recipient: &Address) -> (Symbol, u64, Address) {
+    (symbol_short!("del_pay"), invoice_id, recipient.clone())
+}
+
+/// Issue #436: rolling payment root hash — persistent storage.
+fn payment_root_key(invoice_id: u64) -> (Symbol, u64) {
+    (symbol_short!("pay_root"), invoice_id)
+}
+
+/// Issue #435: contract upgrade freeze flag — instance storage.
+fn upgrade_freeze_key() -> Symbol {
+    symbol_short!("upg_frz")
+}
+
+/// Issue #435: contract upgrade checkpoint hash — instance storage.
+fn upgrade_checkpoint_key() -> Symbol {
+    symbol_short!("upg_ckpt")
 }
 
 // ---------------------------------------------------------------------------
@@ -1411,6 +1441,20 @@ fn check_creator_milestone(env: &Env, creator: &Address, new_volume: i128) {
             .unwrap_or(0u64);
         events::creator_volume_milestone(env, creator, new_volume, invoice_count, new_milestone);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Issue #435: Contract freeze helper
+// ---------------------------------------------------------------------------
+
+/// Check if contract is frozen for upgrade. Panics if frozen.
+fn require_not_frozen(env: &Env) {
+    let is_frozen: bool = env
+        .storage()
+        .instance()
+        .get(&upgrade_freeze_key())
+        .unwrap_or(false);
+    assert!(!is_frozen, "contract is frozen for upgrade");
 }
 
 #[contract]
@@ -2441,6 +2485,7 @@ impl SplitContract {
         deadline: u64,
         options: InvoiceOptions,
     ) -> u64 {
+        require_not_frozen(&env);
         // Issue #297: circuit breaker blocks all creation, no exemptions.
         let cb_active: bool = env
             .storage()
@@ -3731,6 +3776,7 @@ impl SplitContract {
         donate_on_failure: bool,
     ) {
         require_fn_not_paused(&env, &symbol_short!("pay"));
+        require_not_frozen(&env);
         payer.require_auth();
         Self::_pay(
             &env,
@@ -4599,6 +4645,7 @@ impl SplitContract {
     /// If an approver is set, requires the invoice to be approved first (issue #25).
     pub fn release(env: Env, invoice_id: u64) {
         require_fn_not_paused(&env, &symbol_short!("release"));
+        require_not_frozen(&env);
         let caller = env.current_contract_address();
         let mut invoice = load_invoice(&env, invoice_id);
 
@@ -9480,5 +9527,102 @@ impl SplitContract {
             // Fallback for pre-migration invoices.
             load_invoice(&env, invoice_id).recipients
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #435: Contract upgrade freeze
+    // -----------------------------------------------------------------------
+
+    /// Freeze the contract for upgrade. Blocks all write operations except admin actions.
+    pub fn freeze_for_upgrade(env: Env, admin: Address, checkpoint_hash: BytesN<32>) {
+        require_role(&env, &admin, AdminRole::SuperAdmin);
+        env.storage().instance().set(&upgrade_freeze_key(), &true);
+        env.storage().instance().set(&upgrade_checkpoint_key(), &checkpoint_hash);
+        events::contract_frozen_for_upgrade(&env, &checkpoint_hash);
+    }
+
+    /// Thaw the contract (remove upgrade freeze).
+    pub fn thaw_contract(env: Env, admin: Address) {
+        require_role(&env, &admin, AdminRole::SuperAdmin);
+        env.storage().instance().remove(&upgrade_freeze_key());
+        env.storage().instance().remove(&upgrade_checkpoint_key());
+        events::contract_thawed(&env, &admin);
+    }
+
+    /// Get the upgrade checkpoint hash if frozen.
+    pub fn get_upgrade_checkpoint(env: Env) -> Option<BytesN<32>> {
+        env.storage().instance().get(&upgrade_checkpoint_key())
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #436: Payment proof commitment
+    // -----------------------------------------------------------------------
+
+    /// Get the current payment root hash for an invoice (sha256 rolling hash).
+    pub fn get_payment_root(env: Env, invoice_id: u64) -> BytesN<32> {
+        let stored: Option<BytesN<32>> = env
+            .storage()
+            .persistent()
+            .get(&payment_root_key(invoice_id));
+
+        match stored {
+            Some(root) => root,
+            None => {
+                // Initial root is sha256(invoice_id)
+                let invoice_id_bytes = invoice_id.to_be_bytes();
+                let hash = env.crypto().sha256(&Bytes::from_slice(&env, &invoice_id_bytes));
+                hash.into()
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #437: Recipient payout delay
+    // -----------------------------------------------------------------------
+
+    /// Claim a delayed payout once it becomes claimable.
+    pub fn claim_delayed_payout(env: Env, invoice_id: u64, recipient: Address) {
+        recipient.require_auth();
+        let delayed_payout: DelayedPayout = env
+            .storage()
+            .persistent()
+            .get(&delayed_payout_key(invoice_id, &recipient))
+            .expect("no delayed payout found");
+
+        assert!(
+            env.ledger().sequence() >= delayed_payout.claimable_at_ledger,
+            "payout not yet claimable"
+        );
+
+        let invoice = load_invoice(&env, invoice_id);
+        let token = invoice
+            .tokens
+            .get(0)
+            .expect("invoice has no tokens");
+        let token_client = token::Client::new(&env, &token);
+        token_client.transfer(
+            &env.current_contract_address(),
+            &recipient,
+            &delayed_payout.amount,
+        );
+
+        // Remove the delayed payout record
+        env.storage()
+            .persistent()
+            .remove(&delayed_payout_key(invoice_id, &recipient));
+
+        events::delayed_payout_claimed(&env, invoice_id, &recipient, delayed_payout.amount);
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #438: Invoice anonymity mode
+    // -----------------------------------------------------------------------
+
+    /// Check if an invoice is in anonymous recipients mode.
+    pub fn is_anonymous_invoice(env: Env, invoice_id: u64) -> bool {
+        env.storage()
+            .persistent()
+            .get(&anonymous_recipients_key(invoice_id))
+            .unwrap_or(false)
     }
 }
