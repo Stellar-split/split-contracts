@@ -956,6 +956,118 @@ fn test_add_recipient_after_release_panics() {
 }
 
 // ---------------------------------------------------------------------------
+// Issue #423 — recipient rebalancing after removal
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_rebalance_two_recipients_remain() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let r1 = Address::generate(&env);
+    let r2 = Address::generate(&env);
+    let r3 = Address::generate(&env);
+
+    env.ledger().set_timestamp(1_000);
+
+    // r1=100, r2=100, r3=200; total = 400.
+    let id = make_invoice(&env, &c, &creator, &r1, 100, &token_id, 9_999);
+    c.add_recipient(&creator, &id, &r2, &100_i128);
+    c.add_recipient(&creator, &id, &r3, &200_i128);
+
+    c.rebalance_recipients(&creator, &id, &r1);
+
+    let invoice = c.get_invoice(&id);
+    assert_eq!(invoice.recipients.len(), 2);
+    assert!(!invoice.recipients.contains(&r1));
+
+    // removed=100 split proportionally over r2=100, r3=200 (remaining total 300):
+    // r2 share = 100*100/300 = 33, r3 share = 100*200/300 = 66, remainder 1 -> r2 (first).
+    assert_eq!(invoice.amounts.get_unchecked(0), 100 + 33 + 1);
+    assert_eq!(invoice.amounts.get_unchecked(1), 200 + 66);
+
+    // Total invoice amount is unchanged.
+    let total: i128 = invoice.amounts.iter().sum();
+    assert_eq!(total, 400);
+}
+
+#[test]
+fn test_rebalance_three_recipients_remain_proportional() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let r1 = Address::generate(&env);
+    let r2 = Address::generate(&env);
+    let r3 = Address::generate(&env);
+    let r4 = Address::generate(&env);
+
+    env.ledger().set_timestamp(1_000);
+
+    // r1=100 (removed), r2=r3=r4=100 each; total = 400.
+    let id = make_invoice(&env, &c, &creator, &r1, 100, &token_id, 9_999);
+    c.add_recipient(&creator, &id, &r2, &100_i128);
+    c.add_recipient(&creator, &id, &r3, &100_i128);
+    c.add_recipient(&creator, &id, &r4, &100_i128);
+
+    c.rebalance_recipients(&creator, &id, &r1);
+
+    let invoice = c.get_invoice(&id);
+    assert_eq!(invoice.recipients.len(), 3);
+    assert!(!invoice.recipients.contains(&r1));
+
+    // removed=100 split over 3 equal shares of remaining total 300:
+    // each share = 100*100/300 = 33, distributed = 99, remainder 1 -> first (r2).
+    assert_eq!(invoice.amounts.get_unchecked(0), 100 + 33 + 1);
+    assert_eq!(invoice.amounts.get_unchecked(1), 100 + 33);
+    assert_eq!(invoice.amounts.get_unchecked(2), 100 + 33);
+
+    let total: i128 = invoice.amounts.iter().sum();
+    assert_eq!(total, 400);
+}
+
+#[test]
+#[should_panic(expected = "InsufficientRecipients")]
+fn test_rebalance_last_recipient_removal_fails() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let r1 = Address::generate(&env);
+    let r2 = Address::generate(&env);
+
+    env.ledger().set_timestamp(1_000);
+
+    let id = make_invoice(&env, &c, &creator, &r1, 100, &token_id, 9_999);
+    c.add_recipient(&creator, &id, &r2, &200_i128);
+
+    // Only 2 recipients exist; removing one would leave just 1.
+    c.rebalance_recipients(&creator, &id, &r1);
+}
+
+#[test]
+#[should_panic(expected = "only creator can rebalance recipients")]
+fn test_rebalance_non_creator_panics() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let not_creator = Address::generate(&env);
+    let r1 = Address::generate(&env);
+    let r2 = Address::generate(&env);
+    let r3 = Address::generate(&env);
+
+    env.ledger().set_timestamp(1_000);
+
+    let id = make_invoice(&env, &c, &creator, &r1, 100, &token_id, 9_999);
+    c.add_recipient(&creator, &id, &r2, &100_i128);
+    c.add_recipient(&creator, &id, &r3, &200_i128);
+
+    c.rebalance_recipients(&not_creator, &id, &r1);
+}
+
+// ---------------------------------------------------------------------------
 // Subscription
 // ---------------------------------------------------------------------------
 

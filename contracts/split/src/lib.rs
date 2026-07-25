@@ -7484,6 +7484,83 @@ impl SplitContract {
         events::split_adjusted(&env, invoice_id, &caller);
     }
 
+    /// Remove a recipient and redistribute their share proportionally among
+    /// the remaining recipients (issue #423). Only the creator may call this,
+    /// and only before any payment has been received. At least two recipients
+    /// must remain after removal. Any remainder left over from integer-division
+    /// rounding is added to the first remaining recipient's share, so the total
+    /// invoice amount is exactly preserved.
+    pub fn rebalance_recipients(
+        env: Env,
+        creator: Address,
+        invoice_id: u64,
+        remove_address: Address,
+    ) {
+        require_not_paused(&env);
+        creator.require_auth();
+
+        let mut invoice = load_invoice(&env, invoice_id);
+
+        assert!(
+            invoice.status == InvoiceStatus::Pending,
+            "invoice is not pending"
+        );
+        assert!(!invoice.disputed, "invoice is disputed");
+        assert!(
+            invoice.creator == creator,
+            "only creator can rebalance recipients"
+        );
+        assert!(invoice.funded == 0, "payments already received");
+        assert!(invoice.recipients.len() >= 3, "InsufficientRecipients");
+
+        let idx = invoice
+            .recipients
+            .iter()
+            .position(|r| r == remove_address)
+            .expect("recipient not in invoice") as u32;
+
+        let removed_amount = invoice.amounts.get(idx).unwrap();
+
+        let mut new_recipients: Vec<Address> = Vec::new(&env);
+        let mut new_amounts: Vec<i128> = Vec::new(&env);
+        let mut new_tokens: Vec<Address> = Vec::new(&env);
+        let mut new_claimed: Vec<i128> = Vec::new(&env);
+        for i in 0..invoice.recipients.len() {
+            if i == idx {
+                continue;
+            }
+            new_recipients.push_back(invoice.recipients.get(i).unwrap());
+            new_amounts.push_back(invoice.amounts.get(i).unwrap());
+            new_tokens.push_back(invoice.tokens.get(i).unwrap());
+            new_claimed.push_back(invoice.claimed.get(i).unwrap());
+        }
+
+        // Distribute the removed recipient's amount proportionally to each
+        // remaining recipient's existing share of the remaining total.
+        let remaining_total: i128 = new_amounts.iter().sum();
+        let mut distributed: i128 = 0;
+        for i in 0..new_amounts.len() {
+            let base = new_amounts.get(i).unwrap();
+            let share = removed_amount * base / remaining_total;
+            distributed += share;
+            new_amounts.set(i, base + share);
+        }
+        // Integer division can leave a remainder; give it to the first recipient
+        // so the invoice total is unchanged.
+        let remainder = removed_amount - distributed;
+        let first = new_amounts.get(0).unwrap();
+        new_amounts.set(0, first + remainder);
+
+        invoice.recipients = new_recipients;
+        invoice.amounts = new_amounts;
+        invoice.tokens = new_tokens;
+        invoice.claimed = new_claimed;
+
+        save_invoice(&env, invoice_id, &invoice);
+        append_audit_entry(&env, invoice_id, symbol_short!("rebal"), &creator);
+        events::recipients_rebalanced(&env, invoice_id, &remove_address, removed_amount);
+    }
+
     // -----------------------------------------------------------------------
     // Templates
     // -----------------------------------------------------------------------
