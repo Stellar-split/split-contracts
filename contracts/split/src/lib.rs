@@ -26,6 +26,13 @@ const MAX_FEE_WAIVER_ENTRIES: usize = 100;
 /// $0.12 = 12 cents is reported as `12 * ORACLE_RATE_SCALE` = `12_000_000`).
 const ORACLE_RATE_SCALE: i128 = 1_000_000;
 
+/// Issue #425: default per-invoice storage quota in bytes, applied at `initialize()`
+/// and used by `get_storage_quota` before an admin ever calls
+/// `set_invoice_storage_quota`. Sized with headroom above the largest invoices in
+/// the test suite (~200 recipients, ~15KB) so it only trips on genuinely unbounded
+/// growth; admins can tighten it via `set_invoice_storage_quota`.
+const DEFAULT_INVOICE_STORAGE_QUOTA: u64 = 65_536;
+
 mod error;
 mod events;
 pub mod types;
@@ -458,6 +465,11 @@ fn repl_proposal_key(invoice_id: u64, old_recipient: &Address) -> (Symbol, u64, 
 /// Issue: maximum cancellation rate in basis points, stored globally.
 fn max_cancel_bps_key() -> Symbol {
     symbol_short!("mx_cnl_bp")
+}
+
+/// Issue #425: global per-invoice storage quota (bytes), admin-configurable.
+fn storage_quota_key() -> Symbol {
+    symbol_short!("inv_quota")
 }
 
 /// Issue: receipt token factory contract address key.
@@ -1009,6 +1021,20 @@ fn load_invoice(env: &Env, id: u64) -> Invoice {
     invoice
 }
 
+/// Estimates the serialised size (in bytes) of an invoice's persisted
+/// representation (issue #425). Sums the XDR-encoded length of the three
+/// pieces `save_invoice` actually writes to storage (`InvoiceCore`,
+/// `InvoiceExt`, `InvoiceExt2`), so a quota enforced against this figure
+/// reflects the real on-chain storage footprint. `payments` is excluded
+/// because it is always cleared before persisting — payment history lives in
+/// separate sharded storage (issue #177), not on the invoice record itself.
+fn measure_invoice_bytes(env: &Env, invoice: &Invoice) -> u64 {
+    let mut clean = invoice.clone();
+    clean.payments = Vec::new(env);
+    let (core, ext, ext2) = clean.split();
+    (core.to_xdr(env).len() + ext.to_xdr(env).len() + ext2.to_xdr(env).len()) as u64
+}
+
 fn save_invoice(env: &Env, id: u64, invoice: &Invoice) {
     // Check no duplicate recipients
     for i in 0..invoice.recipients.len() {
@@ -1019,6 +1045,18 @@ fn save_invoice(env: &Env, id: u64, invoice: &Invoice) {
             );
         }
     }
+
+    // Issue #425: reject any mutation that would push the invoice's persisted
+    // size past the configured quota, before writing anything.
+    let quota: u64 = env
+        .storage()
+        .instance()
+        .get(&storage_quota_key())
+        .unwrap_or(DEFAULT_INVOICE_STORAGE_QUOTA);
+    assert!(
+        measure_invoice_bytes(env, invoice) <= quota,
+        "StorageQuotaExceeded"
+    );
 
     let mut clean_invoice = invoice.clone();
     clean_invoice.payments = Vec::new(env);
@@ -1505,6 +1543,10 @@ impl SplitContract {
         env.storage()
             .persistent()
             .set(&rate_window_key(), &rate_window);
+        // Issue #425: seed the default per-invoice storage quota.
+        env.storage()
+            .instance()
+            .set(&storage_quota_key(), &DEFAULT_INVOICE_STORAGE_QUOTA);
     }
 
     /// Add a new admin with a given role. Requires SuperAdmin auth.
@@ -1634,6 +1676,23 @@ impl SplitContract {
         env.storage()
             .instance()
             .set(&creation_fee_key(), &creation_fee);
+    }
+
+    /// Set the global per-invoice storage quota in bytes (issue #425). Requires
+    /// admin auth. Applies to `create_invoice` and every mutation entry point
+    /// that goes through `save_invoice` (e.g. `add_recipient`).
+    pub fn set_invoice_storage_quota(env: Env, admin: Address, bytes: u64) {
+        require_role(&env, &admin, AdminRole::Operator);
+        assert!(bytes > 0, "quota must be positive");
+        env.storage().instance().set(&storage_quota_key(), &bytes);
+    }
+
+    /// Returns the current global per-invoice storage quota in bytes (issue #425).
+    pub fn get_storage_quota(env: Env) -> u64 {
+        env.storage()
+            .instance()
+            .get(&storage_quota_key())
+            .unwrap_or(DEFAULT_INVOICE_STORAGE_QUOTA)
     }
 
     /// Update the treasury address. Requires admin auth.

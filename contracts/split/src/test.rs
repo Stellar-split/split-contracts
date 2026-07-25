@@ -7683,6 +7683,266 @@ fn test_fee_waiver_max_entries_enforced() {
 }
 
 // ---------------------------------------------------------------------------
+// Issue #425 — per-invoice storage quota enforcement
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_invoice_within_default_quota_accepted() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+
+    // initialize() was never called, so the quota falls back to the default.
+    assert_eq!(c.get_storage_quota(), DEFAULT_INVOICE_STORAGE_QUOTA);
+
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    env.ledger().set_timestamp(1_000);
+
+    let id = make_invoice(&env, &c, &creator, &recipient, 100, &token_id, 9_999);
+    assert_eq!(c.get_invoice(&id).status, InvoiceStatus::Pending);
+}
+
+#[test]
+#[should_panic(expected = "StorageQuotaExceeded")]
+fn test_oversized_invoice_rejected() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    c.initialize(
+        &admin, &0_i128, &treasury, &token_id, &0_u32, &None, &0_u32, &0_u32, &0_u64,
+    );
+    // 10 bytes is smaller than any real invoice's persisted footprint.
+    c.set_invoice_storage_quota(&admin, &10_u64);
+
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    env.ledger().set_timestamp(1_000);
+
+    make_invoice(&env, &c, &creator, &recipient, 100, &token_id, 9_999);
+}
+
+#[test]
+#[should_panic(expected = "StorageQuotaExceeded")]
+fn test_add_recipient_rejected_when_over_quota() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    c.initialize(
+        &admin, &0_i128, &treasury, &token_id, &0_u32, &None, &0_u32, &0_u32, &0_u64,
+    );
+
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let recipient2 = Address::generate(&env);
+    env.ledger().set_timestamp(1_000);
+
+    let id = make_invoice(&env, &c, &creator, &recipient, 100, &token_id, 9_999);
+
+    // Shrink the quota well below the invoice's current footprint; the next
+    // mutation (adding a recipient) must be rejected even though the invoice
+    // already exists.
+    c.set_invoice_storage_quota(&admin, &10_u64);
+    c.add_recipient(&creator, &id, &recipient2, &50_i128);
+}
+
+#[test]
+fn test_quota_increase_allows_previously_rejected_invoice() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    c.initialize(
+        &admin, &0_i128, &treasury, &token_id, &0_u32, &None, &0_u32, &0_u32, &0_u64,
+    );
+
+    c.set_invoice_storage_quota(&admin, &10_u64);
+    assert_eq!(c.get_storage_quota(), 10);
+
+    // Raising the quota takes effect on the next invoice creation.
+    c.set_invoice_storage_quota(&admin, &DEFAULT_INVOICE_STORAGE_QUOTA);
+    assert_eq!(c.get_storage_quota(), DEFAULT_INVOICE_STORAGE_QUOTA);
+
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    env.ledger().set_timestamp(1_000);
+
+    let id = make_invoice(&env, &c, &creator, &recipient, 100, &token_id, 9_999);
+    assert_eq!(c.get_invoice(&id).status, InvoiceStatus::Pending);
+}
+
+// ---------------------------------------------------------------------------
+// Issue #430 — creator-defined payment window
+// ---------------------------------------------------------------------------
+
+fn make_windowed_invoice(
+    env: &Env,
+    c: &SplitContractClient,
+    creator: &Address,
+    recipient: &Address,
+    token_id: &Address,
+    deadline: u64,
+    open_at: Option<u64>,
+    close_at: Option<u64>,
+) -> u64 {
+    let mut opts = default_options(env);
+    opts.ext.payment_open_at = open_at;
+    opts.ext.payment_close_at = close_at;
+
+    let mut recipients = Vec::new(env);
+    recipients.push_back(recipient.clone());
+    let mut amounts = Vec::new(env);
+    amounts.push_back(300_i128);
+    c.create_invoice(creator, &recipients, &amounts, token_id, &deadline, &opts)
+}
+
+#[test]
+fn test_payment_window_unset_no_restriction() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let payer = Address::generate(&env);
+    StellarAssetClient::new(&env, &token_id).mint(&payer, &1_000);
+    env.ledger().set_timestamp(1_000);
+
+    let id = make_invoice(&env, &c, &creator, &recipient, 300, &token_id, 9_999);
+    assert_eq!(c.get_payment_window(&id), (None, None));
+
+    c.pay(&payer, &id, &300_i128, &0_u64, &false, &false);
+    assert_eq!(c.get_invoice(&id).status, InvoiceStatus::Released);
+}
+
+#[test]
+#[should_panic(expected = "PaymentWindowNotOpen")]
+fn test_payment_before_open_fails() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let payer = Address::generate(&env);
+    StellarAssetClient::new(&env, &token_id).mint(&payer, &1_000);
+    env.ledger().set_timestamp(1_000);
+
+    let id = make_windowed_invoice(
+        &env, &c, &creator, &recipient, &token_id, 9_999, Some(5_000), None,
+    );
+
+    c.pay(&payer, &id, &300_i128, &0_u64, &false, &false);
+}
+
+#[test]
+fn test_payment_within_window_succeeds() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let payer = Address::generate(&env);
+    StellarAssetClient::new(&env, &token_id).mint(&payer, &1_000);
+    env.ledger().set_timestamp(1_000);
+
+    let id = make_windowed_invoice(
+        &env,
+        &c,
+        &creator,
+        &recipient,
+        &token_id,
+        9_999,
+        Some(1_000),
+        Some(5_000),
+    );
+    assert_eq!(c.get_payment_window(&id), (Some(1_000), Some(5_000)));
+
+    env.ledger().set_timestamp(2_000);
+    c.pay(&payer, &id, &300_i128, &0_u64, &false, &false);
+    assert_eq!(c.get_invoice(&id).status, InvoiceStatus::Released);
+}
+
+#[test]
+#[should_panic(expected = "PaymentWindowClosed")]
+fn test_payment_after_close_fails() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let payer = Address::generate(&env);
+    StellarAssetClient::new(&env, &token_id).mint(&payer, &1_000);
+    env.ledger().set_timestamp(1_000);
+
+    let id = make_windowed_invoice(
+        &env, &c, &creator, &recipient, &token_id, 9_999, None, Some(2_000),
+    );
+
+    env.ledger().set_timestamp(3_000);
+    c.pay(&payer, &id, &300_i128, &0_u64, &false, &false);
+}
+
+#[test]
+fn test_payment_only_open_set_no_close_restriction() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let payer = Address::generate(&env);
+    StellarAssetClient::new(&env, &token_id).mint(&payer, &1_000);
+    env.ledger().set_timestamp(1_000);
+
+    let id = make_windowed_invoice(
+        &env, &c, &creator, &recipient, &token_id, 9_999, Some(1_000), None,
+    );
+
+    // Far past the open timestamp, with no close bound to trip.
+    env.ledger().set_timestamp(9_000);
+    c.pay(&payer, &id, &300_i128, &0_u64, &false, &false);
+    assert_eq!(c.get_invoice(&id).status, InvoiceStatus::Released);
+}
+
+#[test]
+fn test_payment_only_close_set_no_open_restriction() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let payer = Address::generate(&env);
+    StellarAssetClient::new(&env, &token_id).mint(&payer, &1_000);
+    env.ledger().set_timestamp(500);
+
+    let id = make_windowed_invoice(
+        &env, &c, &creator, &recipient, &token_id, 9_999, None, Some(5_000),
+    );
+
+    // Immediately payable since there is no open bound.
+    c.pay(&payer, &id, &300_i128, &0_u64, &false, &false);
+    assert_eq!(c.get_invoice(&id).status, InvoiceStatus::Released);
+}
+
+#[test]
+#[should_panic(expected = "payment_close_at must be before deadline")]
+fn test_payment_close_at_must_be_before_deadline() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    env.ledger().set_timestamp(1_000);
+
+    // close_at == deadline is rejected; it must be strictly before.
+    make_windowed_invoice(
+        &env, &c, &creator, &recipient, &token_id, 9_999, None, Some(9_999),
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Issue #298: Compute cost estimation tests
 // ---------------------------------------------------------------------------
 
