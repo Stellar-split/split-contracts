@@ -35,7 +35,8 @@ fuzz_target!(|input: Input| {
 
     let seed_id = c
         .try_create_invoice(&creator, &recipients, &amounts, &token_id, &deadline, &options)
-        .ok();
+        .ok()
+        .and_then(|r| r.ok());
 
     let payer = if input.reuse_creator_as_payer {
         creator.clone()

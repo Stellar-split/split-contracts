@@ -33,7 +33,8 @@ fuzz_target!(|input: Input| {
 
     let seed_id = c
         .try_create_invoice(&creator, &recipients, &amounts, &token_id, &deadline, &options)
-        .ok();
+        .ok()
+        .and_then(|r| r.ok());
 
     if let Some(id) = seed_id {
         if input.pay_amount > 0 {

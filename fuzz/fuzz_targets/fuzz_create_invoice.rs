@@ -64,12 +64,5 @@ fuzz_target!(|input: Input| {
     // Use try_create_invoice so validation rejections (deadline in the past,
     // negative amounts, duplicate recipients, etc.) come back as Err instead
     // of panicking.  Any genuine host-level crash is still a real finding.
-    let _ = c.try_create_invoice(
-        &creator,
-        &recipients,
-        &amounts,
-        &token_id,
-        &deadline,
-        &options,
-    );
+    let _ = c.try_create_invoice(&creator, &recipients, &amounts, &token_id, &deadline, &options);
 });

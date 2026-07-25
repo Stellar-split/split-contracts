@@ -62,7 +62,7 @@ fuzz_target!(|input: Input| {
                 let now = env.ledger().timestamp();
                 let deadline = offset_timestamp(now, deadline_offset_secs as i64);
 
-                if let Ok(id) = c.try_create_invoice(
+                if let Ok(Ok(id)) = c.try_create_invoice(
                     &creator, &recipients, &amounts, &token_id, &deadline, &options,
                 ) {
                     created.push(id);
