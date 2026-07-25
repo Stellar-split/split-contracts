@@ -178,13 +178,39 @@ pub fn is_expected_panic(payload: &(dyn std::any::Any + Send)) -> bool {
         .any(|expected| msg.contains(expected))
 }
 
+std::thread_local! {
+    static CAPTURED_PANIC_MSG: std::cell::RefCell<String> = std::cell::RefCell::new(String::new());
+}
+
 /// Run `f`, swallowing documented "expected rejection" panics and
 /// re-raising anything else so libFuzzer records it as a crash.
+///
+/// soroban-env-host catches contract panics internally and re-panics with a
+/// `HostError(WasmVm, InvalidAction)` whose Display includes the full event
+/// log (which contains the original panic message). We install a temporary
+/// panic hook to capture that formatted message so `is_expected_panic` can
+/// match against the original contract assertion text even when the payload
+/// type itself is not a plain `&str` / `String`.
 pub fn catch_expected<F: FnOnce() -> R + std::panic::UnwindSafe, R>(f: F) -> Option<R> {
-    match std::panic::catch_unwind(f) {
+    CAPTURED_PANIC_MSG.with(|c| c.borrow_mut().clear());
+
+    let prev_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|info| {
+        CAPTURED_PANIC_MSG.with(|c| *c.borrow_mut() = format!("{info}"));
+    }));
+
+    let result = std::panic::catch_unwind(f);
+    std::panic::set_hook(prev_hook);
+
+    match result {
         Ok(v) => Some(v),
         Err(payload) => {
-            if is_expected_panic(&*payload) {
+            let full_msg = CAPTURED_PANIC_MSG.with(|c| c.borrow().clone());
+            let expected = is_expected_panic(&*payload)
+                || EXPECTED_PANIC_SUBSTRINGS
+                    .iter()
+                    .any(|s| full_msg.contains(s));
+            if expected {
                 None
             } else {
                 std::panic::resume_unwind(payload);

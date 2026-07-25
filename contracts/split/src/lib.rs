@@ -420,6 +420,7 @@ fn cancel_count_key(creator: &Address) -> (Symbol, Address) {
 
 /// Storage key for a pending recipient-replacement proposal.
 /// Keyed by (invoice_id, old_recipient).
+#[allow(dead_code)]
 fn repl_proposal_key(invoice_id: u64, old_recipient: &Address) -> (Symbol, u64, Address) {
     (symbol_short!("repl_prp"), invoice_id, old_recipient.clone())
 }
