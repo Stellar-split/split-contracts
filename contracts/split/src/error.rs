@@ -32,4 +32,7 @@ pub enum ContractError {
     /// Oracle-priced invoice: the configured price oracle is unreachable or returned a
     /// non-positive rate at payment time.
     OracleUnavailable    = 22,
+    InvalidRating        = 23,
+    AlreadyRated         = 24,
+    RateLimitExceeded    = 25,
 }
