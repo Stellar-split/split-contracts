@@ -302,9 +302,6 @@ pub struct InvoiceOptions2 {
     /// fixed at creation. When set, `oracle_asset_pair` must also be set and
     /// `amounts` is interpreted as the USD-cents funding target.
     pub oracle: Option<Address>,
-    /// (base, quote) asset symbols passed to the oracle's `price(asset_pair)`
-    /// call, e.g. (XLM, USD).
-    pub oracle_asset_pair: Option<(Symbol, Symbol)>,
     /// Base asset symbol passed to the oracle's `price` call (e.g. XLM).
     pub oracle_asset_pair_base: Option<Symbol>,
     /// Quote asset symbol passed to the oracle's `price` call (e.g. USD).

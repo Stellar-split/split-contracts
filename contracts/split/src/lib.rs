@@ -754,7 +754,6 @@ fn archive_invoice_storage(env: &Env, id: u64, core: &InvoiceCore) {
             target_usd_cents: None,
             refunded_addresses: Vec::new(env),
             oracle: None,
-            oracle_asset_pair: None,
             oracle_asset_pair_base: None,
             oracle_asset_pair_quote: None,
             min_payer_rep: None,
@@ -2537,18 +2536,13 @@ impl SplitContract {
             options.ext.metadata_hash,
             options.ext.target_usd_cents,
             options.ext.oracle,
-            options.ext.oracle_asset_pair,
-            None, // min_payer_rep (use create_invoice_ext for this)
-            None, // release_delay_ledgers (use create_invoice_ext for this)
-            None, // metadata_hash
-            None, // target_usd_cents
-            None, // oracle (use create_invoice_ext for this)
-            None, // oracle_asset_pair_base (use create_invoice_ext for this)
-            None, // oracle_asset_pair_quote (use create_invoice_ext for this)
+            options.ext.oracle_asset_pair_base,
+            options.ext.oracle_asset_pair_quote,
         )
     }
 
-    /// Like `create_invoice` but also accepts `InvoiceOptions2` for oracle, min_payer_rep, etc.
+    /// Like `create_invoice` but accepts a separate `InvoiceOptions2` for oracle/min_payer_rep.
+    /// Merges options2 into options.ext before delegating to create_invoice.
     pub fn create_invoice_ext(
         env: Env,
         creator: Address,
@@ -2556,90 +2550,11 @@ impl SplitContract {
         amounts: Vec<i128>,
         token: Address,
         deadline: u64,
-        options: InvoiceOptions,
+        mut options: InvoiceOptions,
         options2: InvoiceOptions2,
     ) -> u64 {
-        let cb_active: bool = env
-            .storage()
-            .persistent()
-            .get(&circuit_breaker_key())
-            .unwrap_or(false);
-        assert!(!cb_active, "ContractPaused");
-        let is_paused = is_paused(&env);
-        let is_exempt = env
-            .storage()
-            .persistent()
-            .get::<_, bool>(&pause_exempt_key(&creator))
-            .unwrap_or(false);
-        if is_paused && !is_exempt {
-            panic!("contract is paused");
-        }
-        creator.require_auth();
-        Self::_apply_rate_limit(&env, &creator);
-
-        let wl: Vec<Address> = env
-            .storage()
-            .persistent()
-            .get(&creator_whitelist_key())
-            .unwrap_or_else(|| Vec::new(&env));
-        if !wl.is_empty() {
-            assert!(wl.iter().any(|a| a == creator), "creator not whitelisted");
-        }
-
-        Self::_create_invoice_inner(
-            &env,
-            creator,
-            recipients,
-            amounts,
-            token,
-            deadline,
-            options.co_creators,
-            options.allow_early_withdrawal,
-            options.bonus_pool,
-            options.bonus_max_payers,
-            options.prerequisite_id,
-            options.tranches,
-            options.co_signers,
-            options.required_signatures,
-            options.penalty_bps.unwrap_or(0),
-            options.penalty_deadline.unwrap_or(0),
-            options.min_funding_bps.unwrap_or(0),
-            options.release_stages,
-            options.price_oracle,
-            options.swap_tokens,
-            options.oracle_address,
-            options.tax_bps.unwrap_or(0),
-            options.tax_authority,
-            options.insurance_premium_bps.unwrap_or(0),
-            options.smart_route.unwrap_or(false),
-            options.notification_contract.clone(),
-            options.overflow_behavior.clone(),
-            options.convert_to_stream,
-            options.accepted_tokens,
-            options.forward_to,
-            options.forward_invoice_id,
-            options.creator_cosigner,
-            options.velocity_limit,
-            options.velocity_window,
-            options.split_rules,
-            options.auto_resolve_rules,
-            options.cross_chain_ref,
-            options.allowed_payers,
-            options.payment_cooldown_secs,
-            options.max_payments_per_window,
-            options.payment_window_secs,
-            options.refund_grace_secs,
-            options.priorities,
-            options.require_kyc,
-            options.scheduled_release_at,
-            options2.min_payer_rep,
-            options2.release_delay_ledgers,
-            options2.metadata_hash,
-            options2.target_usd_cents,
-            options2.oracle,
-            options2.oracle_asset_pair_base,
-            options2.oracle_asset_pair_quote,
-        )
+        options.ext = options2;
+        Self::create_invoice(env, creator, recipients, amounts, token, deadline, options)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3222,7 +3137,6 @@ impl SplitContract {
                 None,           // metadata_hash
                 None,           // target_usd_cents
                 None,           // oracle
-                None,           // oracle_asset_pair
                 None,           // oracle_asset_pair_base
                 None,           // oracle_asset_pair_quote
             );
@@ -3322,7 +3236,6 @@ impl SplitContract {
                 None,             // metadata_hash
                 None,             // target_usd_cents
                 None,             // oracle
-                None,             // oracle_asset_pair
                 None,             // oracle_asset_pair_base
                 None,             // oracle_asset_pair_quote
             );
@@ -3407,7 +3320,6 @@ impl SplitContract {
             None,           // metadata_hash
             None,           // target_usd_cents
             None,           // oracle
-            None,           // oracle_asset_pair
             None,           // oracle_asset_pair_base
             None,           // oracle_asset_pair_quote
         );
@@ -6518,7 +6430,6 @@ impl SplitContract {
                 None,          // metadata_hash
                 None,          // target_usd_cents
                 None,          // oracle
-                None,          // oracle_asset_pair
                 None,          // oracle_asset_pair_base
                 None,          // oracle_asset_pair_quote
             );
@@ -7547,7 +7458,6 @@ impl SplitContract {
             None,           // metadata_hash
             None,           // target_usd_cents
             None,           // oracle
-            None,           // oracle_asset_pair
             None,           // oracle_asset_pair_base
             None,           // oracle_asset_pair_quote
         )
@@ -8107,7 +8017,6 @@ impl SplitContract {
                 target_usd_cents: None,
                 refunded_addresses: Vec::new(&env),
                 oracle: None,
-                oracle_asset_pair: None,
                 oracle_asset_pair_base: None,
             oracle_asset_pair_quote: None,
                 min_payer_rep: None,
@@ -8217,7 +8126,6 @@ impl SplitContract {
                         target_usd_cents: None,
                         refunded_addresses: Vec::new(&env),
                         oracle: None,
-                        oracle_asset_pair: None,
                         oracle_asset_pair_base: None,
             oracle_asset_pair_quote: None,
                         min_payer_rep: None,
