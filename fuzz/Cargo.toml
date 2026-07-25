@@ -1,0 +1,68 @@
+[package]
+name = "split-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[lib]
+name = "split_fuzz"
+path = "src/lib.rs"
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+soroban-sdk = { version = "22.0.0", features = ["testutils"] }
+split = { path = "../contracts/split", features = ["testutils"] }
+
+# Fuzz binaries panic on genuine bugs and must be able to unwind so the
+# harness can distinguish "expected validation panic" from "found a bug"
+# via std::panic::catch_unwind. Do not set panic = "abort" here.
+#
+# debug-assertions/overflow-checks stay on so an i128 overflow anywhere in
+# the contract surfaces as a panic (a real finding) instead of silently
+# wrapping — that's one of the exact bug classes this fuzzing effort exists
+# to catch.
+[profile.release]
+debug = 1
+debug-assertions = true
+overflow-checks = true
+
+[[bin]]
+name = "fuzz_create_invoice"
+path = "fuzz_targets/fuzz_create_invoice.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_pay"
+path = "fuzz_targets/fuzz_pay.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_release"
+path = "fuzz_targets/fuzz_release.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_refund"
+path = "fuzz_targets/fuzz_refund.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_sequence"
+path = "fuzz_targets/fuzz_sequence.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]

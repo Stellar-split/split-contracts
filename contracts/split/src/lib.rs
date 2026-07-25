@@ -28,7 +28,7 @@ const ORACLE_RATE_SCALE: i128 = 1_000_000;
 
 mod error;
 mod events;
-mod types;
+pub mod types;
 
 #[cfg(test)]
 mod test;
@@ -754,6 +754,7 @@ fn archive_invoice_storage(env: &Env, id: u64, core: &InvoiceCore) {
             target_usd_cents: None,
             refunded_addresses: Vec::new(env),
             oracle: None,
+            oracle_asset_pair: None,
             oracle_asset_pair_base: None,
             oracle_asset_pair_quote: None,
             min_payer_rep: None,
@@ -2524,13 +2525,19 @@ impl SplitContract {
             options.auto_resolve_rules,
             options.cross_chain_ref,
             options.allowed_payers,
-            options.payment_cooldown_secs,
-            options.max_payments_per_window,
-            options.payment_window_secs,
+            options.ext.payment_cooldown_secs,
+            options.ext.max_payments_per_window,
+            options.ext.payment_window_secs,
             options.refund_grace_secs,
             options.priorities,
             options.require_kyc,
             options.scheduled_release_at,
+            options.ext.min_payer_rep,
+            options.ext.release_delay_ledgers,
+            options.ext.metadata_hash,
+            options.ext.target_usd_cents,
+            options.ext.oracle,
+            options.ext.oracle_asset_pair,
             None, // min_payer_rep (use create_invoice_ext for this)
             None, // release_delay_ledgers (use create_invoice_ext for this)
             None, // metadata_hash
@@ -3215,6 +3222,7 @@ impl SplitContract {
                 None,           // metadata_hash
                 None,           // target_usd_cents
                 None,           // oracle
+                None,           // oracle_asset_pair
                 None,           // oracle_asset_pair_base
                 None,           // oracle_asset_pair_quote
             );
@@ -3314,6 +3322,7 @@ impl SplitContract {
                 None,             // metadata_hash
                 None,             // target_usd_cents
                 None,             // oracle
+                None,             // oracle_asset_pair
                 None,             // oracle_asset_pair_base
                 None,             // oracle_asset_pair_quote
             );
@@ -3398,6 +3407,7 @@ impl SplitContract {
             None,           // metadata_hash
             None,           // target_usd_cents
             None,           // oracle
+            None,           // oracle_asset_pair
             None,           // oracle_asset_pair_base
             None,           // oracle_asset_pair_quote
         );
@@ -6508,6 +6518,7 @@ impl SplitContract {
                 None,          // metadata_hash
                 None,          // target_usd_cents
                 None,          // oracle
+                None,          // oracle_asset_pair
                 None,          // oracle_asset_pair_base
                 None,          // oracle_asset_pair_quote
             );
@@ -7536,6 +7547,7 @@ impl SplitContract {
             None,           // metadata_hash
             None,           // target_usd_cents
             None,           // oracle
+            None,           // oracle_asset_pair
             None,           // oracle_asset_pair_base
             None,           // oracle_asset_pair_quote
         )
@@ -8095,6 +8107,7 @@ impl SplitContract {
                 target_usd_cents: None,
                 refunded_addresses: Vec::new(&env),
                 oracle: None,
+                oracle_asset_pair: None,
                 oracle_asset_pair_base: None,
             oracle_asset_pair_quote: None,
                 min_payer_rep: None,
@@ -8204,6 +8217,7 @@ impl SplitContract {
                         target_usd_cents: None,
                         refunded_addresses: Vec::new(&env),
                         oracle: None,
+                        oracle_asset_pair: None,
                         oracle_asset_pair_base: None,
             oracle_asset_pair_quote: None,
                         min_payer_rep: None,
