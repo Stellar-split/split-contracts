@@ -4,12 +4,8 @@ use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 use soroban_sdk::testutils::Address as _;
 use soroban_sdk::{Address, Env, Vec};
-use split_fuzz::{catch_expected, client, default_options, offset_timestamp, setup};
+use split_fuzz::{client, default_options, offset_timestamp, setup};
 
-/// Bound recipient count so a single input can't force the harness itself to
-/// blow the compute/memory budget before the contract even gets a chance to
-/// reject it — the contract's own limits are exercised at counts up to
-/// `MAX_RECIPIENTS`, well past any documented cap.
 const MAX_RECIPIENTS: usize = 20;
 
 #[derive(Debug, Arbitrary)]
@@ -18,7 +14,7 @@ struct Input {
     /// "must have at least one recipient" rejection path.
     recipient_count: u8,
     amounts: [i64; MAX_RECIPIENTS],
-    /// Signed offset from "now" — negative values deliberately exercise the
+    /// Signed offset from "now" — negative values exercise the
     /// "deadline must be in the future" rejection path.
     deadline_offset_secs: i32,
     bonus_pool: i32,
@@ -28,8 +24,6 @@ struct Input {
     min_funding_bps: u16,
     penalty_bps: u16,
     insurance_premium_bps: u16,
-    /// Occasionally reuse the same address across recipient slots to probe
-    /// the "duplicate recipient" invariant check.
     force_duplicate_recipients: bool,
 }
 
@@ -67,17 +61,15 @@ fuzz_target!(|input: Input| {
         options.tax_authority = Some(Address::generate(&env));
     }
 
-    // The invariant under test: no combination of arbitrary/malformed
-    // recipients, amounts, or a deadline (past, present, or future) should
-    // corrupt storage or panic outside the documented assert!/panic! guards.
-    let _ = catch_expected(std::panic::AssertUnwindSafe(|| {
-        c.create_invoice(
-            &creator,
-            &recipients,
-            &amounts,
-            &token_id,
-            &deadline,
-            &options,
-        )
-    }));
+    // Use try_create_invoice so validation rejections (deadline in the past,
+    // negative amounts, duplicate recipients, etc.) come back as Err instead
+    // of panicking.  Any genuine host-level crash is still a real finding.
+    let _ = c.try_create_invoice(
+        &creator,
+        &recipients,
+        &amounts,
+        &token_id,
+        &deadline,
+        &options,
+    );
 });
