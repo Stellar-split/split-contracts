@@ -27,6 +27,39 @@ pub fn payment_received(env: &Env, invoice_id: u64, payer: &Address, amount: i12
     );
 }
 
+pub fn payment_committed(env: &Env, invoice_id: u64, payer: &Address, commit_ledger: u32) {
+    env.events().publish(
+        (
+            symbol_short!("split"),
+            symbol_short!("pay_cmt"),
+            invoice_id,
+        ),
+        (payer.clone(), commit_ledger),
+    );
+}
+
+pub fn milestone_released(env: &Env, invoice_id: u64, milestone_bps: u32, amount_released: i128) {
+    env.events().publish(
+        (
+            symbol_short!("split"),
+            symbol_short!("mile_rel"),
+            invoice_id,
+        ),
+        (milestone_bps, amount_released),
+    );
+}
+
+pub fn surplus_claimed(env: &Env, invoice_id: u64, payer: &Address, amount: i128) {
+    env.events().publish(
+        (
+            symbol_short!("split"),
+            symbol_short!("surplus"),
+            invoice_id,
+        ),
+        (payer.clone(), amount),
+    );
+}
+
 /// Emitted when an invoice is fully funded and funds are released.
 /// Topics: (split, released, invoice_id)
 /// Data: recipients

@@ -186,6 +186,13 @@ pub struct CreateInvoiceParams {
     pub deadline: u64,
 }
 
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct PaymentCommitment {
+    pub commitment_hash: BytesN<32>,
+    pub commit_ledger: u32,
+}
+
 /// A single graduated release tranche: `basis_points` out of 10 000 of the
 /// invoice total becomes releasable once the ledger time reaches `timestamp`.
 #[contracttype]
@@ -308,6 +315,10 @@ pub struct InvoiceOptions2 {
     pub oracle_asset_pair_quote: Option<Symbol>,
     /// Minimum required payer reputation score to pay this invoice (issue #349).
     pub min_payer_rep: Option<u32>,
+    /// Optional milestone thresholds in basis points for auto-release gates.
+    pub milestones: Option<Vec<u32>>,
+    /// Optional per-recipient payout caps parallel to `recipients`.
+    pub recipient_max_payouts: Option<Vec<Option<i128>>>,
 }
 
 /// Legacy invoice layout used by stored invoices created before the `version`
@@ -447,6 +458,16 @@ pub struct InvoiceExt2 {
     pub oracle_asset_pair_quote: Option<Symbol>,
     /// Issue #349: minimum required payer reputation score.
     pub min_payer_rep: Option<u32>,
+    /// Funding milestone thresholds in basis points.
+    pub milestones: Vec<u32>,
+    /// Number of milestones already released.
+    pub milestones_released: u32,
+    /// Optional per-recipient payout caps parallel to `recipients`.
+    pub recipient_max_payouts: Vec<Option<i128>>,
+    /// Time-weighted average funding rate accumulator numerator.
+    pub twafr_numerator: i128,
+    /// Last ledger sequence used to update TWAFR.
+    pub twafr_last_ledger: u32,
 }
 
 /// Issue #211: A single escalating penalty tier (seconds_after_deadline, bps).
@@ -569,6 +590,11 @@ pub struct Invoice {
     pub oracle_asset_pair_quote: Option<Symbol>,
     /// Issue #349: minimum required payer reputation score.
     pub min_payer_rep: Option<u32>,
+    pub milestones: Vec<u32>,
+    pub milestones_released: u32,
+    pub recipient_max_payouts: Vec<Option<i128>>,
+    pub twafr_numerator: i128,
+    pub twafr_last_ledger: u32,
 }
 
 impl Invoice {
@@ -660,6 +686,11 @@ impl Invoice {
                 oracle_asset_pair_base: self.oracle_asset_pair_base,
                 oracle_asset_pair_quote: self.oracle_asset_pair_quote,
                 min_payer_rep: self.min_payer_rep,
+                milestones: self.milestones,
+                milestones_released: self.milestones_released,
+                recipient_max_payouts: self.recipient_max_payouts,
+                twafr_numerator: self.twafr_numerator,
+                twafr_last_ledger: self.twafr_last_ledger,
             },
         )
     }
@@ -747,6 +778,11 @@ impl Invoice {
             oracle_asset_pair_base: ext2.oracle_asset_pair_base,
             oracle_asset_pair_quote: ext2.oracle_asset_pair_quote,
             min_payer_rep: ext2.min_payer_rep,
+            milestones: ext2.milestones,
+            milestones_released: ext2.milestones_released,
+            recipient_max_payouts: ext2.recipient_max_payouts,
+            twafr_numerator: ext2.twafr_numerator,
+            twafr_last_ledger: ext2.twafr_last_ledger,
         }
     }
 }
@@ -970,6 +1006,11 @@ impl Invoice {
             oracle_asset_pair_base: None,
             oracle_asset_pair_quote: None,
             min_payer_rep: None,
+            milestones: Vec::new(env),
+            milestones_released: 0,
+            recipient_max_payouts: Vec::new(env),
+            twafr_numerator: 0,
+            twafr_last_ledger: 0,
         }
     }
 }
