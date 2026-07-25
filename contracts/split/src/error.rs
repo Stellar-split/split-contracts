@@ -38,4 +38,8 @@ pub enum ContractError {
     PayoutNotYetClaimable = 24,
     /// Issue #435: Contract is frozen for upgrade; write operations are blocked.
     ContractFrozen = 25,
+    /// Issue #431: Duplicate payment detected within the duplicate window.
+    DuplicatePayment = 26,
+    /// Issue #434: Invoice group member expired unfunded; group rollback triggered.
+    GroupMemberExpired = 27,
 }

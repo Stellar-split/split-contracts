@@ -215,6 +215,16 @@ pub struct Recipient {
     pub payout_delay_ledgers: Option<u32>,
 }
 
+/// Issue #431: Payment fingerprint for duplicate detection.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct PaymentFingerprint {
+    /// Timestamp (ledger sequence) when the payment was recorded.
+    pub recorded_at_ledger: u32,
+    /// Hash of (invoice_id || payer || amount || ledger_sequence).
+    pub fingerprint_hash: BytesN<32>,
+}
+
 /// Optional parameters for `create_invoice`, grouped to keep the function
 /// within Soroban's 10-parameter limit.
 #[contracttype]
