@@ -65,6 +65,14 @@ pub struct FeeTier {
     pub fee_bps: u32,
 }
 
+/// Issue #409: Rebate tier for high-volume creators.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct RebateTier {
+    pub min_volume: i128,
+    pub rebate_bps: u32,
+}
+
 /// Issue #299: Per-creator analytics aggregator.
 #[contracttype]
 #[derive(Clone, Debug)]
@@ -102,6 +110,7 @@ pub enum InvoiceStatus {
     Pending,
     Released,
     Refunded,
+    Expired,
     Cancelled,
 }
 
@@ -137,6 +146,14 @@ pub struct SubscriptionParams {
     pub recipients: Vec<Address>,
     pub amounts: Vec<i128>,
     pub tokens: Vec<Address>,
+}
+
+/// Issue #414: Per-recipient payout configuration.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct Recipient {
+    pub address: Address,
+    pub token: Address,
 }
 
 #[contracttype]
@@ -210,6 +227,26 @@ pub struct RepScore {
     pub late_pays: u32,
     pub invoices_released: u32,
     pub invoices_refunded: u32,
+}
+
+/// Issue #437: A recipient with optional payout delay.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct Recipient {
+    /// The recipient's address.
+    pub address: Address,
+    /// Optional payout delay in ledgers after release.
+    pub payout_delay_ledgers: Option<u32>,
+}
+
+/// Issue #431: Payment fingerprint for duplicate detection.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct PaymentFingerprint {
+    /// Timestamp (ledger sequence) when the payment was recorded.
+    pub recorded_at_ledger: u32,
+    /// Hash of (invoice_id || payer || amount || ledger_sequence).
+    pub fingerprint_hash: BytesN<32>,
 }
 
 /// Optional parameters for `create_invoice`, grouped to keep the function
@@ -319,6 +356,10 @@ pub struct InvoiceOptions2 {
     pub milestones: Option<Vec<u32>>,
     /// Optional per-recipient payout caps parallel to `recipients`.
     pub recipient_max_payouts: Option<Vec<Option<i128>>>,
+    /// Issue #416: SHA-256 hash of the required off-chain release preimage.
+    pub release_condition_hash: Option<BytesN<32>>,
+    /// Issue #417: enable recipient whitelist enforcement for this invoice.
+    pub recipient_whitelist_enabled: bool,
 }
 
 /// Legacy invoice layout used by stored invoices created before the `version`
@@ -365,6 +406,7 @@ pub struct InvoiceCore {
     pub recipients: Vec<Address>,
     pub amounts: Vec<i128>,
     pub tokens: Vec<Address>,
+    pub funding_token: Address,
     pub deadline: u64,
     pub funded: i128,
     pub status: InvoiceStatus,
@@ -381,6 +423,7 @@ pub struct InvoiceCore {
     pub tranches: Vec<Tranche>,
     pub released_bps: u32,
     pub clone_depth: u32,
+    pub predecessor_id: Option<u64>,
 }
 
 #[contracttype]
@@ -468,6 +511,10 @@ pub struct InvoiceExt2 {
     pub twafr_numerator: i128,
     /// Last ledger sequence used to update TWAFR.
     pub twafr_last_ledger: u32,
+    /// Issue #416: SHA-256 hash required to release the invoice.
+    pub release_condition_hash: Option<BytesN<32>>,
+    /// Issue #417: recipient whitelist enforcement flag.
+    pub recipient_whitelist_enabled: bool,
 }
 
 /// Issue #211: A single escalating penalty tier (seconds_after_deadline, bps).
@@ -505,6 +552,7 @@ pub struct Invoice {
     pub recipients: Vec<Address>,
     pub amounts: Vec<i128>,
     pub tokens: Vec<Address>,
+    pub funding_token: Address,
     pub deadline: u64,
     pub funded: i128,
     pub status: InvoiceStatus,
@@ -595,6 +643,11 @@ pub struct Invoice {
     pub recipient_max_payouts: Vec<Option<i128>>,
     pub twafr_numerator: i128,
     pub twafr_last_ledger: u32,
+    /// Issue #416: SHA-256 hash required to release the invoice.
+    pub release_condition_hash: Option<BytesN<32>>,
+    /// Issue #417: recipient whitelist enforcement flag.
+    pub recipient_whitelist_enabled: bool,
+    pub predecessor_id: Option<u64>,
 }
 
 impl Invoice {
@@ -607,6 +660,7 @@ impl Invoice {
                 recipients: self.recipients,
                 amounts: self.amounts,
                 tokens: self.tokens,
+                funding_token: self.funding_token,
                 deadline: self.deadline,
                 funded: self.funded,
                 status: self.status,
@@ -623,6 +677,7 @@ impl Invoice {
                 tranches: self.tranches,
                 released_bps: self.released_bps,
                 clone_depth: self.clone_depth,
+                predecessor_id: self.predecessor_id,
             },
             InvoiceExt {
                 co_signers: self.co_signers,
@@ -691,6 +746,8 @@ impl Invoice {
                 recipient_max_payouts: self.recipient_max_payouts,
                 twafr_numerator: self.twafr_numerator,
                 twafr_last_ledger: self.twafr_last_ledger,
+                release_condition_hash: self.release_condition_hash,
+                recipient_whitelist_enabled: self.recipient_whitelist_enabled,
             },
         )
     }
@@ -703,6 +760,7 @@ impl Invoice {
             recipients: core.recipients,
             amounts: core.amounts,
             tokens: core.tokens,
+            funding_token: core.funding_token,
             deadline: core.deadline,
             funded: core.funded,
             status: core.status,
@@ -719,6 +777,7 @@ impl Invoice {
             tranches: core.tranches,
             released_bps: core.released_bps,
             clone_depth: core.clone_depth,
+            predecessor_id: core.predecessor_id,
             co_signers: ext.co_signers,
             required_signatures: ext.required_signatures,
             signatures: ext.signatures,
@@ -783,6 +842,8 @@ impl Invoice {
             recipient_max_payouts: ext2.recipient_max_payouts,
             twafr_numerator: ext2.twafr_numerator,
             twafr_last_ledger: ext2.twafr_last_ledger,
+            release_condition_hash: ext2.release_condition_hash,
+            recipient_whitelist_enabled: ext2.recipient_whitelist_enabled,
         }
     }
 }
@@ -862,6 +923,7 @@ impl Invoice {
             InvoiceStatus::Released => 1,
             InvoiceStatus::Refunded => 2,
             InvoiceStatus::Cancelled => 3,
+            InvoiceStatus::Expired => 4,
         };
         bytes.push_back(status_byte);
 
@@ -896,6 +958,7 @@ impl Invoice {
             1 => InvoiceStatus::Released,
             2 => InvoiceStatus::Refunded,
             3 => InvoiceStatus::Cancelled,
+            4 => InvoiceStatus::Expired,
             _ => InvoiceStatus::Pending,
         };
 
@@ -932,6 +995,11 @@ impl Invoice {
             base_amounts: old.amounts.clone(),
             amounts: old.amounts,
             tokens: old.tokens,
+            funding_token: old
+                .tokens
+                .get(0)
+                .expect("no token")
+                .clone(),
             deadline: old.deadline,
             funded: old.funded,
             status: old.status,
@@ -1011,6 +1079,9 @@ impl Invoice {
             recipient_max_payouts: Vec::new(env),
             twafr_numerator: 0,
             twafr_last_ledger: 0,
+            release_condition_hash: None,
+            recipient_whitelist_enabled: false,
+            predecessor_id: None,
         }
     }
 }
@@ -1155,6 +1226,7 @@ impl InvoiceStatus {
             InvoiceStatus::Released => 1,
             InvoiceStatus::Refunded => 2,
             InvoiceStatus::Cancelled => 3,
+            InvoiceStatus::Expired => 4,
         }
     }
 
@@ -1164,6 +1236,7 @@ impl InvoiceStatus {
             1 => InvoiceStatus::Released,
             2 => InvoiceStatus::Refunded,
             3 => InvoiceStatus::Cancelled,
+            4 => InvoiceStatus::Expired,
             _ => InvoiceStatus::Pending,
         }
     }
@@ -1189,4 +1262,14 @@ pub struct ReleaseResult {
     pub recipients_paid: u32,
     /// Total amount transferred.
     pub total_transferred: i128,
+}
+
+/// Issue #437: Delayed payout stored per recipient until claimable.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct DelayedPayout {
+    /// Amount to be transferred to recipient.
+    pub amount: i128,
+    /// Ledger sequence at which this payout becomes claimable.
+    pub claimable_at_ledger: u32,
 }

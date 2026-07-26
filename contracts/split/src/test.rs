@@ -120,6 +120,8 @@ fn default_options(env: &Env) -> InvoiceOptions {
             min_payer_rep: None,
             milestones: None,
             recipient_max_payouts: None,
+            release_condition_hash: None,
+            recipient_whitelist_enabled: false,
         },
     }
 }
@@ -139,6 +141,8 @@ fn default_options2(_env: &Env) -> InvoiceOptions2 {
         min_payer_rep: None,
         milestones: None,
         recipient_max_payouts: None,
+        release_condition_hash: None,
+        recipient_whitelist_enabled: false,
     }
 }
 
@@ -199,6 +203,8 @@ fn invoice_options(
             min_payer_rep: None,
             milestones: None,
             recipient_max_payouts: None,
+            release_condition_hash: None,
+            recipient_whitelist_enabled: false,
         },
     }
 }
