@@ -889,6 +889,47 @@ pub fn rep_updated(env: &Env, address: &Address, score: &RepScore) {
     );
 }
 
+pub fn payout_failed(env: &Env, invoice_id: u64, recipient: &Address, amount: i128) {
+    env.events().publish(
+        (
+            symbol_short!("split"),
+            soroban_sdk::Symbol::new(env, "PayoutFailed"),
+            invoice_id,
+        ),
+        (recipient.clone(), amount),
+    );
+}
+
+pub fn instalment_tranche_paid(env: &Env, invoice_id: u64, payer: &Address, tranche_index: u32, amount: i128) {
+    env.events().publish(
+        (
+            symbol_short!("split"),
+            soroban_sdk::Symbol::new(env, "InstalmentTranchePaid"),
+            invoice_id,
+        ),
+        (payer.clone(), tranche_index, amount),
+    );
+}
+
+pub fn escrow_hold_started(env: &Env, invoice_id: u64, held_until: u32) {
+    env.events().publish(
+        (
+            symbol_short!("split"),
+            soroban_sdk::Symbol::new(env, "EscrowHoldStarted"),
+            invoice_id,
+        ),
+        held_until,
+    );
+}
+
+pub fn escrow_resolved(env: &Env, invoice_id: u64, resolution_hash: &BytesN<32>) {
+    env.events().publish(
+        (
+            symbol_short!("split"),
+            soroban_sdk::Symbol::new(env, "EscrowResolved"),
+            invoice_id,
+        ),
+        resolution_hash.clone(),
 /// Issue #437: Emitted when a delayed payout is scheduled on release.
 /// Topics: (split, dlypay_s, invoice_id)
 /// Data: (recipient, claimable_at_ledger)

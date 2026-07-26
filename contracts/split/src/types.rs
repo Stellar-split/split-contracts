@@ -506,6 +506,8 @@ pub struct InvoiceExt2 {
     pub oracle_asset_pair_quote: Option<Symbol>,
     /// Issue #349: minimum required payer reputation score.
     pub min_payer_rep: Option<u32>,
+    pub escrow_hold_period: Option<u32>,
+    pub held_until: Option<u32>,
     /// Funding milestone thresholds in basis points.
     pub milestones: Vec<u32>,
     /// Number of milestones already released.
@@ -643,6 +645,8 @@ pub struct Invoice {
     pub oracle_asset_pair_quote: Option<Symbol>,
     /// Issue #349: minimum required payer reputation score.
     pub min_payer_rep: Option<u32>,
+    pub escrow_hold_period: Option<u32>,
+    pub held_until: Option<u32>,
     pub milestones: Vec<u32>,
     pub milestones_released: u32,
     pub recipient_max_payouts: Vec<Option<i128>>,
@@ -746,6 +750,8 @@ impl Invoice {
                 oracle_asset_pair_base: self.oracle_asset_pair_base,
                 oracle_asset_pair_quote: self.oracle_asset_pair_quote,
                 min_payer_rep: self.min_payer_rep,
+                escrow_hold_period: self.escrow_hold_period,
+                held_until: self.held_until,
                 milestones: self.milestones,
                 milestones_released: self.milestones_released,
                 recipient_max_payouts: self.recipient_max_payouts,
@@ -842,6 +848,8 @@ impl Invoice {
             oracle_asset_pair_base: ext2.oracle_asset_pair_base,
             oracle_asset_pair_quote: ext2.oracle_asset_pair_quote,
             min_payer_rep: ext2.min_payer_rep,
+            escrow_hold_period: ext2.escrow_hold_period,
+            held_until: ext2.held_until,
             milestones: ext2.milestones,
             milestones_released: ext2.milestones_released,
             recipient_max_payouts: ext2.recipient_max_payouts,
@@ -1079,6 +1087,8 @@ impl Invoice {
             oracle_asset_pair_base: None,
             oracle_asset_pair_quote: None,
             min_payer_rep: None,
+            escrow_hold_period: None,
+            held_until: None,
             milestones: Vec::new(env),
             milestones_released: 0,
             recipient_max_payouts: Vec::new(env),
@@ -1269,6 +1279,25 @@ pub struct ReleaseResult {
     pub total_transferred: i128,
 }
 
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InstalmentTranche {
+    pub amount: i128,
+    pub ledger: u32,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InstalmentPlan {
+    pub tranches: Vec<InstalmentTranche>,
+    pub paid_index: u32,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FeeBracket {
+    pub max_amount: i128,
+    pub rate_bps: u32,
 /// Issue #437: Delayed payout stored per recipient until claimable.
 #[contracttype]
 #[derive(Clone, Debug)]

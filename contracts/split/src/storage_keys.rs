@@ -229,6 +229,17 @@ pub fn compact_status_key(invoice_id: u64) -> (Symbol, u64) { (symbol_short!("cp
 /// Used when wall-clock time is not required (opt-in via compact_migrate).
 pub fn compact_deadline_ledger_key(invoice_id: u64) -> (Symbol, u64) { (symbol_short!("cpt_dlg"), invoice_id) }
 
+pub fn fallback_escrow_key(invoice_id: u64, recipient: Address) -> (Symbol, u64, Address) {
+    (symbol_short!("fb_esc"), invoice_id, recipient)
+}
+
+pub fn plan_key(invoice_id: u64, payer: Address) -> (Symbol, u64, Address) {
+    (symbol_short!("inst_pl"), invoice_id, payer)
+}
+
+pub fn fee_brackets_key() -> Symbol {
+    symbol_short!("fee_brks")
+}
 // ---------------------------------------------------------------------------
 // Issue #438: Invoice anonymity mode
 // ---------------------------------------------------------------------------
