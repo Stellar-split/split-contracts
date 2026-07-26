@@ -240,3 +240,38 @@ pub fn plan_key(invoice_id: u64, payer: Address) -> (Symbol, u64, Address) {
 pub fn fee_brackets_key() -> Symbol {
     symbol_short!("fee_brks")
 }
+// ---------------------------------------------------------------------------
+// Issue #438: Invoice anonymity mode
+// ---------------------------------------------------------------------------
+
+/// Per-invoice anonymity mode flag — persistent storage.
+pub fn anonymous_recipients_key(invoice_id: u64) -> (Symbol, u64) { (symbol_short!("anon_rec"), invoice_id) }
+
+/// Recipient commitment hash for anonymous invoice — persistent storage.
+/// Key: (invoice_id, recipient_index)
+pub fn recipient_commitment_key(invoice_id: u64, index: u32) -> (Symbol, u64, u32) { (symbol_short!("rec_cmt"), invoice_id, index) }
+
+// ---------------------------------------------------------------------------
+// Issue #437: Recipient payout delay
+// ---------------------------------------------------------------------------
+
+/// Delayed payout record — persistent storage.
+/// Key: (invoice_id, recipient)
+pub fn delayed_payout_key(invoice_id: u64, recipient: &Address) -> (Symbol, u64, Address) { (symbol_short!("del_pay"), invoice_id, recipient.clone()) }
+
+// ---------------------------------------------------------------------------
+// Issue #436: Payment proof commitment
+// ---------------------------------------------------------------------------
+
+/// Rolling payment root hash for an invoice — persistent storage.
+pub fn payment_root_key(invoice_id: u64) -> (Symbol, u64) { (symbol_short!("pay_root"), invoice_id) }
+
+// ---------------------------------------------------------------------------
+// Issue #435: Contract upgrade freeze
+// ---------------------------------------------------------------------------
+
+/// Contract upgrade freeze flag — instance storage.
+pub fn upgrade_freeze_key() -> Symbol { symbol_short!("upg_frz") }
+
+/// Contract upgrade checkpoint hash — instance storage.
+pub fn upgrade_checkpoint_key() -> Symbol { symbol_short!("upg_ckpt") }

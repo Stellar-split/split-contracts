@@ -94,6 +94,8 @@ pub fn default_options(env: &Env) -> InvoiceOptions {
             oracle_asset_pair_base: None,
             oracle_asset_pair_quote: None,
             min_payer_rep: None,
+            payment_open_at: None,
+            payment_close_at: None,
         },
     }
 }
