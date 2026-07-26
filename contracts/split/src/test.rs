@@ -4,7 +4,7 @@
 
 use super::*;
 use soroban_sdk::{
-    testutils::{Address as _, Events as _, Ledger},
+    testutils::{Address as _, Events as _, Ledger, LedgerInfo},
     token::{Client as TokenClient, StellarAssetClient},
     Address, Bytes, BytesN, Env, String, Symbol, TryFromVal, Vec,
 };
@@ -31,6 +31,37 @@ fn setup() -> (Env, Address, Address) {
 
 fn client<'a>(env: &'a Env, contract_id: &Address) -> SplitContractClient<'a> {
     SplitContractClient::new(env, contract_id)
+}
+
+fn set_ledger(env: &Env, sequence_number: u32, timestamp: u64) {
+    env.ledger().set(LedgerInfo {
+        timestamp,
+        protocol_version: 22,
+        sequence_number,
+        network_id: [0; 32],
+        base_reserve: 10,
+        min_temp_entry_ttl: 16,
+        min_persistent_entry_ttl: 16,
+        max_entry_ttl: 10_000,
+    });
+}
+
+fn one_address_vec(env: &Env, address: &Address) -> Vec<Address> {
+    let mut values = Vec::new(env);
+    values.push_back(address.clone());
+    values
+}
+
+fn one_amount_vec(env: &Env, amount: i128) -> Vec<i128> {
+    let mut values = Vec::new(env);
+    values.push_back(amount);
+    values
+}
+
+fn one_optional_amount_vec(env: &Env, amount: Option<i128>) -> Vec<Option<i128>> {
+    let mut values = Vec::new(env);
+    values.push_back(amount);
+    values
 }
 
 fn token_client<'a>(env: &'a Env, token_id: &Address) -> TokenClient<'a> {
@@ -89,6 +120,10 @@ fn default_options(env: &Env) -> InvoiceOptions {
             min_payer_rep: None,
             payment_open_at: None,
             payment_close_at: None,
+            milestones: None,
+            recipient_max_payouts: None,
+            release_condition_hash: None,
+            recipient_whitelist_enabled: false,
         },
     }
 }
@@ -108,6 +143,10 @@ fn default_options2(_env: &Env) -> InvoiceOptions2 {
         min_payer_rep: None,
         payment_open_at: None,
         payment_close_at: None,
+        milestones: None,
+        recipient_max_payouts: None,
+        release_condition_hash: None,
+        recipient_whitelist_enabled: false,
     }
 }
 
@@ -168,6 +207,10 @@ fn invoice_options(
             min_payer_rep: None,
             payment_open_at: None,
             payment_close_at: None,
+            milestones: None,
+            recipient_max_payouts: None,
+            release_condition_hash: None,
+            recipient_whitelist_enabled: false,
         },
     }
 }
@@ -9279,4 +9322,199 @@ fn test_recipient_replacement_preserves_claimed_amounts() {
 #[should_panic(expected = "replacement blocked: invoice is not pending")]
 fn test_recipient_replacement_blocked_on_released_invoice() {
     panic!("replacement blocked: invoice is not pending"); // placeholder until propose_recipient_replacement is added
+}
+
+#[test]
+fn test_twafr_zero_payment_invoice() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    set_ledger(&env, 10, 1_000);
+    let id = make_invoice(&env, &c, &creator, &recipient, 100, &token_id, 9_999);
+
+    assert_eq!(c.get_twafr(&id), 0);
+}
+
+#[test]
+fn test_twafr_single_and_multiple_payments() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+    let tk_admin = StellarAssetClient::new(&env, &token_id);
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let payer = Address::generate(&env);
+
+    tk_admin.mint(&payer, &500);
+    let mut options = default_options(&env);
+    options.ext.milestones = Some({
+        let mut milestones = Vec::new(&env);
+        milestones.push_back(5_000);
+        milestones.push_back(10_000);
+        milestones
+    });
+
+    set_ledger(&env, 10, 1_000);
+    let id = c.create_invoice(
+        &creator,
+        &one_address_vec(&env, &recipient),
+        &one_amount_vec(&env, 100_i128),
+        &token_id,
+        &9_999_u64,
+        &options,
+    );
+
+    set_ledger(&env, 20, 1_100);
+    c.pay(&payer, &id, &50_i128, &0_u64, &false, &false);
+    assert_eq!(c.get_twafr(&id), 5);
+
+    set_ledger(&env, 30, 1_200);
+    c.pay(&payer, &id, &50_i128, &1_u64, &false, &false);
+    assert!(c.get_twafr(&id) > 5);
+}
+
+#[test]
+fn test_commit_reveal_valid() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+    let tk_admin = StellarAssetClient::new(&env, &token_id);
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let payer = Address::generate(&env);
+    let salt = BytesN::from_array(&env, &[7u8; 32]);
+
+    tk_admin.mint(&payer, &500);
+    set_ledger(&env, 10, 1_000);
+    let id = make_invoice(&env, &c, &creator, &recipient, 100, &token_id, 9_999);
+
+    let hash = compute_payment_commitment_hash(&env, id, 100, &salt);
+    c.commit_payment(&payer, &id, &hash);
+
+    set_ledger(&env, 11, 1_001);
+    c.reveal_payment(&payer, &id, &100_i128, &salt, &0_u64, &false, &false);
+    assert_eq!(c.get_payer_total(&id, &payer), 100);
+}
+
+#[test]
+#[should_panic(expected = "ActiveCommitmentExists")]
+fn test_commit_reveal_double_commit_rejected() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let payer = Address::generate(&env);
+
+    set_ledger(&env, 10, 1_000);
+    let id = make_invoice(&env, &c, &creator, &recipient, 100, &token_id, 9_999);
+    c.commit_payment(&payer, &id, &BytesN::from_array(&env, &[1u8; 32]));
+    c.commit_payment(&payer, &id, &BytesN::from_array(&env, &[2u8; 32]));
+}
+
+#[test]
+#[should_panic(expected = "CommitmentMismatch")]
+fn test_commit_reveal_wrong_salt_rejected() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+    let tk_admin = StellarAssetClient::new(&env, &token_id);
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let payer = Address::generate(&env);
+    let salt = BytesN::from_array(&env, &[3u8; 32]);
+    let wrong_salt = BytesN::from_array(&env, &[4u8; 32]);
+
+    tk_admin.mint(&payer, &500);
+    set_ledger(&env, 10, 1_000);
+    let id = make_invoice(&env, &c, &creator, &recipient, 100, &token_id, 9_999);
+    let hash = compute_payment_commitment_hash(&env, id, 100, &salt);
+    c.commit_payment(&payer, &id, &hash);
+    c.reveal_payment(&payer, &id, &100_i128, &wrong_salt, &0_u64, &false, &false);
+}
+
+#[test]
+#[should_panic(expected = "CommitmentExpired")]
+fn test_commit_reveal_expired_rejected() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+    let tk_admin = StellarAssetClient::new(&env, &token_id);
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let payer = Address::generate(&env);
+    let salt = BytesN::from_array(&env, &[5u8; 32]);
+
+    tk_admin.mint(&payer, &500);
+    set_ledger(&env, 10, 1_000);
+    let id = make_invoice(&env, &c, &creator, &recipient, 100, &token_id, 9_999);
+    let hash = compute_payment_commitment_hash(&env, id, 100, &salt);
+    c.commit_payment(&payer, &id, &hash);
+    set_ledger(&env, 200, 1_200);
+    c.reveal_payment(&payer, &id, &100_i128, &salt, &0_u64, &false, &false);
+}
+
+#[test]
+fn test_recipient_cap_surplus_and_claim() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+    let tk = token_client(&env, &token_id);
+    let tk_admin = StellarAssetClient::new(&env, &token_id);
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let payer = Address::generate(&env);
+
+    tk_admin.mint(&payer, &200);
+    let mut options = default_options(&env);
+    options.ext.recipient_max_payouts = Some(one_optional_amount_vec(&env, Some(60_i128)));
+
+    set_ledger(&env, 10, 1_000);
+    let id = c.create_invoice(
+        &creator,
+        &one_address_vec(&env, &recipient),
+        &one_amount_vec(&env, 100_i128),
+        &token_id,
+        &9_999_u64,
+        &options,
+    );
+
+    c.pay(&payer, &id, &100_i128, &0_u64, &false, &false);
+    assert_eq!(tk.balance(&recipient), 60);
+    c.claim_surplus(&id, &payer);
+    assert_eq!(tk.balance(&payer), 140);
+}
+
+#[test]
+fn test_milestones_auto_release() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+    let tk = token_client(&env, &token_id);
+    let tk_admin = StellarAssetClient::new(&env, &token_id);
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let payer = Address::generate(&env);
+
+    tk_admin.mint(&payer, &200);
+    let mut options = default_options(&env);
+    options.ext.milestones = Some({
+        let mut milestones = Vec::new(&env);
+        milestones.push_back(5_000_u32);
+        milestones.push_back(10_000_u32);
+        milestones
+    });
+
+    set_ledger(&env, 10, 1_000);
+    let id = c.create_invoice(
+        &creator,
+        &one_address_vec(&env, &recipient),
+        &one_amount_vec(&env, 100_i128),
+        &token_id,
+        &9_999_u64,
+        &options,
+    );
+
+    c.pay(&payer, &id, &50_i128, &0_u64, &false, &false);
+    assert_eq!(tk.balance(&recipient), 50);
+    assert_eq!(c.get_invoice(&id).status, InvoiceStatus::Pending);
+
+    c.pay(&payer, &id, &50_i128, &1_u64, &false, &false);
+    assert_eq!(tk.balance(&recipient), 100);
+    assert_eq!(c.get_invoice(&id).status, InvoiceStatus::Released);
 }
