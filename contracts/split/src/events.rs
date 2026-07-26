@@ -771,3 +771,91 @@ pub fn rep_updated(env: &Env, address: &Address, score: &RepScore) {
         score.clone(),
     );
 }
+
+/// Issue #437: Emitted when a delayed payout is scheduled on release.
+/// Topics: (split, dlypay_s, invoice_id)
+/// Data: (recipient, claimable_at_ledger)
+pub fn delayed_payout_scheduled(env: &Env, invoice_id: u64, recipient: &Address, claimable_at: u32) {
+    env.events().publish(
+        (
+            symbol_short!("split"),
+            symbol_short!("dlypay_s"),
+            invoice_id,
+        ),
+        (recipient.clone(), claimable_at),
+    );
+}
+
+/// Issue #437: Emitted when a delayed payout is claimed by the recipient.
+/// Topics: (split, dlypay_c, invoice_id)
+/// Data: (recipient, amount)
+pub fn delayed_payout_claimed(env: &Env, invoice_id: u64, recipient: &Address, amount: i128) {
+    env.events().publish(
+        (
+            symbol_short!("split"),
+            symbol_short!("dlypay_c"),
+            invoice_id,
+        ),
+        (recipient.clone(), amount),
+    );
+}
+
+/// Issue #435: Emitted when the contract is frozen for upgrade.
+/// Topics: (split, upg_frz, ())
+/// Data: (checkpoint_hash, frozen_at_ledger)
+pub fn contract_frozen_for_upgrade(env: &Env, checkpoint_hash: &BytesN<32>) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("upg_frz"), symbol_short!("")),
+        (checkpoint_hash.clone(), env.ledger().sequence()),
+    );
+}
+
+/// Issue #435: Emitted when the contract is thawed (upgrade freeze removed).
+/// Topics: (split, upg_thw, ())
+/// Data: admin
+pub fn contract_thawed(env: &Env, admin: &Address) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("upg_thw"), symbol_short!("")),
+        admin.clone(),
+    );
+}
+
+/// Issue #431: Emitted when a duplicate payment is detected and rejected.
+/// Topics: (split, dup_pay, invoice_id)
+/// Data: (payer, amount, fingerprint_hash)
+pub fn duplicate_payment_rejected(env: &Env, invoice_id: u64, payer: &Address, amount: i128, fingerprint: &BytesN<32>) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("dup_pay"), invoice_id),
+        (payer.clone(), amount, fingerprint.clone()),
+    );
+}
+
+/// Issue #432: Emitted when a referrer receives a reward share.
+/// Topics: (split, ref_rwd, invoice_id)
+/// Data: (referrer, amount)
+pub fn referrer_rewarded(env: &Env, invoice_id: u64, referrer: &Address, amount: i128) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("ref_rwd"), invoice_id),
+        (referrer.clone(), amount),
+    );
+}
+
+/// Issue #434: Emitted when a group member expires unfunded.
+/// Topics: (split, grp_exp, invoice_id)
+/// Data: group_id
+pub fn group_member_expired(env: &Env, invoice_id: u64, group_id: u64) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("grp_exp"), invoice_id),
+        group_id,
+    );
+}
+
+/// Issue #434: Emitted when a group rollback is triggered.
+/// Topics: (split, grp_roll, group_id)
+/// Data: member_count
+pub fn group_rollback_triggered(env: &Env, group_id: u64, member_count: u32) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("grp_roll"), group_id),
+        member_count,
+    );
+}

@@ -54,6 +54,11 @@ use types::{
     Payment, PaymentCertificate, PaymentProof, ProtocolFeeConfig, QueuedAction, Recipient,
     RepScore, ResolveAction, ResolveRule, SimulateReleaseResult, SplitRule, SubscriptionParams,
     TimelockAction, Tranche,
+    CreateInvoiceParams, CreatorStats, DelayedPayout, DisputeOutcome, DisputeRecord, DisputeStatus, FeeTier,
+    Invoice, InvoiceCore, InvoiceExt, InvoiceExt2, InvoiceExt3, InvoiceHot, InvoiceOptions, InvoiceOptions2,
+    InvoicePayment, InvoiceStatus, InvoiceTemplate, LegacyInvoice, OverflowBehavior, Payment,
+    PaymentCertificate, PaymentProof, ProtocolFeeConfig, QueuedAction, RepScore, ResolveAction,
+    ResolveRule, SimulateReleaseResult, SplitRule, SubscriptionParams, TimelockAction, Tranche,
     TreasuryRecord, UpgradeProposal,
 };
 
@@ -691,6 +696,71 @@ fn update_creator_payers(env: &Env, creator: &Address, payer: &Address) {
         let payers: u64 = env.storage().persistent().get(&payers_key).unwrap_or(0u64);
         env.storage().persistent().set(&payers_key, &(payers + 1));
     }
+}
+
+/// Issue #438: anonymity mode flag for an invoice — persistent storage.
+fn anonymous_recipients_key(invoice_id: u64) -> (Symbol, u64) {
+    (symbol_short!("anon_rec"), invoice_id)
+}
+
+/// Issue #438: recipient commitment hash — persistent storage (invoice_id, index).
+fn recipient_commitment_key(invoice_id: u64, index: u32) -> (Symbol, u64, u32) {
+    (symbol_short!("rec_cmt"), invoice_id, index)
+}
+
+/// Issue #437: delayed payout record — persistent storage (invoice_id, recipient).
+fn delayed_payout_key(invoice_id: u64, recipient: &Address) -> (Symbol, u64, Address) {
+    (symbol_short!("del_pay"), invoice_id, recipient.clone())
+}
+
+/// Issue #436: rolling payment root hash — persistent storage.
+fn payment_root_key(invoice_id: u64) -> (Symbol, u64) {
+    (symbol_short!("pay_root"), invoice_id)
+}
+
+/// Issue #435: contract upgrade freeze flag — instance storage.
+fn upgrade_freeze_key() -> Symbol {
+    symbol_short!("upg_frz")
+}
+
+/// Issue #435: contract upgrade checkpoint hash — instance storage.
+fn upgrade_checkpoint_key() -> Symbol {
+    symbol_short!("upg_ckpt")
+}
+
+/// Issue #431: duplicate payment fingerprint — persistent storage (with TTL).
+fn payment_fingerprint_key(fingerprint_hash: &BytesN<32>) -> (Symbol, BytesN<32>) {
+    (symbol_short!("dup_fp"), fingerprint_hash.clone())
+}
+
+/// Issue #431: duplicate window in ledgers — instance storage.
+fn duplicate_window_ledgers_key() -> Symbol {
+    symbol_short!("dup_win")
+}
+
+/// Issue #432: referrer reward percentage in basis points — instance storage.
+fn referrer_reward_bps_key() -> Symbol {
+    symbol_short!("ref_bps")
+}
+
+/// Issue #432: referrer address for an invoice — persistent storage.
+fn invoice_referrer_key(invoice_id: u64) -> (Symbol, u64) {
+    (symbol_short!("ref_addr"), invoice_id)
+}
+
+/// Issue #434: group members list — persistent storage.
+fn group_members_key(group_id: u64) -> (Symbol, u64) {
+    (symbol_short!("grp_mem"), group_id)
+}
+
+/// Issue #434: group ID for an invoice — persistent storage.
+fn invoice_group_id_key(invoice_id: u64) -> (Symbol, u64) {
+    (symbol_short!("inv_grp"), invoice_id)
+}
+
+/// Issue #434: group counter — instance storage.
+fn group_counter_key() -> Symbol {
+    symbol_short!("grp_ctr")
 }
 
 // ---------------------------------------------------------------------------
@@ -1457,6 +1527,127 @@ fn check_creator_milestone(env: &Env, creator: &Address, new_volume: i128) {
             .unwrap_or(0u64);
         events::creator_volume_milestone(env, creator, new_volume, invoice_count, new_milestone);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Issue #435: Contract freeze helper
+// ---------------------------------------------------------------------------
+
+/// Check if contract is frozen for upgrade. Panics if frozen.
+fn require_not_frozen(env: &Env) {
+    let is_frozen: bool = env
+        .storage()
+        .instance()
+        .get(&upgrade_freeze_key())
+        .unwrap_or(false);
+    assert!(!is_frozen, "contract is frozen for upgrade");
+}
+
+// ---------------------------------------------------------------------------
+// Issue #431: Duplicate payment detection
+// ---------------------------------------------------------------------------
+
+const DEFAULT_DUPLICATE_WINDOW_LEDGERS: u32 = 100;
+
+/// Compute payment fingerprint hash: sha256(invoice_id || payer || amount || ledger).
+fn compute_payment_fingerprint(env: &Env, invoice_id: u64, payer: &Address, amount: i128, ledger: u32) -> BytesN<32> {
+    let mut input = Bytes::new(env);
+    for byte in invoice_id.to_be_bytes().iter() {
+        input.push_back(*byte);
+    }
+    let payer_val: Val = payer.clone().into_val(env);
+    let payer_bytes = payer_val.to_xdr(env);
+    for byte in payer_bytes.iter() {
+        input.push_back(byte);
+    }
+    for byte in amount.to_be_bytes().iter() {
+        input.push_back(*byte);
+    }
+    for byte in ledger.to_be_bytes().iter() {
+        input.push_back(*byte);
+    }
+    env.crypto().sha256(&input).into()
+}
+
+/// Check if payment fingerprint exists (duplicate detection).
+fn check_duplicate_payment(env: &Env, fingerprint: &BytesN<32>) -> bool {
+    env.storage()
+        .persistent()
+        .has(&payment_fingerprint_key(fingerprint))
+}
+
+/// Record payment fingerprint with TTL.
+fn record_payment_fingerprint(env: &Env, fingerprint: &BytesN<32>, current_ledger: u32) {
+    let window_ledgers: u32 = env
+        .storage()
+        .instance()
+        .get(&duplicate_window_ledgers_key())
+        .unwrap_or(DEFAULT_DUPLICATE_WINDOW_LEDGERS);
+    env.storage()
+        .persistent()
+        .set(&payment_fingerprint_key(fingerprint), &current_ledger);
+    env.storage()
+        .persistent()
+        .extend_ttl(&payment_fingerprint_key(fingerprint), window_ledgers, window_ledgers);
+}
+
+// ---------------------------------------------------------------------------
+// Issue #432: Referral tracking
+// ---------------------------------------------------------------------------
+
+/// Set referrer reward percentage (admin-only via separate call).
+fn set_referrer_reward_bps(env: &Env, reward_bps: u32) {
+    assert!(reward_bps <= 10_000, "reward_bps must be ≤ 10000");
+    env.storage().instance().set(&referrer_reward_bps_key(), &reward_bps);
+}
+
+/// Get current referrer reward percentage.
+fn get_referrer_reward_bps(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&referrer_reward_bps_key())
+        .unwrap_or(0u32)
+}
+
+// ---------------------------------------------------------------------------
+// Issue #434: Invoice groups
+// ---------------------------------------------------------------------------
+
+/// Create a new invoice group and assign group_id to all members.
+fn create_group_for_invoices(env: &Env, invoice_ids: &Vec<u64>) -> u64 {
+    let group_id: u64 = env
+        .storage()
+        .instance()
+        .get(&group_counter_key())
+        .unwrap_or(0u64) + 1;
+    env.storage().instance().set(&group_counter_key(), &group_id);
+
+    env.storage()
+        .persistent()
+        .set(&group_members_key(group_id), invoice_ids);
+
+    for id in invoice_ids.iter() {
+        env.storage()
+            .persistent()
+            .set(&invoice_group_id_key(id), &group_id);
+    }
+
+    group_id
+}
+
+/// Get all members of a group.
+fn get_group_members(env: &Env, group_id: u64) -> Vec<u64> {
+    env.storage()
+        .persistent()
+        .get(&group_members_key(group_id))
+        .unwrap_or_else(|| Vec::new(env))
+}
+
+/// Get group ID for an invoice.
+fn get_invoice_group_id(env: &Env, invoice_id: u64) -> Option<u64> {
+    env.storage()
+        .persistent()
+        .get(&invoice_group_id_key(invoice_id))
 }
 
 #[contract]
@@ -2502,6 +2693,7 @@ impl SplitContract {
         deadline: u64,
         options: InvoiceOptions,
     ) -> u64 {
+        require_not_frozen(&env);
         // Issue #297: circuit breaker blocks all creation, no exemptions.
         let cb_active: bool = env
             .storage()
@@ -3900,6 +4092,7 @@ impl SplitContract {
         donate_on_failure: bool,
     ) {
         require_fn_not_paused(&env, &symbol_short!("pay"));
+        require_not_frozen(&env);
         payer.require_auth();
         Self::enforce_invoice_rate_limit(&env, invoice_id, &payer);
         Self::_pay(
@@ -4775,6 +4968,7 @@ impl SplitContract {
     /// If an approver is set, requires the invoice to be approved first (issue #25).
     pub fn release(env: Env, invoice_id: u64) {
         require_fn_not_paused(&env, &symbol_short!("release"));
+        require_not_frozen(&env);
         let caller = env.current_contract_address();
         let mut invoice = load_invoice(&env, invoice_id);
 
@@ -9992,5 +10186,188 @@ impl SplitContract {
             // Fallback for pre-migration invoices.
             load_invoice(&env, invoice_id).recipients
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #435: Contract upgrade freeze
+    // -----------------------------------------------------------------------
+
+    /// Freeze the contract for upgrade. Blocks all write operations except admin actions.
+    pub fn freeze_for_upgrade(env: Env, admin: Address, checkpoint_hash: BytesN<32>) {
+        require_role(&env, &admin, AdminRole::SuperAdmin);
+        env.storage().instance().set(&upgrade_freeze_key(), &true);
+        env.storage().instance().set(&upgrade_checkpoint_key(), &checkpoint_hash);
+        events::contract_frozen_for_upgrade(&env, &checkpoint_hash);
+    }
+
+    /// Thaw the contract (remove upgrade freeze).
+    pub fn thaw_contract(env: Env, admin: Address) {
+        require_role(&env, &admin, AdminRole::SuperAdmin);
+        env.storage().instance().remove(&upgrade_freeze_key());
+        env.storage().instance().remove(&upgrade_checkpoint_key());
+        events::contract_thawed(&env, &admin);
+    }
+
+    /// Get the upgrade checkpoint hash if frozen.
+    pub fn get_upgrade_checkpoint(env: Env) -> Option<BytesN<32>> {
+        env.storage().instance().get(&upgrade_checkpoint_key())
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #436: Payment proof commitment
+    // -----------------------------------------------------------------------
+
+    /// Get the current payment root hash for an invoice (sha256 rolling hash).
+    pub fn get_payment_root(env: Env, invoice_id: u64) -> BytesN<32> {
+        let stored: Option<BytesN<32>> = env
+            .storage()
+            .persistent()
+            .get(&payment_root_key(invoice_id));
+
+        match stored {
+            Some(root) => root,
+            None => {
+                // Initial root is sha256(invoice_id)
+                let invoice_id_bytes = invoice_id.to_be_bytes();
+                let hash = env.crypto().sha256(&Bytes::from_slice(&env, &invoice_id_bytes));
+                hash.into()
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #437: Recipient payout delay
+    // -----------------------------------------------------------------------
+
+    /// Claim a delayed payout once it becomes claimable.
+    pub fn claim_delayed_payout(env: Env, invoice_id: u64, recipient: Address) {
+        recipient.require_auth();
+        let delayed_payout: DelayedPayout = env
+            .storage()
+            .persistent()
+            .get(&delayed_payout_key(invoice_id, &recipient))
+            .expect("no delayed payout found");
+
+        assert!(
+            env.ledger().sequence() >= delayed_payout.claimable_at_ledger,
+            "payout not yet claimable"
+        );
+
+        let invoice = load_invoice(&env, invoice_id);
+        let token = invoice
+            .tokens
+            .get(0)
+            .expect("invoice has no tokens");
+        let token_client = token::Client::new(&env, &token);
+        token_client.transfer(
+            &env.current_contract_address(),
+            &recipient,
+            &delayed_payout.amount,
+        );
+
+        // Remove the delayed payout record
+        env.storage()
+            .persistent()
+            .remove(&delayed_payout_key(invoice_id, &recipient));
+
+        events::delayed_payout_claimed(&env, invoice_id, &recipient, delayed_payout.amount);
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #438: Invoice anonymity mode
+    // -----------------------------------------------------------------------
+
+    /// Check if an invoice is in anonymous recipients mode.
+    pub fn is_anonymous_invoice(env: Env, invoice_id: u64) -> bool {
+        env.storage()
+            .persistent()
+            .get(&anonymous_recipients_key(invoice_id))
+            .unwrap_or(false)
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #431: Duplicate payment detection
+    // -----------------------------------------------------------------------
+
+    /// Set the duplicate payment detection window (ledgers). Admin-only.
+    pub fn set_duplicate_window_ledgers(env: Env, admin: Address, window_ledgers: u32) {
+        require_role(&env, &admin, AdminRole::SuperAdmin);
+        assert!(window_ledgers > 0 && window_ledgers <= 1_000_000, "invalid window size");
+        env.storage().instance().set(&duplicate_window_ledgers_key(), &window_ledgers);
+    }
+
+    /// Get the current duplicate detection window size.
+    pub fn get_duplicate_window_ledgers(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&duplicate_window_ledgers_key())
+            .unwrap_or(DEFAULT_DUPLICATE_WINDOW_LEDGERS)
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #432: Referral tracking
+    // -----------------------------------------------------------------------
+
+    /// Set the referrer reward percentage of platform fees. Admin-only.
+    pub fn set_referrer_reward_bps(env: Env, admin: Address, reward_bps: u32) {
+        require_role(&env, &admin, AdminRole::SuperAdmin);
+        assert!(reward_bps <= 10_000, "reward_bps must be ≤ 10000");
+        env.storage().instance().set(&referrer_reward_bps_key(), &reward_bps);
+    }
+
+    /// Get the current referrer reward percentage.
+    pub fn get_referrer_reward_bps(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&referrer_reward_bps_key())
+            .unwrap_or(0u32)
+    }
+
+    /// Get the referrer for an invoice, if set.
+    pub fn get_invoice_referrer(env: Env, invoice_id: u64) -> Option<Address> {
+        env.storage()
+            .persistent()
+            .get(&invoice_referrer_key(invoice_id))
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #434: Invoice groups
+    // -----------------------------------------------------------------------
+
+    /// Get all invoice IDs in a group (Issue #434 support).
+    pub fn get_group_members_list(env: Env, group_id: u64) -> Vec<u64> {
+        get_group_members(&env, group_id)
+    }
+
+    /// Get the group ID for an invoice, if it belongs to a group (Issue #434 support).
+    pub fn get_invoice_group_id_info(env: Env, invoice_id: u64) -> Option<u64> {
+        get_invoice_group_id(&env, invoice_id)
+    }
+
+    /// Rollback a group: set all members to Refunded and process refunds.
+    /// Internal function called when a group member expires.
+    fn rollback_invoice_group(env: &Env, group_id: u64) {
+        let members = get_group_members(env, group_id);
+
+        for member_id in members.iter() {
+            let mut invoice = load_invoice(env, member_id);
+            if invoice.status == InvoiceStatus::Pending {
+                invoice.status = InvoiceStatus::Refunded;
+                save_invoice(env, member_id, &invoice);
+
+                // Process refunds for all payers
+                for payment in invoice.payments.iter() {
+                    let token_client = token::Client::new(env, &invoice.tokens.get(0).unwrap());
+                    token_client.transfer(
+                        &env.current_contract_address(),
+                        &payment.payer,
+                        &(payment.amount + payment.tip),
+                    );
+                    events::payer_refunded(env, member_id, &payment.payer, payment.amount + payment.tip);
+                }
+            }
+        }
+
+        events::group_rollback_triggered(env, group_id, members.len() as u32);
     }
 }
