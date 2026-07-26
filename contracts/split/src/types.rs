@@ -139,6 +139,14 @@ pub struct SubscriptionParams {
     pub tokens: Vec<Address>,
 }
 
+/// Issue #414: Per-recipient payout configuration.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct Recipient {
+    pub address: Address,
+    pub token: Address,
+}
+
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct CompletionProof {
@@ -374,6 +382,7 @@ pub struct InvoiceCore {
     pub recipients: Vec<Address>,
     pub amounts: Vec<i128>,
     pub tokens: Vec<Address>,
+    pub funding_token: Address,
     pub deadline: u64,
     pub funded: i128,
     pub status: InvoiceStatus,
@@ -390,6 +399,7 @@ pub struct InvoiceCore {
     pub tranches: Vec<Tranche>,
     pub released_bps: u32,
     pub clone_depth: u32,
+    pub predecessor_id: Option<u64>,
 }
 
 #[contracttype]
@@ -504,6 +514,7 @@ pub struct Invoice {
     pub recipients: Vec<Address>,
     pub amounts: Vec<i128>,
     pub tokens: Vec<Address>,
+    pub funding_token: Address,
     pub deadline: u64,
     pub funded: i128,
     pub status: InvoiceStatus,
@@ -589,6 +600,7 @@ pub struct Invoice {
     pub oracle_asset_pair_quote: Option<Symbol>,
     /// Issue #349: minimum required payer reputation score.
     pub min_payer_rep: Option<u32>,
+    pub predecessor_id: Option<u64>,
 }
 
 impl Invoice {
@@ -601,6 +613,7 @@ impl Invoice {
                 recipients: self.recipients,
                 amounts: self.amounts,
                 tokens: self.tokens,
+                funding_token: self.funding_token,
                 deadline: self.deadline,
                 funded: self.funded,
                 status: self.status,
@@ -617,6 +630,7 @@ impl Invoice {
                 tranches: self.tranches,
                 released_bps: self.released_bps,
                 clone_depth: self.clone_depth,
+                predecessor_id: self.predecessor_id,
             },
             InvoiceExt {
                 co_signers: self.co_signers,
@@ -692,6 +706,7 @@ impl Invoice {
             recipients: core.recipients,
             amounts: core.amounts,
             tokens: core.tokens,
+            funding_token: core.funding_token,
             deadline: core.deadline,
             funded: core.funded,
             status: core.status,
@@ -708,6 +723,7 @@ impl Invoice {
             tranches: core.tranches,
             released_bps: core.released_bps,
             clone_depth: core.clone_depth,
+            predecessor_id: core.predecessor_id,
             co_signers: ext.co_signers,
             required_signatures: ext.required_signatures,
             signatures: ext.signatures,
@@ -916,6 +932,11 @@ impl Invoice {
             base_amounts: old.amounts.clone(),
             amounts: old.amounts,
             tokens: old.tokens,
+            funding_token: old
+                .tokens
+                .get(0)
+                .expect("no token")
+                .clone(),
             deadline: old.deadline,
             funded: old.funded,
             status: old.status,
@@ -990,6 +1011,7 @@ impl Invoice {
             oracle_asset_pair_base: None,
             oracle_asset_pair_quote: None,
             min_payer_rep: None,
+            predecessor_id: None,
         }
     }
 }

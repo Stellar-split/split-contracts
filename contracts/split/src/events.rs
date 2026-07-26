@@ -219,6 +219,35 @@ pub fn pending_payout_claimed(env: &Env, invoice_id: u64, recipient: &Address, a
     );
 }
 
+/// Issue #410: emitted when an invoice is renewed.
+pub fn invoice_renewed(env: &Env, old_id: u64, new_id: u64, carried_amount: i128) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("renewed"), old_id),
+        (new_id, carried_amount),
+    );
+}
+
+/// Issue #412: emitted when a payer rates a released invoice.
+pub fn invoice_rated(env: &Env, invoice_id: u64, payer: &Address, score: u32) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("rated"), invoice_id),
+        (payer.clone(), score),
+    );
+}
+
+/// Issue #413: emitted when a payer hits the payment rate limit.
+pub fn rate_limit_hit(
+    env: &Env,
+    invoice_id: u64,
+    payer: &Address,
+    next_allowed_ledger: u32,
+) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("rl_hit"), invoice_id),
+        (payer.clone(), next_allowed_ledger),
+    );
+}
+
 pub fn nft_gate_set(env: &Env, contract: &Option<Address>, admin: &Address) {
     env.events().publish(
         (symbol_short!("split"), symbol_short!("nft_set")),
