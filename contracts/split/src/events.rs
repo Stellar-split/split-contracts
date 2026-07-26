@@ -55,6 +55,72 @@ pub fn invoice_refunded(env: &Env, invoice_id: u64) {
     );
 }
 
+/// Emitted when a release-condition preimage is verified.
+/// Topics: (split, cond_ok, invoice_id)
+/// Data: preimage_hash
+pub fn condition_verified(env: &Env, invoice_id: u64, preimage_hash: &BytesN<32>) {
+    env.events().publish(
+        (
+            symbol_short!("split"),
+            symbol_short!("cond_ok"),
+            invoice_id,
+        ),
+        preimage_hash.clone(),
+    );
+}
+
+/// Emitted when an invoice expires.
+/// Topics: (split, expired, invoice_id)
+/// Data: (deadline, funded)
+pub fn invoice_expired(env: &Env, invoice_id: u64, deadline: u64, funded: i128) {
+    env.events().publish(
+        (
+            symbol_short!("split"),
+            symbol_short!("expired"),
+            invoice_id,
+        ),
+        (deadline, funded),
+    );
+}
+
+/// Emitted when a recipient is added to an invoice whitelist.
+/// Topics: (split, rcp_wl, invoice_id)
+/// Data: address
+pub fn recipient_whitelisted(env: &Env, invoice_id: u64, address: &Address) {
+    env.events().publish(
+        (
+            symbol_short!("split"),
+            symbol_short!("rcp_wl"),
+            invoice_id,
+        ),
+        address.clone(),
+    );
+}
+
+/// Emitted when a recipient is removed from an invoice whitelist.
+/// Topics: (split, rcp_rl, invoice_id)
+/// Data: address
+pub fn recipient_removed_from_whitelist(env: &Env, invoice_id: u64, address: &Address) {
+    env.events().publish(
+        (
+            symbol_short!("split"),
+            symbol_short!("rcp_rl"),
+            invoice_id,
+        ),
+        address.clone(),
+    );
+}
+
+/// Emitted when rebate is accrued for a creator.
+/// Topics: (split, rbt_acr, creator)
+/// Data: (amount, tier_bps)
+pub fn rebate_accrued(env: &Env, creator: &Address, amount: i128, tier_bps: u32) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("rbt_acr"), creator.clone()),
+        (amount, tier_bps),
+    );
+}
+
 /// Emitted once per payer when their refund is transferred.
 /// Topics: (split, pay_ref, invoice_id)
 /// Data: (payer, amount)
@@ -487,12 +553,14 @@ pub fn invoice_state_changed(
         Some(InvoiceStatus::Pending) => symbol_short!("pending"),
         Some(InvoiceStatus::Released) => symbol_short!("released"),
         Some(InvoiceStatus::Refunded) => symbol_short!("refunded"),
+        Some(InvoiceStatus::Expired) => symbol_short!("expired"),
         Some(InvoiceStatus::Cancelled) => symbol_short!("cancld"),
     };
     let to_sym = match to_status {
         InvoiceStatus::Pending => symbol_short!("pending"),
         InvoiceStatus::Released => symbol_short!("released"),
         InvoiceStatus::Refunded => symbol_short!("refunded"),
+        InvoiceStatus::Expired => symbol_short!("expired"),
         InvoiceStatus::Cancelled => symbol_short!("cancld"),
     };
     env.events().publish(

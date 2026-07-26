@@ -87,6 +87,8 @@ fn default_options(env: &Env) -> InvoiceOptions {
             oracle_asset_pair_base: None,
             oracle_asset_pair_quote: None,
             min_payer_rep: None,
+            release_condition_hash: None,
+            recipient_whitelist_enabled: false,
         },
     }
 }
@@ -104,6 +106,8 @@ fn default_options2(_env: &Env) -> InvoiceOptions2 {
         oracle_asset_pair_base: None,
         oracle_asset_pair_quote: None,
         min_payer_rep: None,
+        release_condition_hash: None,
+        recipient_whitelist_enabled: false,
     }
 }
 
@@ -162,6 +166,8 @@ fn invoice_options(
             oracle_asset_pair_base: None,
             oracle_asset_pair_quote: None,
             min_payer_rep: None,
+            release_condition_hash: None,
+            recipient_whitelist_enabled: false,
         },
     }
 }

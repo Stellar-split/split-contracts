@@ -43,13 +43,17 @@ use error::ContractError;
 use soroban_sdk::xdr::ToXdr;
 use soroban_sdk::{
     contract, contractimpl, symbol_short, token, Address, Bytes, BytesN, Env, IntoVal, Map, String,
-    Symbol, TryFromVal, Val, Vec,
+    Set, Symbol, TryFromVal, Val, Vec,
 };
 use types::{
     AdminRole, AuditEntry, Bid, CircuitBreakerStatus, CloneOverrides, CompactInvoice,
     CompactMigrateResult, CompletionProof, ComputeEstimate, ConfidentialPayment,
     CreateInvoiceParams, CreatorStats, DisputeOutcome, DisputeRecord, DisputeStatus, FeeTier,
     Invoice, InvoiceCore, InvoiceExt, InvoiceExt2, InvoiceExt3, InvoiceHot, InvoiceOptions,
+    InvoiceOptions2, InvoicePayment, InvoiceStatus, InvoiceTemplate, LegacyInvoice,
+    OverflowBehavior, Payment, PaymentCertificate, PaymentProof, ProtocolFeeConfig, QueuedAction,
+    RebateTier, RepScore, ResolveAction, ResolveRule, SimulateReleaseResult, SplitRule,
+    SubscriptionParams, TimelockAction, Tranche, TreasuryRecord, UpgradeProposal,
     InvoiceOptions2, InvoicePayment, InvoiceStatus, InvoiceTemplate, LegacyInvoice, OverflowBehavior,
     Payment, PaymentCertificate, PaymentProof, ProtocolFeeConfig, QueuedAction, Recipient,
     RepScore, ResolveAction, ResolveRule, SimulateReleaseResult, SplitRule, SubscriptionParams,
@@ -133,6 +137,9 @@ fn confidential_pay_key(invoice_id: u64, payer: &Address) -> (Symbol, u64, Addre
 fn release_delay_key(id: u64) -> (Symbol, u64) {
     (symbol_short!("rel_dly"), id)
 }
+fn recipient_whitelist_key(id: u64) -> (Symbol, u64) {
+    (symbol_short!("rcp_wl"), id)
+}
 /// Issue #327: ledger sequence when the invoice was fully funded.
 fn funded_at_ledger_key(id: u64) -> (Symbol, u64) {
     (symbol_short!("fund_led"), id)
@@ -189,6 +196,15 @@ fn confidential_count_key(invoice_id: u64) -> (Symbol, u64) {
 
 fn treasury_key() -> Symbol {
     symbol_short!("treasury")
+}
+fn rebate_tiers_key() -> Symbol {
+    symbol_short!("rbt_trs")
+}
+fn rebate_balance_key(creator: &Address) -> (Symbol, Address) {
+    (symbol_short!("rbt_bal"), creator.clone())
+}
+fn creator_volume_key(creator: &Address) -> (Symbol, Address) {
+    (symbol_short!("cr_vol_r"), creator.clone())
 }
 fn usdc_token_key() -> Symbol {
     symbol_short!("usdc_tok")
@@ -681,6 +697,55 @@ fn update_creator_stats_on_release(env: &Env, creator: &Address, amount: i128) {
         .set(&released_key, &(released + amount as u64));
 }
 
+/// Issue #409: Update creator lifetime release volume and accrue any rebate.
+fn accrue_creator_rebate(env: &Env, creator: &Address, release_amount: i128, total_fee: i128) {
+    let volume_key = creator_volume_key(creator);
+    let current_volume: i128 = env.storage().persistent().get(&volume_key).unwrap_or(0i128);
+    let new_volume = current_volume
+        .checked_add(release_amount)
+        .expect("creator volume overflow");
+    env.storage().persistent().set(&volume_key, &new_volume);
+
+    if total_fee <= 0 {
+        return;
+    }
+
+    let tiers: Vec<RebateTier> = env
+        .storage()
+        .instance()
+        .get(&rebate_tiers_key())
+        .unwrap_or_else(|| Vec::new(env));
+    if tiers.is_empty() {
+        return;
+    }
+
+    let mut applicable: Option<RebateTier> = None;
+    for tier in tiers.iter() {
+        if new_volume >= tier.min_volume {
+            applicable = Some(tier.clone());
+        }
+    }
+
+    if let Some(tier) = applicable {
+        let rebate = (total_fee as u128 * tier.rebate_bps as u128 / 10_000u128) as i128;
+        if rebate > 0 {
+            let balance_key = rebate_balance_key(creator);
+            let current_balance: i128 = env
+                .storage()
+                .persistent()
+                .get(&balance_key)
+                .unwrap_or(0i128);
+            let new_balance = current_balance
+                .checked_add(rebate)
+                .expect("rebate balance overflow");
+            env.storage()
+                .persistent()
+                .set(&balance_key, &new_balance);
+            events::rebate_accrued(env, creator, rebate, tier.rebate_bps);
+        }
+    }
+}
+
 /// Issue #299: Update creator unique payers count (call after recording payment).
 fn update_creator_payers(env: &Env, creator: &Address, payer: &Address) {
     // Track unique payers using a set-like approach via a key pattern
@@ -862,6 +927,8 @@ fn archive_invoice_storage(env: &Env, id: u64, core: &InvoiceCore) {
             oracle_asset_pair_base: None,
             oracle_asset_pair_quote: None,
             min_payer_rep: None,
+            release_condition_hash: None,
+            recipient_whitelist_enabled: false,
         });
 
     env.storage().instance().set(&invoice_key(id), core);
@@ -1060,6 +1127,8 @@ fn load_invoice(env: &Env, id: u64) -> Invoice {
             oracle_asset_pair_base: None,
             oracle_asset_pair_quote: None,
             min_payer_rep: None,
+            release_condition_hash: None,
+            recipient_whitelist_enabled: false,
         });
 
     // Load compact representation if available, then overlay hot fields.
@@ -2187,6 +2256,74 @@ impl SplitContract {
     }
 
     // -----------------------------------------------------------------------
+    // Issue #417: Recipient whitelist per invoice
+    // -----------------------------------------------------------------------
+
+    /// Add a recipient to an invoice-specific whitelist.
+    /// Only the creator may call this, and only while the invoice is still pending.
+    pub fn add_to_recipient_whitelist(
+        env: Env,
+        creator: Address,
+        invoice_id: u64,
+        address: Address,
+    ) {
+        require_not_paused(&env);
+        creator.require_auth();
+
+        let invoice = load_invoice(&env, invoice_id);
+        assert!(invoice.creator == creator, "only creator can modify whitelist");
+        assert!(
+            invoice.status == InvoiceStatus::Pending,
+            "invoice is not draft"
+        );
+
+        let mut whitelist: Set<Address> = env
+            .storage()
+            .persistent()
+            .get(&recipient_whitelist_key(invoice_id))
+            .unwrap_or_else(|| Set::new(&env));
+        if !whitelist.contains(&address) {
+            whitelist.insert(address.clone());
+            env.storage()
+                .persistent()
+                .set(&recipient_whitelist_key(invoice_id), &whitelist);
+            events::recipient_whitelisted(&env, invoice_id, &address);
+        }
+    }
+
+    /// Remove a recipient from an invoice-specific whitelist.
+    /// Only the creator may call this, and only while the invoice is still pending.
+    pub fn remove_from_recipient_whitelist(
+        env: Env,
+        creator: Address,
+        invoice_id: u64,
+        address: Address,
+    ) {
+        require_not_paused(&env);
+        creator.require_auth();
+
+        let invoice = load_invoice(&env, invoice_id);
+        assert!(invoice.creator == creator, "only creator can modify whitelist");
+        assert!(
+            invoice.status == InvoiceStatus::Pending,
+            "invoice is not draft"
+        );
+
+        let mut whitelist: Set<Address> = env
+            .storage()
+            .persistent()
+            .get(&recipient_whitelist_key(invoice_id))
+            .unwrap_or_else(|| Set::new(&env));
+        if whitelist.contains(&address) {
+            whitelist.remove(&address);
+            env.storage()
+                .persistent()
+                .set(&recipient_whitelist_key(invoice_id), &whitelist);
+            events::recipient_removed_from_whitelist(&env, invoice_id, &address);
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // Issue #215: Configurable platform fee waiver list
     // -----------------------------------------------------------------------
 
@@ -2325,8 +2462,10 @@ impl SplitContract {
                         refunded_addresses: Vec::new(&env),
                         oracle: None,
                         oracle_asset_pair_base: None,
-            oracle_asset_pair_quote: None,
+                        oracle_asset_pair_quote: None,
                         min_payer_rep: None,
+                        release_condition_hash: None,
+                        recipient_whitelist_enabled: false,
                     })
             });
         let audit_log: Vec<types::AuditEntry> = get_audit_log(&env, invoice_id);
@@ -2402,6 +2541,15 @@ impl SplitContract {
             .unwrap_or(0u32)
     }
 
+    /// Preview the next invoice id that will be assigned by create_invoice.
+    pub fn peek_next_invoice_id(env: Env) -> u64 {
+        env.storage()
+            .persistent()
+            .get(&counter_key())
+            .unwrap_or(0u64)
+            + 1
+    }
+
     // -----------------------------------------------------------------------
     // Issue #285: Volume-based fee tiers
     // -----------------------------------------------------------------------
@@ -2466,6 +2614,53 @@ impl SplitContract {
             .instance()
             .get(&fee_tiers_key())
             .unwrap_or(Vec::new(&env))
+    }
+
+    /// Admin function to set up to 5 rebate tiers sorted by minimum volume.
+    pub fn set_rebate_tiers(env: Env, admin: Address, tiers: Vec<RebateTier>) {
+        require_admin(&env);
+        let _ = admin;
+
+        assert!(tiers.len() <= 5, "Maximum 5 rebate tiers allowed");
+        for i in 1..tiers.len() {
+            let prev = tiers.get(i - 1).unwrap();
+            let curr = tiers.get(i).unwrap();
+            assert!(prev.min_volume < curr.min_volume, "rebate tiers must be sorted");
+        }
+
+        env.storage().instance().set(&rebate_tiers_key(), &tiers);
+    }
+
+    /// Return the current rebate tiers.
+    pub fn get_rebate_tiers(env: Env) -> Vec<RebateTier> {
+        env.storage()
+            .instance()
+            .get(&rebate_tiers_key())
+            .unwrap_or(Vec::new(&env))
+    }
+
+    /// Withdraw any accrued rebate balance for a creator.
+    pub fn withdraw_rebate(env: Env, creator: Address) {
+        creator.require_auth();
+
+        let balance_key = rebate_balance_key(&creator);
+        let balance: i128 = env
+            .storage()
+            .persistent()
+            .get(&balance_key)
+            .unwrap_or(0i128);
+        if balance <= 0 {
+            return;
+        }
+
+        let token = env
+            .storage()
+            .instance()
+            .get(&usdc_token_key())
+            .expect("usdc token not set");
+        let token_client = token::Client::new(&env, &token);
+        token_client.transfer(&env.current_contract_address(), &creator, &balance);
+        env.storage().persistent().set(&balance_key, &0i128);
     }
 
     // -----------------------------------------------------------------------
@@ -2793,6 +2988,8 @@ impl SplitContract {
             options.ext.oracle,
             options.ext.oracle_asset_pair_base,
             options.ext.oracle_asset_pair_quote,
+            options.ext.recipient_whitelist_enabled,
+            options.ext.release_condition_hash,
         )
     }
 
@@ -2958,6 +3155,8 @@ impl SplitContract {
         oracle: Option<Address>,
         oracle_asset_pair_base: Option<Symbol>,
         oracle_asset_pair_quote: Option<Symbol>,
+        recipient_whitelist_enabled: bool,
+        release_condition_hash: Option<BytesN<32>>,
     ) -> u64 {
         assert!(
             recipients.len() == amounts.len(),
@@ -3170,6 +3369,17 @@ impl SplitContract {
             + 1;
         env.storage().persistent().set(&counter_key(), &id);
 
+        if recipient_whitelist_enabled {
+            let whitelist: Set<Address> = env
+                .storage()
+                .persistent()
+                .get(&recipient_whitelist_key(id))
+                .unwrap_or_else(|| Set::new(env));
+            for recipient in recipients.iter() {
+                assert!(whitelist.contains(&recipient), "recipient not whitelisted");
+            }
+        }
+
         // Issue: increment per-creator invoice count for cancellation rate tracking.
         let inv_cnt: u64 = env
             .storage()
@@ -3350,6 +3560,8 @@ impl SplitContract {
             oracle_asset_pair_base,
             oracle_asset_pair_quote,
             min_payer_rep,
+            release_condition_hash,
+            recipient_whitelist_enabled,
             predecessor_id: None,
         };
 
@@ -3499,6 +3711,8 @@ impl SplitContract {
                 None,           // oracle
                 None,           // oracle_asset_pair_base
                 None,           // oracle_asset_pair_quote
+                false,          // recipient_whitelist_enabled
+                None,           // release_condition_hash
             );
             ids.push_back(id);
         }
@@ -3599,6 +3813,8 @@ impl SplitContract {
                 None,             // oracle
                 None,             // oracle_asset_pair_base
                 None,             // oracle_asset_pair_quote
+                false,            // recipient_whitelist_enabled
+                None,             // release_condition_hash
             );
             ids.push_back(id);
         }
@@ -3684,6 +3900,8 @@ impl SplitContract {
             None,           // oracle
             None,           // oracle_asset_pair_base
             None,           // oracle_asset_pair_quote
+            false,          // recipient_whitelist_enabled
+            None,           // release_condition_hash
         );
 
         if months > 1 {
@@ -3863,6 +4081,8 @@ impl SplitContract {
             oracle_asset_pair_base: source.oracle_asset_pair_base.clone(),
             oracle_asset_pair_quote: source.oracle_asset_pair_quote.clone(),
             min_payer_rep: source.min_payer_rep,
+            release_condition_hash: source.release_condition_hash.clone(),
+            recipient_whitelist_enabled: source.recipient_whitelist_enabled,
         };
 
         save_invoice(&env, id, &new_invoice);
@@ -4966,11 +5186,23 @@ impl SplitContract {
     /// For tranche invoices, only distributes tranches whose timestamp ≤ now.
     /// Blocks with "prerequisite not released" until the prerequisite invoice is Released.
     /// If an approver is set, requires the invoice to be approved first (issue #25).
-    pub fn release(env: Env, invoice_id: u64) {
+    pub fn release_invoice(
+        env: Env,
+        caller: Address,
+        invoice_id: u64,
+        preimage: Option<Bytes>,
+    ) {
         require_fn_not_paused(&env, &symbol_short!("release"));
         require_not_frozen(&env);
         let caller = env.current_contract_address();
         let mut invoice = load_invoice(&env, invoice_id);
+
+        if let Some(expected_hash) = invoice.release_condition_hash.clone() {
+            let preimage = preimage.expect("ConditionNotMet");
+            let verified_hash = env.crypto().sha256(&preimage);
+            assert!(verified_hash == expected_hash, "ConditionNotMet");
+            events::condition_verified(&env, invoice_id, &verified_hash);
+        }
 
         assert!(!invoice.frozen, "invoice is frozen");
         assert!(!invoice.admin_frozen, "invoice frozen by admin");
@@ -5097,6 +5329,12 @@ impl SplitContract {
         }
 
         Self::_release(&env, invoice_id, &mut invoice, &caller);
+    }
+
+    /// Backwards-compatible release entry point.
+    pub fn release(env: Env, invoice_id: u64) {
+        let caller = env.current_contract_address();
+        Self::release_invoice(env, caller, invoice_id, None)
     }
 
     /// Trigger a scheduled release at the configured timestamp, respecting min_funding_bps
@@ -5364,6 +5602,30 @@ impl SplitContract {
 
         append_audit_entry(&env, invoice_id, symbol_short!("meta_upd"), &creator);
         events::metadata_updated(&env, invoice_id, &old_hash, &new_hash);
+    }
+
+    /// Issue #416: Set or update the off-chain release condition hash.
+    /// Only the creator may call this and only before any funds have been received.
+    pub fn set_release_condition(
+        env: Env,
+        creator: Address,
+        invoice_id: u64,
+        new_hash: Option<BytesN<32>>,
+    ) {
+        require_not_paused(&env);
+        creator.require_auth();
+
+        let mut invoice = load_invoice(&env, invoice_id);
+        assert!(
+            invoice.creator == creator,
+            "only creator can update release condition"
+        );
+        assert!(invoice.status == InvoiceStatus::Pending, "invoice is not draft");
+        assert!(invoice.funded == 0, "invoice already funded");
+
+        invoice.release_condition_hash = new_hash;
+        save_invoice(&env, invoice_id, &invoice);
+        append_audit_entry(&env, invoice_id, symbol_short!("rel_cond"), &creator);
     }
 
     /// Issue #330: Release funds to a single recipient by their share.
@@ -5819,11 +6081,11 @@ impl SplitContract {
             funding_token_client.transfer(&env.current_contract_address(), tax_authority, &total_tax);
         }
 
-        invoice.released_bps += new_bps;
-
         // Calculate amount released in this tranche call.
         let amount_released =
             ((funded as u128).saturating_mul(new_bps as u128) / 10_000u128) as i128;
+        accrue_creator_rebate(env, &invoice.creator, amount_released, total_fee);
+        invoice.released_bps += new_bps;
 
         // Increment total_volume and total_released counters (issue #28).
         let total_volume: i128 = env
@@ -6596,6 +6858,7 @@ impl SplitContract {
                                 &group_total_fee,
                             );
                         }
+                        accrue_creator_rebate(env, &member.creator, member_funded, group_total_fee);
                         member.status = InvoiceStatus::Released;
                         member.completion_time = Some(env.ledger().timestamp());
                         save_invoice(env, member_id, &member);
@@ -6755,6 +7018,7 @@ impl SplitContract {
         check_creator_milestone(env, &invoice.creator, new_creator_volume as i128);
 
         update_creator_stats_on_release(env, &invoice.creator, funded);
+        accrue_creator_rebate(env, &invoice.creator, funded, total_fee);
 
         // Spin up next subscription invoice if one is scheduled.
         if let Some(params) = env
@@ -6818,6 +7082,8 @@ impl SplitContract {
                 None,          // oracle
                 None,          // oracle_asset_pair_base
                 None,          // oracle_asset_pair_quote
+                false,         // recipient_whitelist_enabled
+                None,          // release_condition_hash
             );
             env.storage()
                 .persistent()
@@ -6962,27 +7228,38 @@ impl SplitContract {
         events::partial_refund_issued(&env, invoice_id, &creator, bps, total_refunded);
     }
 
-    /// Refund all payers if the deadline has passed and the invoice is not fully funded.
+    /// Notify indexers that an invoice has expired.
+    pub fn notify_expired(env: Env, invoice_id: u64) {
+        require_not_paused(&env);
+        let mut invoice = load_invoice(&env, invoice_id);
+
+        assert!(invoice.status == InvoiceStatus::Pending, "InvalidStatus");
+        assert!(env.ledger().timestamp() >= invoice.deadline, "NotExpired");
+
+        invoice.status = InvoiceStatus::Expired;
+        save_invoice(&env, invoice_id, &invoice);
+        events::invoice_expired(&env, invoice_id, invoice.deadline, invoice.funded);
+        append_audit_entry(
+            &env,
+            invoice_id,
+            symbol_short!("expired"),
+            &env.current_contract_address(),
+        );
+        events::invoice_state_changed(
+            &env,
+            invoice_id,
+            Some(&InvoiceStatus::Pending),
+            &InvoiceStatus::Expired,
+            &env.current_contract_address(),
+        );
+    }
+
+    /// Refund all payers after the invoice has been marked expired.
     pub fn refund(env: Env, invoice_id: u64) {
         require_fn_not_paused(&env, &symbol_short!("refund"));
         let mut invoice = load_invoice(&env, invoice_id);
 
-        assert!(
-            invoice.status == InvoiceStatus::Pending,
-            "invoice is not pending"
-        );
-
-        // Check grace period if configured
-        let refund_deadline = if let Some(grace_secs) = invoice.refund_grace_secs {
-            invoice.deadline.saturating_add(grace_secs)
-        } else {
-            invoice.deadline
-        };
-
-        assert!(
-            env.ledger().timestamp() > refund_deadline,
-            "deadline has not passed"
-        );
+        assert!(invoice.status == InvoiceStatus::Expired, "InvalidStatus");
 
         if invoice.auction_on_expiry {
             let now = env.ledger().timestamp();
@@ -7057,7 +7334,7 @@ impl SplitContract {
         events::invoice_state_changed(
             &env,
             invoice_id,
-            Some(&InvoiceStatus::Pending),
+            Some(&InvoiceStatus::Expired),
             &InvoiceStatus::Refunded,
             &actor,
         );
@@ -7099,6 +7376,9 @@ impl SplitContract {
         );
     }
 
+    /// Backwards-compatible alias for the expiry-driven refund path.
+    pub fn refund_invoice(env: Env, invoice_id: u64) {
+        Self::refund(env, invoice_id)
     /// Create a successor invoice for an expired, partially funded invoice.
     pub fn renew_invoice(env: Env, creator: Address, old_invoice_id: u64, new_deadline: u64) -> u64 {
         require_not_paused(&env);
@@ -7784,6 +8064,8 @@ impl SplitContract {
             old_invoice.oracle.clone(),
             old_invoice.oracle_asset_pair_base.clone(),
             old_invoice.oracle_asset_pair_quote.clone(),
+            false, // recipient_whitelist_enabled
+            None,  // release_condition_hash
         );
 
         // Copy payments from shards to new invoice (issue #177).
@@ -8072,6 +8354,8 @@ impl SplitContract {
             None,           // oracle
             None,           // oracle_asset_pair_base
             None,           // oracle_asset_pair_quote
+            false,          // recipient_whitelist_enabled
+            None,           // release_condition_hash
         )
     }
 
@@ -8376,6 +8660,7 @@ impl SplitContract {
             InvoiceStatus::Released => 1u8,
             InvoiceStatus::Refunded => 2u8,
             InvoiceStatus::Cancelled => 3u8,
+            InvoiceStatus::Expired => 4u8,
         };
 
         let mut preimage = [0u8; 17];
@@ -8650,8 +8935,10 @@ impl SplitContract {
                 refunded_addresses: Vec::new(&env),
                 oracle: None,
                 oracle_asset_pair_base: None,
-            oracle_asset_pair_quote: None,
+                oracle_asset_pair_quote: None,
                 min_payer_rep: None,
+                release_condition_hash: None,
+                recipient_whitelist_enabled: false,
             });
 
         // Copy to instance storage.
@@ -8759,8 +9046,10 @@ impl SplitContract {
                         refunded_addresses: Vec::new(&env),
                         oracle: None,
                         oracle_asset_pair_base: None,
-            oracle_asset_pair_quote: None,
+                        oracle_asset_pair_quote: None,
                         min_payer_rep: None,
+                        release_condition_hash: None,
+                        recipient_whitelist_enabled: false,
                     });
 
                 env.storage().instance().set(&invoice_key(id), &core);
