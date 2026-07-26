@@ -184,6 +184,22 @@ pub fn split_adjusted(env: &Env, invoice_id: u64, creator: &Address) {
     );
 }
 
+/// Emitted when a recipient is removed and their share redistributed among
+/// the remaining recipients (issue #423).
+/// Topics: (split, rebalance, invoice_id)
+/// Data: (removed_address, redistributed_amount)
+pub fn recipients_rebalanced(
+    env: &Env,
+    invoice_id: u64,
+    removed_address: &Address,
+    redistributed_amount: i128,
+) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("rebalance"), invoice_id),
+        (removed_address.clone(), redistributed_amount),
+    );
+}
+
 /// Emitted when an invoice is archived to instance storage.
 /// Topics: (split, archived, invoice_id)
 /// Data: ()

@@ -27,6 +27,13 @@ const DEFAULT_COMMITMENT_EXPIRY_LEDGERS: u32 = 100;
 /// $0.12 = 12 cents is reported as `12 * ORACLE_RATE_SCALE` = `12_000_000`).
 const ORACLE_RATE_SCALE: i128 = 1_000_000;
 
+/// Issue #425: default per-invoice storage quota in bytes, applied at `initialize()`
+/// and used by `get_storage_quota` before an admin ever calls
+/// `set_invoice_storage_quota`. Sized with headroom above the largest invoices in
+/// the test suite (~200 recipients, ~15KB) so it only trips on genuinely unbounded
+/// growth; admins can tighten it via `set_invoice_storage_quota`.
+const DEFAULT_INVOICE_STORAGE_QUOTA: u64 = 65_536;
+
 mod error;
 mod events;
 pub mod types;
@@ -153,6 +160,24 @@ fn metadata_hash_key(id: u64) -> (Symbol, u64) {
 /// Issue #330: set of recipients already paid via release_to_recipient.
 fn paid_recipients_key(id: u64) -> (Symbol, u64) {
     (symbol_short!("paid_rec"), id)
+}
+/// Issue #430: creator-defined payment window open timestamp.
+fn payment_open_at_key(id: u64) -> (Symbol, u64) {
+    (symbol_short!("pay_open"), id)
+}
+/// Issue #430: creator-defined payment window close timestamp.
+fn payment_close_at_key(id: u64) -> (Symbol, u64) {
+    (symbol_short!("pay_close"), id)
+}
+
+/// Issue #430: read the configured payment-window open timestamp, if any.
+fn get_payment_open_at_internal(env: &Env, id: u64) -> Option<u64> {
+    env.storage().persistent().get(&payment_open_at_key(id))
+}
+
+/// Issue #430: read the configured payment-window close timestamp, if any.
+fn get_payment_close_at_internal(env: &Env, id: u64) -> Option<u64> {
+    env.storage().persistent().get(&payment_close_at_key(id))
 }
 
 /// Issue #332: contiguous Vec<Address> of all recipients — persistent storage.
@@ -341,6 +366,36 @@ fn nonce_key(invoice_id: u64, payer: &Address) -> (Symbol, u64, Address) {
     (symbol_short!("nonce"), invoice_id, payer.clone())
 }
 
+/// Contract-wide per-caller nonce key for off-chain signed authorisations (issue #424).
+/// Unlike `nonce_key`, this is not scoped to a single invoice: it tracks one
+/// monotonically increasing sequence per caller across every nonce-protected
+/// entry point, so a signed authorisation cannot be replayed against a
+/// different invoice or a different call.
+fn global_nonce_key(caller: &Address) -> (Symbol, Address) {
+    (symbol_short!("g_nonce"), caller.clone())
+}
+
+/// Returns the current expected contract-wide nonce for `caller`. Starts at 0.
+fn get_global_nonce_internal(env: &Env, caller: &Address) -> u64 {
+    env.storage()
+        .persistent()
+        .get(&global_nonce_key(caller))
+        .unwrap_or(0u64)
+}
+
+/// Validates `nonce` against the stored contract-wide nonce for `caller` and,
+/// on success, atomically increments it so the same nonce cannot be reused.
+/// Panics with "InvalidNonce" on a stale or out-of-order nonce.
+fn consume_global_nonce(env: &Env, caller: &Address, nonce: u64) {
+    let stored = get_global_nonce_internal(env, caller);
+    if nonce != stored {
+        panic!("InvalidNonce");
+    }
+    env.storage()
+        .persistent()
+        .set(&global_nonce_key(caller), &(stored + 1));
+}
+
 /// Per-payer velocity window state key: (window_start, window_total)
 fn vel_key(invoice_id: u64, payer: &Address) -> (Symbol, u64, Address) {
     (symbol_short!("vel"), invoice_id, payer.clone())
@@ -452,6 +507,11 @@ fn repl_proposal_key(invoice_id: u64, old_recipient: &Address) -> (Symbol, u64, 
 /// Issue: maximum cancellation rate in basis points, stored globally.
 fn max_cancel_bps_key() -> Symbol {
     symbol_short!("mx_cnl_bp")
+}
+
+/// Issue #425: global per-invoice storage quota (bytes), admin-configurable.
+fn storage_quota_key() -> Symbol {
+    symbol_short!("inv_quota")
 }
 
 /// Issue: receipt token factory contract address key.
@@ -1240,6 +1300,20 @@ fn load_invoice(env: &Env, id: u64) -> Invoice {
     invoice
 }
 
+/// Estimates the serialised size (in bytes) of an invoice's persisted
+/// representation (issue #425). Sums the XDR-encoded length of the three
+/// pieces `save_invoice` actually writes to storage (`InvoiceCore`,
+/// `InvoiceExt`, `InvoiceExt2`), so a quota enforced against this figure
+/// reflects the real on-chain storage footprint. `payments` is excluded
+/// because it is always cleared before persisting — payment history lives in
+/// separate sharded storage (issue #177), not on the invoice record itself.
+fn measure_invoice_bytes(env: &Env, invoice: &Invoice) -> u64 {
+    let mut clean = invoice.clone();
+    clean.payments = Vec::new(env);
+    let (core, ext, ext2) = clean.split();
+    (core.to_xdr(env).len() + ext.to_xdr(env).len() + ext2.to_xdr(env).len()) as u64
+}
+
 fn save_invoice(env: &Env, id: u64, invoice: &Invoice) {
     // Check no duplicate recipients
     for i in 0..invoice.recipients.len() {
@@ -1250,6 +1324,18 @@ fn save_invoice(env: &Env, id: u64, invoice: &Invoice) {
             );
         }
     }
+
+    // Issue #425: reject any mutation that would push the invoice's persisted
+    // size past the configured quota, before writing anything.
+    let quota: u64 = env
+        .storage()
+        .instance()
+        .get(&storage_quota_key())
+        .unwrap_or(DEFAULT_INVOICE_STORAGE_QUOTA);
+    assert!(
+        measure_invoice_bytes(env, invoice) <= quota,
+        "StorageQuotaExceeded"
+    );
 
     let mut clean_invoice = invoice.clone();
     clean_invoice.payments = Vec::new(env);
@@ -1869,6 +1955,10 @@ impl SplitContract {
         env.storage()
             .persistent()
             .set(&rate_window_key(), &rate_window);
+        // Issue #425: seed the default per-invoice storage quota.
+        env.storage()
+            .instance()
+            .set(&storage_quota_key(), &DEFAULT_INVOICE_STORAGE_QUOTA);
     }
 
     /// Add a new admin with a given role. Requires SuperAdmin auth.
@@ -2015,6 +2105,21 @@ impl SplitContract {
             .set(&creation_fee_key(), &creation_fee);
     }
 
+    /// Set the global per-invoice storage quota in bytes (issue #425). Requires
+    /// admin auth. Applies to `create_invoice` and every mutation entry point
+    /// that goes through `save_invoice` (e.g. `add_recipient`).
+    pub fn set_invoice_storage_quota(env: Env, admin: Address, bytes: u64) {
+        require_role(&env, &admin, AdminRole::Operator);
+        assert!(bytes > 0, "quota must be positive");
+        env.storage().instance().set(&storage_quota_key(), &bytes);
+    }
+
+    /// Returns the current global per-invoice storage quota in bytes (issue #425).
+    pub fn get_storage_quota(env: Env) -> u64 {
+        env.storage()
+            .instance()
+            .get(&storage_quota_key())
+            .unwrap_or(DEFAULT_INVOICE_STORAGE_QUOTA)
     pub fn set_commitment_expiry(env: Env, admin: Address, ledgers: u32) {
         require_role(&env, &admin, AdminRole::Operator);
         assert!(ledgers > 0, "commitment expiry must be positive");
@@ -2610,6 +2715,15 @@ impl SplitContract {
         }
     }
 
+    /// Returns the creator-defined payment window `(open_at, close_at)` for an
+    /// invoice, if configured (issue #430). Either or both may be `None`.
+    pub fn get_payment_window(env: Env, invoice_id: u64) -> (Option<u64>, Option<u64>) {
+        (
+            get_payment_open_at_internal(&env, invoice_id),
+            get_payment_close_at_internal(&env, invoice_id),
+        )
+    }
+
     /// Return the current creation fee.
     pub fn get_creation_fee(env: Env) -> i128 {
         env.storage()
@@ -3200,6 +3314,8 @@ impl SplitContract {
             options.ext.oracle,
             options.ext.oracle_asset_pair_base,
             options.ext.oracle_asset_pair_quote,
+            options.ext.payment_open_at,
+            options.ext.payment_close_at,
         )
     }
 
@@ -3258,6 +3374,8 @@ impl SplitContract {
         oracle: Option<Address>,
         oracle_asset_pair_base: Option<Symbol>,
         oracle_asset_pair_quote: Option<Symbol>,
+        payment_open_at: Option<u64>,
+        payment_close_at: Option<u64>,
         milestones: Option<Vec<u32>>,
         recipient_max_payouts: Option<Vec<Option<i128>>>,
         recipient_whitelist_enabled: bool,
@@ -3272,6 +3390,19 @@ impl SplitContract {
             deadline > env.ledger().timestamp(),
             "deadline must be in the future"
         );
+        // Issue #430: creator-defined payment window.
+        if let Some(close_at) = payment_close_at {
+            assert!(
+                close_at < deadline,
+                "payment_close_at must be before deadline"
+            );
+        }
+        if let (Some(open_at), Some(close_at)) = (payment_open_at, payment_close_at) {
+            assert!(
+                open_at < close_at,
+                "payment_open_at must be before payment_close_at"
+            );
+        }
         assert!(bonus_pool >= 0, "bonus_pool must be non-negative");
         assert!(penalty_bps <= 10_000, "penalty_bps must be ≤ 10000");
         assert!(min_funding_bps <= 10_000, "min_funding_bps must be ≤ 10000");
@@ -3700,6 +3831,17 @@ impl SplitContract {
         if let Some(ref hash) = metadata_hash {
             env.storage().persistent().set(&metadata_hash_key(id), hash);
         }
+        // Issue #430: store optional creator-defined payment window bounds.
+        if let Some(open_at) = payment_open_at {
+            env.storage()
+                .persistent()
+                .set(&payment_open_at_key(id), &open_at);
+        }
+        if let Some(close_at) = payment_close_at {
+            env.storage()
+                .persistent()
+                .set(&payment_close_at_key(id), &close_at);
+        }
 
         events::invoice_created(env, id, &creator, total, &invoice.cross_chain_ref);
         maybe_record_created(env, &creator, total);
@@ -3830,6 +3972,8 @@ impl SplitContract {
                 None,           // oracle
                 None,           // oracle_asset_pair_base
                 None,           // oracle_asset_pair_quote
+                None,           // payment_open_at
+                None,           // payment_close_at
                 None,           // milestones
                 None,           // recipient_max_payouts
                 false,          // recipient_whitelist_enabled
@@ -3934,6 +4078,8 @@ impl SplitContract {
                 None,             // oracle
                 None,             // oracle_asset_pair_base
                 None,             // oracle_asset_pair_quote
+                None,             // payment_open_at
+                None,             // payment_close_at
                 None,             // milestones
                 None,             // recipient_max_payouts
                 false,            // recipient_whitelist_enabled
@@ -4023,6 +4169,8 @@ impl SplitContract {
             None,           // oracle
             None,           // oracle_asset_pair_base
             None,           // oracle_asset_pair_quote
+            None,           // payment_open_at
+            None,           // payment_close_at
             None,           // milestones
             None,           // recipient_max_payouts
             false,          // recipient_whitelist_enabled
@@ -4572,6 +4720,20 @@ impl SplitContract {
             "invoice deadline has passed"
         );
         assert!(amount > 0, "payment amount must be positive");
+
+        // Issue #430: creator-defined payment window.
+        if let Some(open_at) = get_payment_open_at_internal(env, invoice_id) {
+            assert!(
+                env.ledger().timestamp() >= open_at,
+                "PaymentWindowNotOpen"
+            );
+        }
+        if let Some(close_at) = get_payment_close_at_internal(env, invoice_id) {
+            assert!(
+                env.ledger().timestamp() <= close_at,
+                "PaymentWindowClosed"
+            );
+        }
 
         // Lazy auto-resume: clear frozen if the auto-resume timestamp has passed.
         if invoice.frozen {
@@ -7414,6 +7576,8 @@ impl SplitContract {
                 None,          // oracle
                 None,          // oracle_asset_pair_base
                 None,          // oracle_asset_pair_quote
+                None,          // payment_open_at
+                None,          // payment_close_at
                 false,         // recipient_whitelist_enabled
                 None,          // release_condition_hash
             );
@@ -8396,6 +8560,8 @@ impl SplitContract {
             old_invoice.oracle.clone(),
             old_invoice.oracle_asset_pair_base.clone(),
             old_invoice.oracle_asset_pair_quote.clone(),
+            None, // payment_open_at (not carried over on rollover)
+            None, // payment_close_at (not carried over on rollover)
             Some(old_invoice.milestones.clone()),
             Some(old_invoice.recipient_max_payouts.clone()),
             false, // recipient_whitelist_enabled
@@ -8540,6 +8706,83 @@ impl SplitContract {
         save_invoice(&env, invoice_id, &invoice);
         append_audit_entry(&env, invoice_id, symbol_short!("adj_spl"), &caller);
         events::split_adjusted(&env, invoice_id, &caller);
+    }
+
+    /// Remove a recipient and redistribute their share proportionally among
+    /// the remaining recipients (issue #423). Only the creator may call this,
+    /// and only before any payment has been received. At least two recipients
+    /// must remain after removal. Any remainder left over from integer-division
+    /// rounding is added to the first remaining recipient's share, so the total
+    /// invoice amount is exactly preserved.
+    pub fn rebalance_recipients(
+        env: Env,
+        creator: Address,
+        invoice_id: u64,
+        remove_address: Address,
+    ) {
+        require_not_paused(&env);
+        creator.require_auth();
+
+        let mut invoice = load_invoice(&env, invoice_id);
+
+        assert!(
+            invoice.status == InvoiceStatus::Pending,
+            "invoice is not pending"
+        );
+        assert!(!invoice.disputed, "invoice is disputed");
+        assert!(
+            invoice.creator == creator,
+            "only creator can rebalance recipients"
+        );
+        assert!(invoice.funded == 0, "payments already received");
+        assert!(invoice.recipients.len() >= 3, "InsufficientRecipients");
+
+        let idx = invoice
+            .recipients
+            .iter()
+            .position(|r| r == remove_address)
+            .expect("recipient not in invoice") as u32;
+
+        let removed_amount = invoice.amounts.get(idx).unwrap();
+
+        let mut new_recipients: Vec<Address> = Vec::new(&env);
+        let mut new_amounts: Vec<i128> = Vec::new(&env);
+        let mut new_tokens: Vec<Address> = Vec::new(&env);
+        let mut new_claimed: Vec<i128> = Vec::new(&env);
+        for i in 0..invoice.recipients.len() {
+            if i == idx {
+                continue;
+            }
+            new_recipients.push_back(invoice.recipients.get(i).unwrap());
+            new_amounts.push_back(invoice.amounts.get(i).unwrap());
+            new_tokens.push_back(invoice.tokens.get(i).unwrap());
+            new_claimed.push_back(invoice.claimed.get(i).unwrap());
+        }
+
+        // Distribute the removed recipient's amount proportionally to each
+        // remaining recipient's existing share of the remaining total.
+        let remaining_total: i128 = new_amounts.iter().sum();
+        let mut distributed: i128 = 0;
+        for i in 0..new_amounts.len() {
+            let base = new_amounts.get(i).unwrap();
+            let share = removed_amount * base / remaining_total;
+            distributed += share;
+            new_amounts.set(i, base + share);
+        }
+        // Integer division can leave a remainder; give it to the first recipient
+        // so the invoice total is unchanged.
+        let remainder = removed_amount - distributed;
+        let first = new_amounts.get(0).unwrap();
+        new_amounts.set(0, first + remainder);
+
+        invoice.recipients = new_recipients;
+        invoice.amounts = new_amounts;
+        invoice.tokens = new_tokens;
+        invoice.claimed = new_claimed;
+
+        save_invoice(&env, invoice_id, &invoice);
+        append_audit_entry(&env, invoice_id, symbol_short!("rebal"), &creator);
+        events::recipients_rebalanced(&env, invoice_id, &remove_address, removed_amount);
     }
 
     // -----------------------------------------------------------------------
@@ -8688,6 +8931,8 @@ impl SplitContract {
             None,           // oracle
             None,           // oracle_asset_pair_base
             None,           // oracle_asset_pair_quote
+            None,           // payment_open_at
+            None,           // payment_close_at
             None,           // milestones
             None,           // recipient_max_payouts
             false,          // recipient_whitelist_enabled
@@ -8995,6 +9240,16 @@ impl SplitContract {
             .persistent()
             .get(&nonce_key(invoice_id, &payer))
             .unwrap_or(0u64)
+    }
+
+    /// Returns the current expected contract-wide nonce for `caller` (issue #424).
+    ///
+    /// This is separate from `get_nonce`: it is not scoped to a single invoice, but
+    /// tracks one sequence per caller across every entry point that accepts an
+    /// off-chain signed authorisation (e.g. `pay_invoice_delegated`). Starts at 0
+    /// and increments by 1 after each successful nonce-protected call.
+    pub fn get_global_nonce(env: Env, caller: Address) -> u64 {
+        get_global_nonce_internal(&env, &caller)
     }
 
     /// Generate a completion proof for a finalized invoice.
@@ -10219,16 +10474,10 @@ impl SplitContract {
         let remaining = total - invoice.funded;
         assert!(amount <= remaining, "payment exceeds remaining balance");
 
-        // Nonce replay protection for on_behalf_of address.
-        let stored_nonce: u64 = env
-            .storage()
-            .persistent()
-            .get(&nonce_key(invoice_id, &on_behalf_of))
-            .unwrap_or(0u64);
-        assert!(nonce == stored_nonce, "invalid nonce");
-        env.storage()
-            .persistent()
-            .set(&nonce_key(invoice_id, &on_behalf_of), &(stored_nonce + 1));
+        // Contract-wide nonce replay protection for on_behalf_of's delegated
+        // authorisation (issue #424). Scoped to the caller across all invoices,
+        // so a given nonce cannot be replayed against a different invoice_id.
+        consume_global_nonce(&env, &on_behalf_of, nonce);
 
         let token_client = token::Client::new(&env, &funding_token_for(&invoice));
         token_client.transfer(&executor, &env.current_contract_address(), &amount);

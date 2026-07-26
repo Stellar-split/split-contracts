@@ -352,6 +352,11 @@ pub struct InvoiceOptions2 {
     pub oracle_asset_pair_quote: Option<Symbol>,
     /// Minimum required payer reputation score to pay this invoice (issue #349).
     pub min_payer_rep: Option<u32>,
+    /// Issue #430: payments are rejected before this timestamp, if set.
+    pub payment_open_at: Option<u64>,
+    /// Issue #430: payments are rejected after this timestamp, if set.
+    /// Must be strictly before `deadline` when set.
+    pub payment_close_at: Option<u64>,
     /// Optional milestone thresholds in basis points for auto-release gates.
     pub milestones: Option<Vec<u32>>,
     /// Optional per-recipient payout caps parallel to `recipients`.
