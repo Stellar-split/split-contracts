@@ -4291,6 +4291,7 @@ impl SplitContract {
         amounts: Vec<i128>,
         token: Address,
         months: u32,
+        interval_days: Option<u32>,
     ) -> u64 {
         creator.require_auth();
 
@@ -4382,6 +4383,7 @@ impl SplitContract {
                 recipients,
                 amounts,
                 tokens: tokens_vec,
+                interval_days,
             };
             env.storage()
                 .persistent()
@@ -7841,7 +7843,8 @@ impl SplitContract {
             .persistent()
             .get::<(Symbol, u64), SubscriptionParams>(&subscription_params_key(invoice_id))
         {
-            let next_deadline = env.ledger().timestamp() + 30 * 24 * 60 * 60;
+            let interval_secs = params.interval_days.unwrap_or(30) as u64 * 24 * 60 * 60;
+            let next_deadline = env.ledger().timestamp() + interval_secs;
             let first_token = params.tokens.get(0).expect("no token in subscription");
             let _next_id = Self::_create_invoice_inner(
                 env,
