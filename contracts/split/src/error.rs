@@ -45,6 +45,10 @@ pub enum ContractError {
     DuplicatePayment = 29,
     /// Issue #434: Invoice group member expired unfunded; group rollback triggered.
     GroupMemberExpired = 30,
+    /// Issue #448: token balance deviated beyond slippage tolerance.
+    SlippageExceeded = 31,
+    /// Issue #449: invalid phase transition.
+    InvalidPhaseTransition = 32,
     /// Issue #451: payer-provided memo does not match the required memo hash.
     MemoMismatch = 31,
     /// Issue #439: Creator is in cooldown after cancelling an invoice.

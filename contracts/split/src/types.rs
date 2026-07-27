@@ -114,6 +114,27 @@ pub enum InvoiceStatus {
     Cancelled,
 }
 
+/// Issue #449: Multi-phase invoice state machine.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum InvoicePhase {
+    Draft,
+    Active,
+    Locked,
+    Released,
+}
+
+/// Issue #447: Per-invoice analytics accumulator.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct InvoiceAnalytics {
+    pub payment_count: u64,
+    pub total_funded: i128,
+    pub unique_payers: u32,
+    pub first_payment_ledger: u32,
+    pub last_payment_ledger: u32,
+}
+
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub enum AdminRole {
