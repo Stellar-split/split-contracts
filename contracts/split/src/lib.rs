@@ -496,6 +496,19 @@ fn cancel_count_key(creator: &Address) -> (Symbol, Address) {
     (symbol_short!("cnl_count"), creator.clone())
 }
 
+/// Issue #439: per-creator cooldown until ledger after cancellation.
+fn creator_cooldown_key(creator: &Address) -> (Symbol, Address) {
+    (symbol_short!("cr_cool"), creator.clone())
+}
+
+/// Default cancellation cooldown in ledgers (~1 day at 5s/ledger).
+const DEFAULT_CANCELLATION_COOLDOWN_LEDGERS: u64 = 17_280;
+
+/// Instance-storage key for the configurable cancellation cooldown duration.
+fn cancellation_cooldown_ledgers_key() -> Symbol {
+    symbol_short!("cnl_cool")
+}
+
 
 /// Storage key for a pending recipient-replacement proposal.
 /// Keyed by (invoice_id, old_recipient).
@@ -2126,6 +2139,32 @@ impl SplitContract {
             .unwrap_or(DEFAULT_INVOICE_STORAGE_QUOTA)
     }
 
+    /// Issue #439: Set the cancellation cooldown period in ledgers. Requires admin auth.
+    /// After a creator cancels an invoice, they must wait this many ledgers before creating a new one.
+    /// Set to 0 to disable the cooldown.
+    pub fn set_cancellation_cooldown(env: Env, admin: Address, cooldown_ledgers: u64) {
+        require_role(&env, &admin, AdminRole::Operator);
+        env.storage()
+            .instance()
+            .set(&cancellation_cooldown_ledgers_key(), &cooldown_ledgers);
+    }
+
+    /// Issue #439: Get the current cancellation cooldown period in ledgers.
+    pub fn get_cancellation_cooldown(env: Env) -> u64 {
+        env.storage()
+            .instance()
+            .get(&cancellation_cooldown_ledgers_key())
+            .unwrap_or(DEFAULT_CANCELLATION_COOLDOWN_LEDGERS)
+    }
+
+    /// Issue #439: Get the cooldown-until ledger for a creator. Returns 0 if no cooldown is active.
+    pub fn get_creator_cooldown(env: Env, creator: Address) -> u64 {
+        env.storage()
+            .persistent()
+            .get(&creator_cooldown_key(&creator))
+            .unwrap_or(0u64)
+    }
+
     pub fn set_commitment_expiry(env: Env, admin: Address, ledgers: u32) {
         require_role(&env, &admin, AdminRole::Operator);
         assert!(ledgers > 0, "commitment expiry must be positive");
@@ -3248,6 +3287,20 @@ impl SplitContract {
             panic!("contract is paused");
         }
         creator.require_auth();
+
+        // Issue #439: check creator cancellation cooldown.
+        let current_ledger = env.ledger().sequence() as u64;
+        let cooldown_until: u64 = env
+            .storage()
+            .persistent()
+            .get(&creator_cooldown_key(&creator))
+            .unwrap_or(0u64);
+        if cooldown_until > 0 && current_ledger < cooldown_until {
+            panic!(
+                "CreatorCooldownActive {{ until_ledger: {} }}",
+                cooldown_until
+            );
+        }
 
         Self::_apply_rate_limit(&env, &creator);
 
@@ -8705,6 +8758,21 @@ impl SplitContract {
         env.storage()
             .persistent()
             .set(&cancel_count_key(&caller), &(cnl_cnt + 1));
+
+        // Issue #439: set cancellation cooldown for the creator.
+        let cooldown_ledgers: u64 = env
+            .storage()
+            .instance()
+            .get(&cancellation_cooldown_ledgers_key())
+            .unwrap_or(DEFAULT_CANCELLATION_COOLDOWN_LEDGERS);
+        if cooldown_ledgers > 0 {
+            let current_ledger = env.ledger().sequence() as u64;
+            let until_ledger = current_ledger.saturating_add(cooldown_ledgers);
+            env.storage()
+                .persistent()
+                .set(&creator_cooldown_key(&invoice.creator), &until_ledger);
+            events::creator_cooldown_set(&env, &invoice.creator, until_ledger, cooldown_ledgers);
+        }
     }
 
     /// Transfer invoice ownership to a new creator.
