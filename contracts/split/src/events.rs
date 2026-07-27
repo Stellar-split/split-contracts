@@ -1034,3 +1034,31 @@ pub fn creator_cooldown_set(env: &Env, creator: &Address, until_ledger: u64, coo
         (until_ledger, cooldown_ledgers),
     );
 }
+
+/// RBAC: Emitted when an admin grants a role to an address.
+/// Topics: (split, role_grt, grantee)
+/// Data: (role_discriminant, admin)
+pub fn role_granted(env: &Env, grantee: &Address, role_discriminant: u32, admin: &Address) {
+    env.events().publish(
+        (
+            symbol_short!("split"),
+            symbol_short!("role_grt"),
+            grantee.clone(),
+        ),
+        (role_discriminant, admin.clone()),
+    );
+}
+
+/// RBAC: Emitted when an admin revokes a role from an address.
+/// Topics: (split, role_rev, grantee)
+/// Data: (role_discriminant, admin)
+pub fn role_revoked(env: &Env, grantee: &Address, role_discriminant: u32, admin: &Address) {
+    env.events().publish(
+        (
+            symbol_short!("split"),
+            symbol_short!("role_rev"),
+            grantee.clone(),
+        ),
+        (role_discriminant, admin.clone()),
+    );
+}

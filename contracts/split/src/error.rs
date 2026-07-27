@@ -53,4 +53,6 @@ pub enum ContractError {
     MemoMismatch = 31,
     /// Issue #439: Creator is in cooldown after cancelling an invoice.
     CreatorCooldownActive = 31,
+    /// RBAC: Caller does not hold the required role for this entry point.
+    RoleNotHeld = 33,
 }
