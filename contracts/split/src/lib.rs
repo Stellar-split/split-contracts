@@ -55,12 +55,12 @@ use soroban_sdk::{
 };
 use types::{
     AdminRole, AuditEntry, Bid, CircuitBreakerStatus, CloneOverrides, CompactInvoice,
-    CompactMigrateResult, CompletionProof, ComputeEstimate, ConfidentialPayment,
+    CompactMigrateResult, CompletionProof, ComputeEstimate, ConfidentialPayment, ContributionResult,
     CreateInvoiceParams, CreatorStats, DelayedPayout, DisputeOutcome, DisputeRecord, DisputeStatus,
     FeeBracket, FeeTier, InstalmentPlan, Invoice, InvoiceCore, InvoiceExt, InvoiceExt2, InvoiceExt3,
     InvoiceHot, InvoiceOptions, InvoiceOptions2, InvoicePayment, InvoiceStatus, InvoiceTemplate,
     LegacyInvoice, OverflowBehavior, Payment, PaymentCertificate, PaymentCommitment, PaymentProof,
-    ProtocolFeeConfig, QueuedAction, Recipient, RebateTier, RepScore, ResolveAction, ResolveRule,
+    ProtocolFeeConfig, QueuedAction, Recipient, RecipientAddress, RebateTier, RepScore, ResolveAction, ResolveRule,
     SimulateReleaseResult, SplitRule, SubscriptionParams, TimelockAction, Tranche, TreasuryRecord,
     UpgradeProposal,
 };
@@ -1524,6 +1524,33 @@ fn require_not_paused(env: &Env) {
     assert!(!cb_active, "ContractPaused");
 }
 
+fn check_not_paused(env: &Env) {
+    if is_paused(env) {
+        panic!("ContractPaused");
+    }
+    let cb_active: bool = env
+        .storage()
+        .persistent()
+        .get(&circuit_breaker_key())
+        .unwrap_or(false);
+    if cb_active {
+        panic!("ContractPaused");
+    }
+}
+
+fn validate_allowed_token(env: &Env, token: &Address) {
+    if let Some(allowed) = env
+        .storage()
+        .persistent()
+        .get::<_, Vec<Address>>(&storage_keys::allowed_tokens_key())
+    {
+        if !allowed.is_empty() && !allowed.contains(token) {
+            panic!("UnauthorisedToken");
+        }
+    }
+}
+
+
 fn require_role(env: &Env, admin: &Address, min_role: AdminRole) {
     admin.require_auth();
     let admins: Map<Address, AdminRole> = env
@@ -2040,17 +2067,26 @@ impl SplitContract {
         env.storage().instance().set(&admins_key(), &admins);
     }
 
-    /// Pause the contract. Requires admin auth.
+    /// Issue #472: Pause the contract. Requires admin auth.
     pub fn pause(env: Env, admin: Address) {
-        require_role(&env, &admin, AdminRole::Operator);
-        // Issue #328: store in instance storage so a single TTL bump covers it.
+        admin.require_auth();
+        if let Some(stored_admin) = env.storage().instance().get::<_, Address>(&admin_key()) {
+            assert!(admin == stored_admin, "NotAuthorized");
+        } else {
+            require_role(&env, &admin, AdminRole::Operator);
+        }
         env.storage().instance().set(&paused_key(), &true);
         events::contract_paused(&env, &admin);
     }
 
-    /// Unpause the contract. Requires admin auth.
+    /// Issue #472: Unpause the contract. Requires admin auth.
     pub fn unpause(env: Env, admin: Address) {
-        require_role(&env, &admin, AdminRole::Operator);
+        admin.require_auth();
+        if let Some(stored_admin) = env.storage().instance().get::<_, Address>(&admin_key()) {
+            assert!(admin == stored_admin, "NotAuthorized");
+        } else {
+            require_role(&env, &admin, AdminRole::Operator);
+        }
         env.storage().instance().set(&paused_key(), &false);
         events::contract_unpaused(&env, &admin);
     }
@@ -2059,6 +2095,132 @@ impl SplitContract {
     pub fn is_paused(env: Env) -> bool {
         is_paused(&env)
     }
+
+    /// Issue #470: Contribute funds toward an invoice with partial refund mechanism for overpayments.
+    pub fn contribute(env: Env, invoice_id: u64, payer: Address, amount: i128) -> ContributionResult {
+        check_not_paused(&env);
+        payer.require_auth();
+
+        let mut invoice = load_invoice(&env, invoice_id);
+        assert!(invoice.status == InvoiceStatus::Pending, "InvoiceNotPending");
+
+        validate_allowed_token(&env, &invoice.funding_token);
+
+        let total: i128 = invoice.amounts.iter().sum();
+        let remaining = total.saturating_sub(invoice.funded);
+
+        let (amount_applied, refund_amount) = if amount > remaining {
+            (remaining, amount - remaining)
+        } else {
+            (amount, 0i128)
+        };
+
+        if refund_amount > 0 {
+            events::refund_issued(&env, invoice_id, &payer, refund_amount);
+        }
+
+        if amount_applied > 0 {
+            invoice.funded += amount_applied;
+            invoice.payments.push_back(types::Payment {
+                payer: payer.clone(),
+                amount: amount_applied,
+                tip: 0,
+                attestation_hash: None,
+                donate_on_failure: false,
+            });
+
+            if invoice.funded >= total {
+                invoice.status = InvoiceStatus::Released;
+                events::invoice_released(&env, invoice_id, &invoice.recipients);
+            }
+
+            save_invoice(&env, invoice_id, &invoice);
+        }
+
+        ContributionResult {
+            invoice_id,
+            amount_applied,
+            refund_amount,
+        }
+    }
+
+    /// Issue #471: Rotate a registered recipient's payout address before invoice finalisation.
+    pub fn rotate_recipient_address(env: Env, invoice_id: u64, old_address: Address, new_address: Address) {
+        check_not_paused(&env);
+        old_address.require_auth();
+
+        let mut invoice = load_invoice(&env, invoice_id);
+        assert!(invoice.status == InvoiceStatus::Pending, "InvoiceNotPending");
+
+        let mut found = false;
+        let mut new_recipients = Vec::new(&env);
+        for r in invoice.recipients.iter() {
+            if r == old_address {
+                new_recipients.push_back(new_address.clone());
+                found = true;
+            } else {
+                new_recipients.push_back(r);
+            }
+        }
+        assert!(found, "RecipientNotFound");
+
+        invoice.recipients = new_recipients;
+        save_invoice(&env, invoice_id, &invoice);
+
+        env.storage().persistent().set(
+            &types::RecipientAddress(invoice_id, old_address.clone()),
+            &new_address,
+        );
+
+        events::recipient_address_rotated(&env, invoice_id, &old_address, &new_address);
+    }
+
+    /// Issue #473: Add an asset contract address to the allowed tokens list.
+    pub fn add_allowed_token(env: Env, admin: Address, token: Address) {
+        admin.require_auth();
+        if let Some(stored_admin) = env.storage().instance().get::<_, Address>(&admin_key()) {
+            assert!(admin == stored_admin, "NotAuthorized");
+        } else {
+            require_role(&env, &admin, AdminRole::Operator);
+        }
+        let mut allowed: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&storage_keys::allowed_tokens_key())
+            .unwrap_or_else(|| Vec::new(&env));
+        if !allowed.contains(&token) {
+            allowed.push_back(token);
+            env.storage().persistent().set(&storage_keys::allowed_tokens_key(), &allowed);
+        }
+    }
+
+    /// Issue #473: Remove an asset contract address from the allowed tokens list.
+    pub fn remove_allowed_token(env: Env, admin: Address, token: Address) {
+        admin.require_auth();
+        if let Some(stored_admin) = env.storage().instance().get::<_, Address>(&admin_key()) {
+            assert!(admin == stored_admin, "NotAuthorized");
+        } else {
+            require_role(&env, &admin, AdminRole::Operator);
+        }
+        let mut allowed: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&storage_keys::allowed_tokens_key())
+            .unwrap_or_else(|| Vec::new(&env));
+        if let Some(idx) = allowed.iter().position(|t| t == token) {
+            allowed.remove(idx as u32);
+            env.storage().persistent().set(&storage_keys::allowed_tokens_key(), &allowed);
+        }
+    }
+
+    /// Issue #473: Get the list of allowed tokens.
+    pub fn get_allowed_tokens(env: Env) -> Vec<Address> {
+        env.storage()
+            .persistent()
+            .get(&storage_keys::allowed_tokens_key())
+            .unwrap_or_else(|| Vec::new(&env))
+    }
+
 
     /// Pause a specific function by name. Requires Operator+ auth.
     /// While paused, the function panics with "function paused" when called.
@@ -3593,10 +3755,13 @@ impl SplitContract {
         recipient_whitelist_enabled: bool,
         release_condition_hash: Option<BytesN<32>>,
     ) -> u64 {
+        check_not_paused(env);
+        validate_allowed_token(env, &funding_token);
         assert!(
             recipients.len() == amounts.len(),
             "recipients and amounts length mismatch"
         );
+
         assert!(!recipients.is_empty(), "must have at least one recipient");
         assert!(
             deadline > env.ledger().timestamp(),
