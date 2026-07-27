@@ -167,6 +167,8 @@ pub struct SubscriptionParams {
     pub recipients: Vec<Address>,
     pub amounts: Vec<i128>,
     pub tokens: Vec<Address>,
+    /// Optional recurrence interval in days. Defaults to 30 if None.
+    pub interval_days: Option<u32>,
 }
 
 /// Issue #414: Per-recipient payout configuration.

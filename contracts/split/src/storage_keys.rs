@@ -275,3 +275,8 @@ pub fn upgrade_freeze_key() -> Symbol { symbol_short!("upg_frz") }
 
 /// Contract upgrade checkpoint hash — instance storage.
 pub fn upgrade_checkpoint_key() -> Symbol { symbol_short!("upg_ckpt") }
+
+/// Issue #451: per-invoice required memo hash — persistent storage.
+pub fn required_memo_hash_key(invoice_id: u64) -> (Symbol, u64) { (symbol_short!("req_memo"), invoice_id) }
+/// Issue #452: per-invoice tags — persistent storage.
+pub fn invoice_tags_key(invoice_id: u64) -> (Symbol, u64) { (symbol_short!("inv_tags"), invoice_id) }
