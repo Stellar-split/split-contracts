@@ -592,6 +592,16 @@ fn payer_payment_timestamps_key(invoice_id: u64, payer: &Address) -> (Symbol, u6
     (symbol_short!("pay_ts"), invoice_id, payer.clone())
 }
 
+/// Issue #451: per-invoice required memo hash.
+fn required_memo_hash_key(invoice_id: u64) -> (Symbol, u64) {
+    (symbol_short!("req_memo"), invoice_id)
+}
+
+/// Issue #452: per-invoice tags.
+fn invoice_tags_key(invoice_id: u64) -> (Symbol, u64) {
+    (symbol_short!("inv_tags"), invoice_id)
+}
+
 fn invoice_rate_limit_window_key() -> Symbol {
     symbol_short!("inv_rl_w")
 }
@@ -6546,6 +6556,50 @@ impl SplitContract {
             false,
         );
         events::payment_matched(&env, memo, memo, &payer);
+    }
+
+    /// Issue #451: Creator sets a required payment memo hash on an invoice.
+    pub fn set_invoice_memo(env: Env, creator: Address, invoice_id: u64, memo_hash: BytesN<32>) {
+        require_not_paused(&env);
+        creator.require_auth();
+        let invoice = load_invoice(&env, invoice_id);
+        assert!(invoice.creator == creator, "only creator can set memo");
+        assert!(invoice.status == InvoiceStatus::Pending, "invoice is not pending");
+        env.storage().persistent().set(&required_memo_hash_key(invoice_id), &memo_hash);
+    }
+
+    /// Issue #451: Pay an invoice with memo validation.
+    pub fn pay_with_validated_memo(
+        env: Env,
+        payer: Address,
+        invoice_id: u64,
+        payment_memo: BytesN<32>,
+        amount: i128,
+        nonce: u64,
+        auto_convert: bool,
+        via: Option<Address>,
+    ) {
+        require_not_paused(&env);
+        payer.require_auth();
+        if let Some(required) = env.storage().persistent().get::<_, BytesN<32>>(&required_memo_hash_key(invoice_id)) {
+            assert!(payment_memo == required, "MemoMismatch");
+        }
+        Self::_pay(&env, &payer, invoice_id, amount, nonce, auto_convert, via, None, false);
+        events::payment_matched(&env, invoice_id, invoice_id, &payer);
+    }
+
+    /// Issue #452: Set tags on an invoice for searchable categorisation.
+    pub fn set_invoice_tags(env: Env, creator: Address, invoice_id: u64, tags: Vec<String>) {
+        require_not_paused(&env);
+        creator.require_auth();
+        let invoice = load_invoice(&env, invoice_id);
+        assert!(invoice.creator == creator, "only creator can set tags");
+        env.storage().persistent().set(&invoice_tags_key(invoice_id), &tags);
+    }
+
+    /// Issue #452: Get tags for an invoice.
+    pub fn get_invoice_tags(env: Env, invoice_id: u64) -> Vec<String> {
+        env.storage().persistent().get(&invoice_tags_key(invoice_id)).unwrap_or_else(|| Vec::new(&env))
     }
 
     /// Claim vesting cliff share after cliff timestamp has passed (issue #27).
