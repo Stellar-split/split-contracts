@@ -45,4 +45,6 @@ pub enum ContractError {
     DuplicatePayment = 29,
     /// Issue #434: Invoice group member expired unfunded; group rollback triggered.
     GroupMemberExpired = 30,
+    /// Issue #451: payer-provided memo does not match the required memo hash.
+    MemoMismatch = 31,
 }
