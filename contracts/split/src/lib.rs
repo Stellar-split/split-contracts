@@ -247,6 +247,19 @@ fn archive_marker_key(id: u64) -> (Symbol, u64) {
 fn created_ledger_key(id: u64) -> (Symbol, u64) {
     (symbol_short!("cr_ledger"), id)
 }
+
+/// Record the creation ledger for an invoice, keeping the entry alive for as
+/// long as the rest of the invoice's persistent storage.
+fn set_created_ledger(env: &Env, id: u64) {
+    env.storage()
+        .persistent()
+        .set(&created_ledger_key(id), &env.ledger().sequence());
+    env.storage().persistent().extend_ttl(
+        &created_ledger_key(id),
+        INVOICE_HOT_TTL_LEDGERS / 2,
+        INVOICE_HOT_TTL_LEDGERS,
+    );
+}
 fn invoice_key(id: u64) -> (Symbol, u64) {
     (symbol_short!("inv"), id)
 }
@@ -605,6 +618,8 @@ fn invoice_phase_key(invoice_id: u64) -> (Symbol, u64) {
 /// Issue #448: per-invoice slippage tolerance in basis points.
 fn slippage_tolerance_key(invoice_id: u64) -> (Symbol, u64) {
     (symbol_short!("slp_tol"), invoice_id)
+}
+
 /// Issue #451: per-invoice required memo hash.
 fn required_memo_hash_key(invoice_id: u64) -> (Symbol, u64) {
     (symbol_short!("req_memo"), invoice_id)
@@ -1110,6 +1125,9 @@ fn archive_invoice_storage(env: &Env, id: u64, core: &InvoiceCore) {
             twafr_last_ledger: 0,
             release_condition_hash: None,
             recipient_whitelist_enabled: false,
+            early_bird_window_ledgers: 0,
+            early_bird_fee_bps: 0,
+            early_bird_fee_credit: 0,
         });
 
     env.storage().instance().set(&invoice_key(id), core);
@@ -1184,9 +1202,9 @@ fn maybe_archive_invoice(env: &Env, id: u64) {
     let created_ledger: u64 = env
         .storage()
         .persistent()
-        .get(&created_ledger_key(id))
-        .or_else(|| env.storage().instance().get(&created_ledger_key(id)))
-        .unwrap_or_else(|| env.ledger().sequence() as u64);
+        .get::<_, u32>(&created_ledger_key(id))
+        .or_else(|| env.storage().instance().get::<_, u32>(&created_ledger_key(id)))
+        .unwrap_or_else(|| env.ledger().sequence()) as u64;
     let archive_after = env
         .storage()
         .instance()
@@ -1317,6 +1335,9 @@ fn load_invoice(env: &Env, id: u64) -> Invoice {
             twafr_last_ledger: 0,
             release_condition_hash: None,
             recipient_whitelist_enabled: false,
+            early_bird_window_ledgers: 0,
+            early_bird_fee_bps: 0,
+            early_bird_fee_credit: 0,
         });
 
     // Load compact representation if available, then overlay hot fields.
@@ -1394,6 +1415,26 @@ fn save_invoice(env: &Env, id: u64, invoice: &Invoice) {
         env.storage().persistent().set(&invoice_key(id), &core);
         env.storage().persistent().set(&invoice_ext_key(id), &ext);
         env.storage().persistent().set(&invoice_ext2_key(id), &ext2);
+        // Keep the persistent invoice record alive as long as its instance-storage
+        // hot overlay: without this, load_invoice's persistent InvoiceCore read
+        // (which the hot overlay never fully replaces — amounts, deadline, etc.
+        // stay on `core`) can hit an expired/archived entry well before the
+        // invoice's actual lifecycle ends.
+        env.storage().persistent().extend_ttl(
+            &invoice_key(id),
+            INVOICE_HOT_TTL_LEDGERS / 2,
+            INVOICE_HOT_TTL_LEDGERS,
+        );
+        env.storage().persistent().extend_ttl(
+            &invoice_ext_key(id),
+            INVOICE_HOT_TTL_LEDGERS / 2,
+            INVOICE_HOT_TTL_LEDGERS,
+        );
+        env.storage().persistent().extend_ttl(
+            &invoice_ext2_key(id),
+            INVOICE_HOT_TTL_LEDGERS / 2,
+            INVOICE_HOT_TTL_LEDGERS,
+        );
     }
 
     // Store compact representation in the same tier as the invoice data.
@@ -1407,16 +1448,12 @@ fn save_invoice(env: &Env, id: u64, invoice: &Invoice) {
         env.storage()
             .persistent()
             .set(&invoice_compact_key(id), &compact);
+        env.storage().persistent().extend_ttl(
+            &invoice_compact_key(id),
+            INVOICE_HOT_TTL_LEDGERS / 2,
+            INVOICE_HOT_TTL_LEDGERS,
+        );
     }
-    env.storage().persistent().set(&invoice_key(id), &core);
-    env.storage().persistent().set(&invoice_ext_key(id), &ext);
-    env.storage().persistent().set(&invoice_ext2_key(id), &ext2);
-
-    // Store compact representation
-    let compact = invoice.to_compact(env);
-    env.storage()
-        .persistent()
-        .set(&invoice_compact_key(id), &compact);
 
     // Write hot fields to instance storage and bump TTL.
     // status, funded, and recipients change on pay/release/refund paths.
@@ -1734,6 +1771,11 @@ fn save_compact_status(env: &Env, id: u64, status: &InvoiceStatus) {
     env.storage()
         .persistent()
         .set(&compact_status_key(id), &byte);
+    env.storage().persistent().extend_ttl(
+        &compact_status_key(id),
+        INVOICE_HOT_TTL_LEDGERS / 2,
+        INVOICE_HOT_TTL_LEDGERS,
+    );
 }
 
 fn maybe_record_refunded(env: &Env, creator: &Address) {
@@ -2747,6 +2789,9 @@ impl SplitContract {
                         twafr_last_ledger: 0,
                         release_condition_hash: None,
                         recipient_whitelist_enabled: false,
+                        early_bird_window_ledgers: 0,
+                        early_bird_fee_bps: 0,
+                        early_bird_fee_credit: 0,
                     })
             });
         let audit_log: Vec<types::AuditEntry> = get_audit_log(&env, invoice_id);
@@ -3413,6 +3458,8 @@ impl SplitContract {
             options.ext.recipient_max_payouts,
             options.ext.recipient_whitelist_enabled,
             options.ext.release_condition_hash,
+            options.ext.early_bird_window_ledgers,
+            options.ext.early_bird_fee_bps,
         )
     }
 
@@ -3527,6 +3574,8 @@ impl SplitContract {
             options.ext.recipient_max_payouts,
             options.ext.recipient_whitelist_enabled,
             options.ext.release_condition_hash,
+            options.ext.early_bird_window_ledgers,
+            options.ext.early_bird_fee_bps,
         )
     }
 
@@ -3592,6 +3641,8 @@ impl SplitContract {
         recipient_max_payouts: Option<Vec<Option<i128>>>,
         recipient_whitelist_enabled: bool,
         release_condition_hash: Option<BytesN<32>>,
+        early_bird_window_ledgers: u32,
+        early_bird_fee_bps: u32,
     ) -> u64 {
         assert!(
             recipients.len() == amounts.len(),
@@ -3623,6 +3674,19 @@ impl SplitContract {
             insurance_premium_bps <= 10_000,
             "insurance_premium_bps must be ≤ 10000"
         );
+        // Issue #489: early-bird discounted platform fee must not exceed the
+        // standard fee in effect for this creator at creation time.
+        assert!(
+            early_bird_fee_bps <= 10_000,
+            "early_bird_fee_bps must be ≤ 10000"
+        );
+        if early_bird_window_ledgers > 0 {
+            let standard_fee_bps = Self::get_applicable_fee(env.clone(), creator.clone());
+            assert!(
+                early_bird_fee_bps <= standard_fee_bps,
+                "early_bird_fee_bps must not exceed the standard platform fee"
+            );
+        }
         if tax_bps > 0 {
             assert!(
                 tax_authority.is_some(),
@@ -3825,6 +3889,7 @@ impl SplitContract {
             .unwrap_or(0u64)
             + 1;
         env.storage().persistent().set(&counter_key(), &id);
+        set_created_ledger(env, id);
 
         if recipient_whitelist_enabled {
             let whitelist: Vec<Address> = env
@@ -4027,6 +4092,9 @@ impl SplitContract {
             release_condition_hash,
             recipient_whitelist_enabled,
             predecessor_id: None,
+            early_bird_window_ledgers,
+            early_bird_fee_bps,
+            early_bird_fee_credit: 0,
         };
 
         save_invoice(env, id, &invoice);
@@ -4193,6 +4261,8 @@ impl SplitContract {
                 None,           // recipient_max_payouts
                 false,          // recipient_whitelist_enabled
                 None,           // release_condition_hash
+                0,              // early_bird_window_ledgers
+                0,              // early_bird_fee_bps
             );
             ids.push_back(id);
         }
@@ -4300,6 +4370,8 @@ impl SplitContract {
                 None,             // recipient_max_payouts
                 false,            // recipient_whitelist_enabled
                 None,             // release_condition_hash
+                0,                // early_bird_window_ledgers
+                0,                // early_bird_fee_bps
             );
             ids.push_back(id);
         }
@@ -4393,6 +4465,8 @@ impl SplitContract {
             None,           // recipient_max_payouts
             false,          // recipient_whitelist_enabled
             None,           // release_condition_hash
+            0,              // early_bird_window_ledgers
+            0,              // early_bird_fee_bps
         );
 
         if months > 1 {
@@ -4474,9 +4548,7 @@ impl SplitContract {
             .unwrap_or(0u64)
             + 1;
         env.storage().persistent().set(&counter_key(), &id);
-        env.storage()
-            .persistent()
-            .set(&created_ledger_key(id), &env.ledger().sequence());
+        set_created_ledger(&env, id);
 
         let mut tokens: Vec<Address> = Vec::new(&env);
         for _ in recipients.iter() {
@@ -4584,6 +4656,9 @@ impl SplitContract {
             release_condition_hash: source.release_condition_hash.clone(),
             recipient_whitelist_enabled: source.recipient_whitelist_enabled,
             predecessor_id: None,
+            early_bird_window_ledgers: source.early_bird_window_ledgers,
+            early_bird_fee_bps: source.early_bird_fee_bps,
+            early_bird_fee_credit: 0,
         };
 
         save_invoice(&env, id, &new_invoice);
@@ -4847,6 +4922,13 @@ impl SplitContract {
             commit_ledger: env.ledger().sequence(),
         };
         env.storage().persistent().set(&key, &commitment);
+        // Keep the commitment entry alive at least through its expiry window so
+        // an expired commitment surfaces the intended "CommitmentExpired" business
+        // error in reveal_payment rather than a storage-archival host error.
+        let expiry = current_commitment_expiry(&env);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, expiry, expiry.saturating_add(expiry));
         events::payment_committed(&env, invoice_id, &payer, commitment.commit_ledger);
     }
 
@@ -5278,6 +5360,26 @@ impl SplitContract {
             env.ledger().sequence(),
             credited_amount,
         );
+
+        // Issue #489: contributions made within early_bird_window_ledgers of
+        // invoice creation accrue a platform-fee discount, credited against the
+        // fee charged at release. A window of 0 disables the discount.
+        if invoice.early_bird_window_ledgers > 0
+            && env.ledger().sequence()
+                <= creation_ledger.saturating_add(invoice.early_bird_window_ledgers)
+        {
+            let standard_fee_bps = Self::get_applicable_fee(env.clone(), invoice.creator.clone());
+            if invoice.early_bird_fee_bps < standard_fee_bps {
+                let discount_amount = (credited_amount as u128
+                    * (standard_fee_bps - invoice.early_bird_fee_bps) as u128
+                    / 10_000u128) as i128;
+                if discount_amount > 0 {
+                    invoice.early_bird_fee_credit =
+                        invoice.early_bird_fee_credit.saturating_add(discount_amount);
+                    events::early_bird_payment(env, invoice_id, payer, discount_amount);
+                }
+            }
+        }
 
         // Capture funded total before and after mutation (used for milestone check below).
         let prev_funded = invoice.funded;
@@ -6856,12 +6958,6 @@ impl SplitContract {
                     env.storage().persistent().set(&key, &(balance + payout));
                     events::payout_failed(env, invoice_id, &recipient, payout);
                 }
-                let recipient_token_client =
-                    token::Client::new(env, &recipient_token_for(invoice, i as usize));
-                let routed = Self::execute_smart_route(env, invoice, &recipient, payout);
-                if !routed {
-                    recipient_token_client.transfer(&env.current_contract_address(), &recipient, &payout);
-                }
             }
         }
 
@@ -6878,11 +6974,6 @@ impl SplitContract {
                 .get(&treasury_key())
                 .expect("treasury not set");
             funding_token_client.transfer(&env.current_contract_address(), &treasury, &total_fee);
-        }
-
-        if total_tax > 0 {
-            let tax_authority = invoice.tax_authority.as_ref().unwrap();
-            funding_token_client.transfer(&env.current_contract_address(), tax_authority, &total_tax);
         }
 
         // Calculate amount released in this tranche call.
@@ -7324,7 +7415,9 @@ impl SplitContract {
         let total_platform_fee: i128 = if creator_waived {
             0
         } else {
-            Self::compute_fee(env.clone(), funded)
+            // Issue #489: early-bird contributions accrue a fee discount at
+            // payment time; apply it against the fee computed on the full total.
+            (Self::compute_fee(env.clone(), funded) - invoice.early_bird_fee_credit).max(0)
         };
 
         let total: i128 = invoice.amounts.iter().sum();
@@ -7541,14 +7634,6 @@ impl SplitContract {
                     if transfer_res.is_ok() {
                         success = true;
                     }
-                    let from_token = recipient_token_for(invoice, i as usize);
-                    let mut route_args: Vec<Val> = Vec::new(env);
-                    route_args.push_back(from_token.into_val(env));
-                    route_args.push_back(payout.into_val(env));
-                    route_args.push_back(recipient.clone().into_val(env));
-                    let recipient_token_client =
-                        token::Client::new(env, &recipient_token_for(invoice, i as usize));
-                    recipient_token_client.transfer(&env.current_contract_address(), &recipient, &payout);
                 } else if invoice.convert_to_stream {
                     if let Some(stream_contract) = env
                         .storage()
@@ -7575,22 +7660,6 @@ impl SplitContract {
                                 success = true;
                             }
                         }
-                        let recipient_token_client =
-                            token::Client::new(env, &recipient_token_for(invoice, i as usize));
-                        recipient_token_client.transfer(
-                            &env.current_contract_address(),
-                            &stream_contract,
-                            &payout,
-                        );
-                        let mut args: Vec<Val> = Vec::new(env);
-                        args.push_back(recipient.clone().into_val(env));
-                        args.push_back(payout.into_val(env));
-                        args.push_back(duration.into_val(env));
-                        let _: Val = env.invoke_contract(
-                            &stream_contract,
-                            &Symbol::new(env, "create_stream"),
-                            args,
-                        );
                     } else {
                         let recipient_token_client =
                             token::Client::new(env, &recipient_token_for(invoice, i as usize));
@@ -7974,6 +8043,8 @@ impl SplitContract {
                 None,          // recipient_max_payouts
                 false,         // recipient_whitelist_enabled
                 None,          // release_condition_hash
+                0,             // early_bird_window_ledgers
+                0,             // early_bird_fee_bps
             );
             env.storage()
                 .persistent()
@@ -8149,6 +8220,12 @@ impl SplitContract {
         require_fn_not_paused(&env, &symbol_short!("refund"));
         let mut invoice = load_invoice(&env, invoice_id);
 
+        // Lazy expiry: a Pending invoice past its deadline is treated as
+        // Expired without requiring a separate notify_expired() call first.
+        if invoice.status == InvoiceStatus::Pending && env.ledger().timestamp() >= invoice.deadline {
+            invoice.status = InvoiceStatus::Expired;
+        }
+
         assert!(invoice.status == InvoiceStatus::Expired, "InvalidStatus");
 
         if invoice.auction_on_expiry {
@@ -8315,9 +8392,7 @@ impl SplitContract {
             .unwrap_or(0u64)
             + 1;
         env.storage().persistent().set(&counter_key(), &id);
-        env.storage()
-            .persistent()
-            .set(&created_ledger_key(id), &env.ledger().sequence());
+        set_created_ledger(&env, id);
 
         let mut clone_tokens = old_invoice.tokens.clone();
         if clone_tokens.is_empty() {
@@ -8420,6 +8495,9 @@ impl SplitContract {
             release_condition_hash: None,
             recipient_whitelist_enabled: false,
             predecessor_id: Some(old_invoice_id),
+            early_bird_window_ledgers: old_invoice.early_bird_window_ledgers,
+            early_bird_fee_bps: old_invoice.early_bird_fee_bps,
+            early_bird_fee_credit: 0,
         };
 
         save_invoice(&env, id, &new_invoice);
@@ -8987,6 +9065,8 @@ impl SplitContract {
             Some(old_invoice.recipient_max_payouts.clone()),
             false, // recipient_whitelist_enabled
             None,  // release_condition_hash
+            old_invoice.early_bird_window_ledgers,
+            old_invoice.early_bird_fee_bps,
         );
 
         // Copy payments from shards to new invoice (issue #177).
@@ -9359,6 +9439,8 @@ impl SplitContract {
             None,           // recipient_max_payouts
             false,          // recipient_whitelist_enabled
             None,           // release_condition_hash
+            0,              // early_bird_window_ledgers
+            0,              // early_bird_fee_bps
         )
     }
 
@@ -10024,6 +10106,9 @@ impl SplitContract {
                 twafr_last_ledger: 0,
                 release_condition_hash: None,
                 recipient_whitelist_enabled: false,
+                early_bird_window_ledgers: 0,
+                early_bird_fee_bps: 0,
+                early_bird_fee_credit: 0,
             });
 
         // Copy to instance storage.
@@ -10142,6 +10227,9 @@ impl SplitContract {
                         twafr_last_ledger: 0,
                         release_condition_hash: None,
                         recipient_whitelist_enabled: false,
+                        early_bird_window_ledgers: 0,
+                        early_bird_fee_bps: 0,
+                        early_bird_fee_credit: 0,
                     });
 
                 env.storage().instance().set(&invoice_key(id), &core);
