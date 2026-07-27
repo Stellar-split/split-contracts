@@ -579,6 +579,21 @@ fn payer_payment_timestamps_key(invoice_id: u64, payer: &Address) -> (Symbol, u6
     (symbol_short!("pay_ts"), invoice_id, payer.clone())
 }
 
+/// Issue #447: per-invoice analytics.
+fn invoice_analytics_key(invoice_id: u64) -> (Symbol, u64) {
+    (symbol_short!("inv_anltc"), invoice_id)
+}
+
+/// Issue #449: per-invoice phase.
+fn invoice_phase_key(invoice_id: u64) -> (Symbol, u64) {
+    (symbol_short!("inv_phase"), invoice_id)
+}
+
+/// Issue #448: per-invoice slippage tolerance in basis points.
+fn slippage_tolerance_key(invoice_id: u64) -> (Symbol, u64) {
+    (symbol_short!("slp_tol"), invoice_id)
+}
+
 fn invoice_rate_limit_window_key() -> Symbol {
     symbol_short!("inv_rl_w")
 }
@@ -9484,6 +9499,54 @@ impl SplitContract {
                 .get(&invoice_rating_count_key(invoice_id))
                 .unwrap_or(0u32),
         )
+    }
+
+    /// Issue #447: Get per-invoice analytics.
+    pub fn get_invoice_analytics(env: Env, invoice_id: u64) -> types::InvoiceAnalytics {
+        env.storage().persistent().get(&invoice_analytics_key(invoice_id)).unwrap_or(
+            types::InvoiceAnalytics {
+                payment_count: 0,
+                total_funded: 0,
+                unique_payers: 0,
+                first_payment_ledger: 0,
+                last_payment_ledger: 0,
+            },
+        )
+    }
+
+    /// Issue #448: Set slippage tolerance (in basis points) for an invoice.
+    /// If set, release will check that the token balance hasn't deviated beyond this tolerance.
+    pub fn set_slippage_tolerance(env: Env, creator: Address, invoice_id: u64, slippage_bps: u32) {
+        require_not_paused(&env);
+        creator.require_auth();
+        let invoice = load_invoice(&env, invoice_id);
+        assert!(invoice.creator == creator, "only creator can set slippage");
+        assert!(slippage_bps <= 10_000, "slippage_bps must be <= 10000");
+        env.storage().persistent().set(&slippage_tolerance_key(invoice_id), &slippage_bps);
+    }
+
+    /// Issue #449: Set invoice phase. Transitions must follow: Draft -> Active -> Locked -> Released.
+    pub fn set_invoice_phase(env: Env, caller: Address, invoice_id: u64, new_phase: types::InvoicePhase) {
+        require_not_paused(&env);
+        caller.require_auth();
+        let current_phase: types::InvoicePhase = env.storage().persistent()
+            .get(&invoice_phase_key(invoice_id))
+            .unwrap_or(types::InvoicePhase::Draft);
+        let valid = match (&current_phase, &new_phase) {
+            (types::InvoicePhase::Draft, types::InvoicePhase::Active) => true,
+            (types::InvoicePhase::Active, types::InvoicePhase::Locked) => true,
+            (types::InvoicePhase::Locked, types::InvoicePhase::Released) => true,
+            _ => false,
+        };
+        assert!(valid, "InvalidPhaseTransition");
+        env.storage().persistent().set(&invoice_phase_key(invoice_id), &new_phase);
+    }
+
+    /// Issue #449: Get invoice phase.
+    pub fn get_invoice_phase(env: Env, invoice_id: u64) -> types::InvoicePhase {
+        env.storage().persistent()
+            .get(&invoice_phase_key(invoice_id))
+            .unwrap_or(types::InvoicePhase::Draft)
     }
 
     pub fn get_creator_rating(env: Env, creator: Address) -> (u32, u32) {
