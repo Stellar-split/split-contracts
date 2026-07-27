@@ -537,6 +537,8 @@ pub struct InvoiceExt2 {
     pub release_condition_hash: Option<BytesN<32>>,
     /// Issue #417: recipient whitelist enforcement flag.
     pub recipient_whitelist_enabled: bool,
+    /// Issue #485: optional contributor allowlist; when Some only listed addresses may call pay/contribute.
+    pub contributor_allowlist: Option<Vec<Address>>,
 }
 
 /// Issue #211: A single escalating penalty tier (seconds_after_deadline, bps).
@@ -672,6 +674,8 @@ pub struct Invoice {
     /// Issue #417: recipient whitelist enforcement flag.
     pub recipient_whitelist_enabled: bool,
     pub predecessor_id: Option<u64>,
+    /// Issue #485: optional contributor allowlist; when Some only listed addresses may call pay/contribute.
+    pub contributor_allowlist: Option<Vec<Address>>,
 }
 
 impl Invoice {
@@ -774,6 +778,7 @@ impl Invoice {
                 twafr_last_ledger: self.twafr_last_ledger,
                 release_condition_hash: self.release_condition_hash,
                 recipient_whitelist_enabled: self.recipient_whitelist_enabled,
+                contributor_allowlist: self.contributor_allowlist,
             },
         )
     }
@@ -872,6 +877,7 @@ impl Invoice {
             twafr_last_ledger: ext2.twafr_last_ledger,
             release_condition_hash: ext2.release_condition_hash,
             recipient_whitelist_enabled: ext2.recipient_whitelist_enabled,
+            contributor_allowlist: ext2.contributor_allowlist,
         }
     }
 }
@@ -1113,6 +1119,7 @@ impl Invoice {
             release_condition_hash: None,
             recipient_whitelist_enabled: false,
             predecessor_id: None,
+            contributor_allowlist: None,
         }
     }
 }

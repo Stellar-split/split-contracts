@@ -53,4 +53,10 @@ pub enum ContractError {
     MemoMismatch = 31,
     /// Issue #439: Creator is in cooldown after cancelling an invoice.
     CreatorCooldownActive = 31,
+    /// Issue #482: Intermediate multiplication or division overflowed i128 bounds.
+    ArithmeticOverflow = 33,
+    /// Issue #483: A zero-value or negative amount was passed where a positive amount is required.
+    ZeroAmountNotAllowed = 34,
+    /// Issue #485: Caller is not on the invoice contributor allowlist.
+    ContributorNotAllowed = 35,
 }

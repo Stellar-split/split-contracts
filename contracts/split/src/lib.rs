@@ -744,8 +744,57 @@ fn surplus_claim_key(invoice_id: u64, payer: &Address) -> (Symbol, u64, Address)
     (symbol_short!("sur_clm"), invoice_id, payer.clone())
 }
 
+/// Issue #485: per-invoice contributor allowlist — persistent storage.
+fn contributor_allowlist_key(invoice_id: u64) -> (Symbol, u64) {
+    (symbol_short!("ctr_al"), invoice_id)
+}
+
 fn commitment_expiry_key() -> Symbol {
     symbol_short!("com_exp")
+}
+
+// ---------------------------------------------------------------------------
+// Issue #482: Safe arithmetic helpers — checked intermediate ops
+// ---------------------------------------------------------------------------
+
+/// Multiply `a * b / divisor` using u128 intermediates, returning
+/// `Err(ContractError::ArithmeticOverflow)` on any overflow or divide-by-zero.
+#[inline]
+fn checked_bps_of(amount: i128, bps: u32, divisor: u128) -> Result<i128, ContractError> {
+    if divisor == 0 {
+        return Err(ContractError::ArithmeticOverflow);
+    }
+    let a = amount as u128;
+    let b = bps as u128;
+    let numerator = a.checked_mul(b).ok_or(ContractError::ArithmeticOverflow)?;
+    let result = numerator.checked_div(divisor).ok_or(ContractError::ArithmeticOverflow)?;
+    Ok(result as i128)
+}
+
+/// Multiply `a * b / divisor` with both a and b as u128, returning
+/// `Err(ContractError::ArithmeticOverflow)` on any overflow or divide-by-zero.
+#[inline]
+fn checked_proportion(a: u128, b: u128, divisor: u128) -> Result<i128, ContractError> {
+    if divisor == 0 {
+        return Err(ContractError::ArithmeticOverflow);
+    }
+    let numerator = a.checked_mul(b).ok_or(ContractError::ArithmeticOverflow)?;
+    let result = numerator.checked_div(divisor).ok_or(ContractError::ArithmeticOverflow)?;
+    Ok(result as i128)
+}
+
+// ---------------------------------------------------------------------------
+// Issue #483: Zero-value guard helper
+// ---------------------------------------------------------------------------
+
+/// Return `Err(ContractError::ZeroAmountNotAllowed)` when `amount <= 0`.
+#[inline]
+fn guard_nonzero_amount(amount: i128) -> Result<(), ContractError> {
+    if amount <= 0 {
+        Err(ContractError::ZeroAmountNotAllowed)
+    } else {
+        Ok(())
+    }
 }
 
 /// Issue #308: per-invoice refunded-addresses set — persistent storage.
@@ -901,7 +950,8 @@ fn accrue_creator_rebate(env: &Env, creator: &Address, release_amount: i128, tot
     }
 
     if let Some(tier) = applicable {
-        let rebate = (total_fee as u128 * tier.rebate_bps as u128 / 10_000u128) as i128;
+        let rebate = checked_bps_of(total_fee, tier.rebate_bps, 10_000u128)
+            .expect("ArithmeticOverflow"); // Issue #482
         if rebate > 0 {
             let balance_key = rebate_balance_key(creator);
             let current_balance: i128 = env
@@ -1110,6 +1160,7 @@ fn archive_invoice_storage(env: &Env, id: u64, core: &InvoiceCore) {
             twafr_last_ledger: 0,
             release_condition_hash: None,
             recipient_whitelist_enabled: false,
+            contributor_allowlist: None,
         });
 
     env.storage().instance().set(&invoice_key(id), core);
@@ -1317,6 +1368,7 @@ fn load_invoice(env: &Env, id: u64) -> Invoice {
             twafr_last_ledger: 0,
             release_condition_hash: None,
             recipient_whitelist_enabled: false,
+            contributor_allowlist: None,
         });
 
     // Load compact representation if available, then overlay hot fields.
@@ -1706,8 +1758,9 @@ fn check_and_emit_milestones(
         if flags & (1u32 << bit) != 0 {
             continue;
         }
-        // Threshold in token units (rounded down).
-        let threshold_amount: i128 = total * bps as i128 / 10_000;
+        // Threshold in token units (rounded down). Issue #482: use checked arithmetic.
+        let threshold_amount: i128 = checked_bps_of(total, bps, 10_000u128)
+            .expect("ArithmeticOverflow");
         // Was this threshold NOT crossed before, but IS crossed now?
         if prev_funded < threshold_amount && new_funded >= threshold_amount {
             events::milestone_reached(env, invoice_id, bps, new_funded);
@@ -2747,6 +2800,8 @@ impl SplitContract {
                         twafr_last_ledger: 0,
                         release_condition_hash: None,
                         recipient_whitelist_enabled: false,
+                        contributor_allowlist: None,
+            contributor_allowlist: None,
                     })
             });
         let audit_log: Vec<types::AuditEntry> = get_audit_log(&env, invoice_id);
@@ -3598,6 +3653,10 @@ impl SplitContract {
             "recipients and amounts length mismatch"
         );
         assert!(!recipients.is_empty(), "must have at least one recipient");
+        // Issue #483: reject zero or negative amounts at entry point.
+        for amt in amounts.iter() {
+            guard_nonzero_amount(amt).expect("ZeroAmountNotAllowed");
+        }
         assert!(
             deadline > env.ledger().timestamp(),
             "deadline must be in the future"
@@ -4027,6 +4086,7 @@ impl SplitContract {
             release_condition_hash,
             recipient_whitelist_enabled,
             predecessor_id: None,
+            contributor_allowlist: None,
         };
 
         save_invoice(env, id, &invoice);
@@ -4584,6 +4644,7 @@ impl SplitContract {
             release_condition_hash: source.release_condition_hash.clone(),
             recipient_whitelist_enabled: source.recipient_whitelist_enabled,
             predecessor_id: None,
+            contributor_allowlist: source.contributor_allowlist.clone(),
         };
 
         save_invoice(&env, id, &new_invoice);
@@ -4963,7 +5024,8 @@ impl SplitContract {
             env.ledger().timestamp() <= invoice.deadline,
             "invoice deadline has passed"
         );
-        assert!(amount > 0, "payment amount must be positive");
+        // Issue #483: reject zero or negative payment amounts.
+        guard_nonzero_amount(amount).expect("ZeroAmountNotAllowed");
 
         // Issue #430: creator-defined payment window.
         if let Some(open_at) = get_payment_open_at_internal(env, invoice_id) {
@@ -4996,6 +5058,11 @@ impl SplitContract {
         // Check allowed_payers allowlist.
         if let Some(ref whitelist) = invoice.allowed_payers {
             assert!(whitelist.contains(payer), "payer not allowed");
+        }
+
+        // Issue #485: check per-invoice contributor allowlist.
+        if let Some(ref allowlist) = invoice.contributor_allowlist {
+            assert!(allowlist.contains(payer), "ContributorNotAllowed");
         }
 
         // Check min_payer_rep requirement (issue #349).
@@ -5449,7 +5516,8 @@ impl SplitContract {
             env.ledger().timestamp() <= invoice.deadline,
             "invoice deadline has passed"
         );
-        assert!(amount > 0, "payment amount must be positive");
+        // Issue #483: reject zero or negative payment amounts.
+        guard_nonzero_amount(amount).expect("ZeroAmountNotAllowed");
 
         let invoice_token = funding_token_for(&invoice);
 
@@ -6038,7 +6106,9 @@ impl SplitContract {
         while invoice.milestones_released < invoice.milestones.len() {
             let next_idx = invoice.milestones_released;
             let milestone_bps = invoice.milestones.get(next_idx).unwrap();
-            let threshold = (total as u128 * milestone_bps as u128 / 10_000u128) as i128;
+            // Issue #482: use checked arithmetic to prevent overflow.
+            let threshold = checked_bps_of(total, milestone_bps, 10_000u128)
+                .expect("ArithmeticOverflow");
             if invoice.funded < threshold {
                 break;
             }
@@ -6048,7 +6118,9 @@ impl SplitContract {
                 invoice.milestones.get(next_idx - 1).unwrap()
             };
             let delta_bps = milestone_bps.saturating_sub(prev_bps);
-            let tranche_amount = (total as u128 * delta_bps as u128 / 10_000u128) as i128;
+            // Issue #482: use checked arithmetic to prevent overflow.
+            let tranche_amount = checked_bps_of(total, delta_bps, 10_000u128)
+                .expect("ArithmeticOverflow");
             let mut paid_total = 0i128;
             let mut tranche_surplus = 0i128;
             for i in 0..invoice.recipients.len() {
@@ -6057,7 +6129,9 @@ impl SplitContract {
                 let proportional = if i == invoice.recipients.len() - 1 {
                     tranche_amount.saturating_sub(paid_total).saturating_add(tranche_surplus)
                 } else {
-                    (base_amount as u128 * delta_bps as u128 / 10_000u128) as i128
+                    // Issue #482: use checked arithmetic to prevent overflow.
+                    checked_bps_of(base_amount, delta_bps, 10_000u128)
+                        .expect("ArithmeticOverflow")
                 };
                 let payout = if !invoice.recipient_max_payouts.is_empty() {
                     match invoice.recipient_max_payouts.get(i).unwrap_or(None) {
@@ -6143,6 +6217,135 @@ impl SplitContract {
         invoice.approved = true;
         save_invoice(&env, invoice_id, &invoice);
         append_audit_entry(&env, invoice_id, symbol_short!("aprv"), approver);
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #485: Contributor allowlist management (creator-only)
+    // -----------------------------------------------------------------------
+
+    /// Add `contributor` to the per-invoice contributor allowlist.
+    /// Creates the allowlist if it does not exist yet.
+    /// Only the invoice creator (or a co-creator) may call this.
+    pub fn add_contributor_to_allowlist(
+        env: Env,
+        creator: Address,
+        invoice_id: u64,
+        contributor: Address,
+    ) {
+        require_not_paused(&env);
+        creator.require_auth();
+        let mut invoice = load_invoice(&env, invoice_id);
+        assert!(
+            invoice.creator == creator || invoice.co_creators.contains(&creator),
+            "NotAuthorized"
+        );
+        let mut list = invoice
+            .contributor_allowlist
+            .unwrap_or_else(|| Vec::new(&env));
+        if !list.contains(&contributor) {
+            list.push_back(contributor.clone());
+        }
+        invoice.contributor_allowlist = Some(list);
+        save_invoice(&env, invoice_id, &invoice);
+        append_audit_entry(&env, invoice_id, symbol_short!("al_add"), &creator);
+    }
+
+    /// Remove `contributor` from the per-invoice contributor allowlist.
+    /// Only the invoice creator (or a co-creator) may call this.
+    /// Removing the last entry restores open access.
+    pub fn remove_contributor_from_allowlist(
+        env: Env,
+        creator: Address,
+        invoice_id: u64,
+        contributor: Address,
+    ) {
+        require_not_paused(&env);
+        creator.require_auth();
+        let mut invoice = load_invoice(&env, invoice_id);
+        assert!(
+            invoice.creator == creator || invoice.co_creators.contains(&creator),
+            "NotAuthorized"
+        );
+        if let Some(old_list) = invoice.contributor_allowlist {
+            let mut new_list: Vec<Address> = Vec::new(&env);
+            for addr in old_list.iter() {
+                if addr != contributor {
+                    new_list.push_back(addr);
+                }
+            }
+            invoice.contributor_allowlist = if new_list.is_empty() {
+                None
+            } else {
+                Some(new_list)
+            };
+        }
+        save_invoice(&env, invoice_id, &invoice);
+        append_audit_entry(&env, invoice_id, symbol_short!("al_rm"), &creator);
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #485: Contributor allowlist management (creator-only)
+    // -----------------------------------------------------------------------
+
+    /// Add `contributor` to the per-invoice contributor allowlist.
+    /// Creates the allowlist if it does not exist yet.
+    /// Only the invoice creator (or a co-creator) may call this.
+    pub fn add_contributor_to_allowlist(
+        env: Env,
+        creator: Address,
+        invoice_id: u64,
+        contributor: Address,
+    ) {
+        require_not_paused(&env);
+        creator.require_auth();
+        let mut invoice = load_invoice(&env, invoice_id);
+        assert!(
+            invoice.creator == creator || invoice.co_creators.contains(&creator),
+            "NotAuthorized"
+        );
+        let mut list = invoice
+            .contributor_allowlist
+            .unwrap_or_else(|| Vec::new(&env));
+        if !list.contains(&contributor) {
+            list.push_back(contributor.clone());
+        }
+        invoice.contributor_allowlist = Some(list);
+        save_invoice(&env, invoice_id, &invoice);
+        append_audit_entry(&env, invoice_id, symbol_short!("al_add"), &creator);
+    }
+
+    /// Remove `contributor` from the per-invoice contributor allowlist.
+    /// Only the invoice creator (or a co-creator) may call this.
+    /// Removing the last entry restores open access (allowlist becomes None).
+    pub fn remove_contributor_from_allowlist(
+        env: Env,
+        creator: Address,
+        invoice_id: u64,
+        contributor: Address,
+    ) {
+        require_not_paused(&env);
+        creator.require_auth();
+        let mut invoice = load_invoice(&env, invoice_id);
+        assert!(
+            invoice.creator == creator || invoice.co_creators.contains(&creator),
+            "NotAuthorized"
+        );
+        if let Some(old_list) = invoice.contributor_allowlist {
+            let mut new_list: Vec<Address> = Vec::new(&env);
+            for addr in old_list.iter() {
+                if addr != contributor {
+                    new_list.push_back(addr);
+                }
+            }
+            // Empty list means no restriction — remove the Option entirely.
+            invoice.contributor_allowlist = if new_list.is_empty() {
+                None
+            } else {
+                Some(new_list)
+            };
+        }
+        save_invoice(&env, invoice_id, &invoice);
+        append_audit_entry(&env, invoice_id, symbol_short!("al_rm"), &creator);
     }
 
     // -----------------------------------------------------------------------
@@ -7392,11 +7595,15 @@ impl SplitContract {
                 match rule {
                     SplitRule::Fixed(fixed_amt) => fixed_amt,
                     SplitRule::Percentage(bps) => {
-                        (funded as u128 * bps as u128 / 10_000u128) as i128
+                        // Issue #482: use checked arithmetic to prevent overflow.
+                        checked_bps_of(funded, bps, 10_000u128)
+                            .expect("ArithmeticOverflow")
                     }
                     SplitRule::Tiered(threshold, bps) => {
                         if funded > threshold {
-                            (funded as u128 * bps as u128 / 10_000u128) as i128
+                            // Issue #482: use checked arithmetic to prevent overflow.
+                            checked_bps_of(funded, bps, 10_000u128)
+                                .expect("ArithmeticOverflow")
                         } else {
                             0
                         }
@@ -7405,7 +7612,9 @@ impl SplitContract {
             } else if i == last_unpaid_idx {
                 funded - distributed
             } else {
-                (amount as u128 * funded as u128 / effective_total as u128) as i128
+                // Issue #482: use checked arithmetic to prevent overflow.
+                checked_proportion(amount as u128, funded as u128, effective_total as u128)
+                    .expect("ArithmeticOverflow")
             };
             let capped_proportional = if !invoice.recipient_max_payouts.is_empty() {
                 match invoice.recipient_max_payouts.get(i).unwrap_or(None) {
@@ -7420,7 +7629,9 @@ impl SplitContract {
             };
             distributed += capped_proportional;
 
-            let tax = (capped_proportional as u128 * invoice.tax_bps as u128 / 10_000u128) as i128;
+            // Issue #482: use checked arithmetic to prevent overflow.
+            let tax = checked_bps_of(capped_proportional, invoice.tax_bps, 10_000u128)
+                .expect("ArithmeticOverflow");
             total_tax += tax;
             let post_tax = capped_proportional - tax;
 
@@ -7428,7 +7639,9 @@ impl SplitContract {
             let fee = if is_waived || funded == 0 {
                 0
             } else {
-                (post_tax as u128 * total_platform_fee as u128 / funded as u128) as i128
+                // Issue #482: use checked arithmetic to prevent overflow.
+                checked_proportion(post_tax as u128, total_platform_fee as u128, funded as u128)
+                    .expect("ArithmeticOverflow")
             };
             total_fee += fee;
 
@@ -7453,7 +7666,8 @@ impl SplitContract {
                 .get::<Symbol, ProtocolFeeConfig>(&protocol_fee_key())
         {
             if proto_cfg.rate_bps > 0 {
-                let fee = (funded as u128 * proto_cfg.rate_bps as u128 / 10_000u128) as i128;
+                let fee = checked_bps_of(funded, proto_cfg.rate_bps, 10_000u128)
+                    .expect("ArithmeticOverflow"); // Issue #482
                 if fee > 0 {
                     funding_token_client.transfer(
                         &env.current_contract_address(),
@@ -7508,14 +7722,18 @@ impl SplitContract {
                     continue;
                 }
 
-                let tax = (proportional as u128 * invoice.tax_bps as u128 / 10_000u128) as i128;
+                // Issue #482: use checked arithmetic to prevent overflow.
+                let tax = checked_bps_of(proportional, invoice.tax_bps, 10_000u128)
+                    .expect("ArithmeticOverflow");
                 let post_tax = proportional - tax;
 
                 let is_waived = waivers.iter().any(|a| a == recipient);
                 let fee = if is_waived || funded == 0 {
                     0
                 } else {
-                    (post_tax as u128 * total_platform_fee as u128 / funded as u128) as i128
+                    // Issue #482: use checked arithmetic to prevent overflow.
+                    checked_proportion(post_tax as u128, total_platform_fee as u128, funded as u128)
+                        .expect("ArithmeticOverflow")
                 };
                 let payout = post_tax - fee;
 
@@ -8419,6 +8637,7 @@ impl SplitContract {
             twafr_last_ledger: 0,
             release_condition_hash: None,
             recipient_whitelist_enabled: false,
+            contributor_allowlist: None,
             predecessor_id: Some(old_invoice_id),
         };
 
@@ -10024,6 +10243,8 @@ impl SplitContract {
                 twafr_last_ledger: 0,
                 release_condition_hash: None,
                 recipient_whitelist_enabled: false,
+                contributor_allowlist: None,
+            contributor_allowlist: None,
             });
 
         // Copy to instance storage.
@@ -10142,6 +10363,8 @@ impl SplitContract {
                         twafr_last_ledger: 0,
                         release_condition_hash: None,
                         recipient_whitelist_enabled: false,
+                        contributor_allowlist: None,
+            contributor_allowlist: None,
                     });
 
                 env.storage().instance().set(&invoice_key(id), &core);
@@ -10249,7 +10472,8 @@ impl SplitContract {
             env.ledger().timestamp() <= invoice.deadline,
             "invoice deadline has passed"
         );
-        assert!(amount > 0, "payment amount must be positive");
+        // Issue #483: reject zero or negative payment amounts.
+        guard_nonzero_amount(amount).expect("ZeroAmountNotAllowed");
         Self::enforce_invoice_rate_limit(&env, invoice_id, &beneficiary);
 
         let total: i128 = invoice.amounts.iter().sum();
@@ -10933,7 +11157,8 @@ impl SplitContract {
             env.ledger().timestamp() <= invoice.deadline,
             "invoice deadline has passed"
         );
-        assert!(amount > 0, "payment amount must be positive");
+        // Issue #483: reject zero or negative payment amounts.
+        guard_nonzero_amount(amount).expect("ZeroAmountNotAllowed");
         Self::enforce_invoice_rate_limit(&env, invoice_id, &on_behalf_of);
         assert!(!invoice.frozen, "invoice is frozen");
         assert!(!invoice.admin_frozen, "invoice frozen by admin");
