@@ -1015,11 +1015,7 @@ impl Invoice {
     /// Upgrade a legacy (pre-version) invoice to the current schema.
     /// New fields are filled with their default (empty / zero) values.
     pub fn from_legacy(old: LegacyInvoice, env: &Env) -> Self {
-        let funding_token = old
-            .tokens
-            .get(0)
-            .expect("no token")
-            .clone();
+        let funding_token = old.tokens.get(0).expect("no token").clone();
         Invoice {
             version: 2,
             creator: old.creator,
