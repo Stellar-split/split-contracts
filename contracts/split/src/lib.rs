@@ -754,6 +754,54 @@ fn refunded_key(invoice_id: u64) -> (Symbol, u64) {
     (symbol_short!("refunded"), invoice_id)
 }
 
+// ---------------------------------------------------------------------------
+// Reentrancy guard (issue #451-reentrancy)
+// ---------------------------------------------------------------------------
+
+/// Temporary-storage key for the per-transaction reentrancy lock.
+///
+/// Using *temporary* storage means the flag is automatically invalidated at the
+/// end of the transaction (its TTL is never extended), so a stale lock can never
+/// block a subsequent independent call.
+fn reentrancy_lock_key() -> Symbol {
+    symbol_short!("re_lock")
+}
+
+/// Executes `body` inside a reentrancy guard backed by temporary storage.
+///
+/// # How it works
+/// 1. Check whether the lock key is present in temporary storage.  If it is,
+///    a recursive call is in progress — return `ReentrantCall` immediately.
+/// 2. Set the lock (TTL = 1 ledger; only needs to survive this transaction).
+/// 3. Run `body`.
+/// 4. Remove the lock so that another *independent* call in the same ledger can
+///    still proceed (Soroban executes each top-level invocation as its own
+///    transaction, but this is belt-and-suspenders).
+///
+/// The lock lives in `env.storage().temporary()` so it is **never persisted
+/// across transactions** even if the `remove` step is somehow skipped.
+fn with_reentrancy_guard<F>(env: &Env, body: F) -> Result<(), ContractError>
+where
+    F: FnOnce() -> Result<(), ContractError>,
+{
+    let key = reentrancy_lock_key();
+    if env
+        .storage()
+        .temporary()
+        .has(&key)
+    {
+        return Err(ContractError::ReentrantCall);
+    }
+    // Set the lock with the minimum TTL.  The value is irrelevant; presence is
+    // all we test.
+    env.storage().temporary().set(&key, &true);
+    let result = body();
+    // Always clear the lock so subsequent independent calls within the same
+    // ledger (different top-level transactions) are not blocked.
+    env.storage().temporary().remove(&key);
+    result
+}
+
 fn maybe_record_created(env: &Env, creator: &Address, total: i128) {
     if let Some(dashboard) = env
         .storage()
@@ -5806,6 +5854,14 @@ impl SplitContract {
         invoice_id: u64,
         preimage: Option<Bytes>,
     ) {
+        // --- Reentrancy guard (issue #451-reentrancy) ---
+        // Uses temporary storage so the lock is never persisted across transactions.
+        let re_key = reentrancy_lock_key();
+        if env.storage().temporary().has(&re_key) {
+            panic!("{}", ContractError::ReentrantCall as u32);
+        }
+        env.storage().temporary().set(&re_key, &true);
+        // ------------------------------------------------
         require_fn_not_paused(&env, &symbol_short!("release"));
         require_not_frozen(&env);
         let caller = env.current_contract_address();
@@ -5948,6 +6004,8 @@ impl SplitContract {
         }
 
         Self::_release(&env, invoice_id, &mut invoice, &caller);
+        // Clear reentrancy lock on normal exit.
+        env.storage().temporary().remove(&reentrancy_lock_key());
     }
 
     /// Backwards-compatible release entry point.
@@ -8146,6 +8204,13 @@ impl SplitContract {
 
     /// Refund all payers after the invoice has been marked expired.
     pub fn refund(env: Env, invoice_id: u64) {
+        // --- Reentrancy guard (issue #451-reentrancy) ---
+        let re_key = reentrancy_lock_key();
+        if env.storage().temporary().has(&re_key) {
+            panic!("{}", ContractError::ReentrantCall as u32);
+        }
+        env.storage().temporary().set(&re_key, &true);
+        // ------------------------------------------------
         require_fn_not_paused(&env, &symbol_short!("refund"));
         let mut invoice = load_invoice(&env, invoice_id);
 
@@ -8264,6 +8329,8 @@ impl SplitContract {
                 .checked_add(1)
                 .expect("creator_refunded overflow"),
         );
+        // Clear reentrancy lock on normal exit.
+        env.storage().temporary().remove(&reentrancy_lock_key());
     }
 
     /// Backwards-compatible alias for the expiry-driven refund path.
@@ -8664,6 +8731,13 @@ impl SplitContract {
     /// Cancel an invoice. Refunds any payments already made.
     /// Issue #89: If stake exists, distributes it equally among unique payers.
     pub fn cancel_invoice(env: Env, caller: Address, invoice_id: u64) {
+        // --- Reentrancy guard (issue #451-reentrancy) ---
+        let re_key = reentrancy_lock_key();
+        if env.storage().temporary().has(&re_key) {
+            panic!("{}", ContractError::ReentrantCall as u32);
+        }
+        env.storage().temporary().set(&re_key, &true);
+        // ------------------------------------------------
         require_not_paused(&env);
         caller.require_auth();
 
@@ -8843,6 +8917,8 @@ impl SplitContract {
                 .set(&creator_cooldown_key(&invoice.creator), &until_ledger);
             events::creator_cooldown_set(&env, &invoice.creator, until_ledger, cooldown_ledgers);
         }
+        // Clear reentrancy lock on normal exit.
+        env.storage().temporary().remove(&reentrancy_lock_key());
     }
 
     /// Transfer invoice ownership to a new creator.

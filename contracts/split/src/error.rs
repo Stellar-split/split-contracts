@@ -53,4 +53,8 @@ pub enum ContractError {
     MemoMismatch = 31,
     /// Issue #439: Creator is in cooldown after cancelling an invoice.
     CreatorCooldownActive = 31,
+    /// Reentrant call detected: a fund-moving function was invoked recursively
+    /// within the same transaction. Cleared automatically at transaction boundary
+    /// because the lock lives in temporary storage.
+    ReentrantCall = 33,
 }
