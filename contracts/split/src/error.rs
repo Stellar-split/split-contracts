@@ -47,4 +47,6 @@ pub enum ContractError {
     GroupMemberExpired = 30,
     /// Issue #451: payer-provided memo does not match the required memo hash.
     MemoMismatch = 31,
+    /// Issue #439: Creator is in cooldown after cancelling an invoice.
+    CreatorCooldownActive = 31,
 }
