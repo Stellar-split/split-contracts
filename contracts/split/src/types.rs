@@ -1,5 +1,8 @@
 use soroban_sdk::{contracttype, Address, Bytes, BytesN, Env, String, Symbol, Vec};
 
+/// Total basis points representing 100% — ratio vecs must sum to exactly this value.
+pub const BASIS_POINTS_TOTAL: u32 = 10_000;
+
 /// (base, quote) asset pair for oracle-priced invoices.
 #[contracttype]
 #[derive(Clone, Debug)]
@@ -330,6 +333,9 @@ pub struct InvoiceOptions {
     pub scheduled_release_at: Option<u64>,
     /// KYC verification requirement.
     pub require_kyc: bool,
+    /// Per-recipient split ratios in basis points (must sum to [`BASIS_POINTS_TOTAL`] = 10 000
+    /// when non-empty).  Empty vec means "no ratio constraint — use amounts directly."
+    pub ratios: Vec<u32>,
     /// Overflow fields that would otherwise push this struct past Soroban's
     /// 40-field `#[contracttype]` limit — see [`InvoiceOptions2`].
     pub ext: InvoiceOptions2,

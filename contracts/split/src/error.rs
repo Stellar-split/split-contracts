@@ -53,4 +53,8 @@ pub enum ContractError {
     MemoMismatch = 31,
     /// Issue #439: Creator is in cooldown after cancelling an invoice.
     CreatorCooldownActive = 31,
+    /// The provided ratios do not sum to exactly BASIS_POINTS_TOTAL (10 000).
+    InvalidRatioSum = 33,
+    /// The recipient/ratio list is empty; at least one entry is required.
+    EmptyRecipientList = 34,
 }
