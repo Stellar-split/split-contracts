@@ -930,6 +930,9 @@ pub fn escrow_resolved(env: &Env, invoice_id: u64, resolution_hash: &BytesN<32>)
             invoice_id,
         ),
         resolution_hash.clone(),
+    );
+}
+
 /// Issue #437: Emitted when a delayed payout is scheduled on release.
 /// Topics: (split, dlypay_s, invoice_id)
 /// Data: (recipient, claimable_at_ledger)
@@ -1015,5 +1018,19 @@ pub fn group_rollback_triggered(env: &Env, group_id: u64, member_count: u32) {
     env.events().publish(
         (symbol_short!("split"), symbol_short!("grp_roll"), group_id),
         member_count,
+    );
+}
+
+/// Issue #439: Emitted when a creator's cancellation cooldown is set.
+/// Topics: (split, cr_cool, creator)
+/// Data: (until_ledger, cooldown_ledgers)
+pub fn creator_cooldown_set(env: &Env, creator: &Address, until_ledger: u64, cooldown_ledgers: u64) {
+    env.events().publish(
+        (
+            symbol_short!("split"),
+            symbol_short!("cr_cool"),
+            creator.clone(),
+        ),
+        (until_ledger, cooldown_ledgers),
     );
 }

@@ -229,16 +229,6 @@ pub struct RepScore {
     pub invoices_refunded: u32,
 }
 
-/// Issue #437: A recipient with optional payout delay.
-#[contracttype]
-#[derive(Clone, Debug)]
-pub struct Recipient {
-    /// The recipient's address.
-    pub address: Address,
-    /// Optional payout delay in ledgers after release.
-    pub payout_delay_ledgers: Option<u32>,
-}
-
 /// Issue #431: Payment fingerprint for duplicate detection.
 #[contracttype]
 #[derive(Clone, Debug)]
@@ -365,6 +355,8 @@ pub struct InvoiceOptions2 {
     pub release_condition_hash: Option<BytesN<32>>,
     /// Issue #417: enable recipient whitelist enforcement for this invoice.
     pub recipient_whitelist_enabled: bool,
+    /// Issue #188: escrow hold period in ledgers.
+    pub escrow_hold_period: Option<u32>,
 }
 
 /// Legacy invoice layout used by stored invoices created before the `version`
@@ -1000,6 +992,11 @@ impl Invoice {
     /// Upgrade a legacy (pre-version) invoice to the current schema.
     /// New fields are filled with their default (empty / zero) values.
     pub fn from_legacy(old: LegacyInvoice, env: &Env) -> Self {
+        let funding_token = old
+            .tokens
+            .get(0)
+            .expect("no token")
+            .clone();
         Invoice {
             version: 2,
             creator: old.creator,
@@ -1008,11 +1005,7 @@ impl Invoice {
             base_amounts: old.amounts.clone(),
             amounts: old.amounts,
             tokens: old.tokens,
-            funding_token: old
-                .tokens
-                .get(0)
-                .expect("no token")
-                .clone(),
+            funding_token,
             deadline: old.deadline,
             funded: old.funded,
             status: old.status,
@@ -1298,6 +1291,8 @@ pub struct InstalmentPlan {
 pub struct FeeBracket {
     pub max_amount: i128,
     pub rate_bps: u32,
+}
+
 /// Issue #437: Delayed payout stored per recipient until claimable.
 #[contracttype]
 #[derive(Clone, Debug)]
