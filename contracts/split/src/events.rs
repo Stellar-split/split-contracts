@@ -930,6 +930,9 @@ pub fn escrow_resolved(env: &Env, invoice_id: u64, resolution_hash: &BytesN<32>)
             invoice_id,
         ),
         resolution_hash.clone(),
+    );
+}
+
 /// Issue #437: Emitted when a delayed payout is scheduled on release.
 /// Topics: (split, dlypay_s, invoice_id)
 /// Data: (recipient, claimable_at_ledger)

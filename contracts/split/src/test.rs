@@ -124,6 +124,7 @@ fn default_options(env: &Env) -> InvoiceOptions {
             recipient_max_payouts: None,
             release_condition_hash: None,
             recipient_whitelist_enabled: false,
+            escrow_hold_period: None,
         },
     }
 }
@@ -147,6 +148,7 @@ fn default_options2(_env: &Env) -> InvoiceOptions2 {
         recipient_max_payouts: None,
         release_condition_hash: None,
         recipient_whitelist_enabled: false,
+        escrow_hold_period: None,
     }
 }
 
@@ -211,6 +213,7 @@ fn invoice_options(
             recipient_max_payouts: None,
             release_condition_hash: None,
             recipient_whitelist_enabled: false,
+            escrow_hold_period: None,
         },
     }
 }

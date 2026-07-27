@@ -36,13 +36,13 @@ pub enum ContractError {
     AlreadyRated         = 24,
     RateLimitExceeded    = 25,
     /// Issue #438: Recipient reveal commitment does not match stored hash.
-    RecipientRevealMismatch = 23,
+    RecipientRevealMismatch = 26,
     /// Issue #437: Delayed payout is not yet claimable (before claimable_at_ledger).
-    PayoutNotYetClaimable = 24,
+    PayoutNotYetClaimable = 27,
     /// Issue #435: Contract is frozen for upgrade; write operations are blocked.
-    ContractFrozen = 25,
+    ContractFrozen = 28,
     /// Issue #431: Duplicate payment detected within the duplicate window.
-    DuplicatePayment = 26,
+    DuplicatePayment = 29,
     /// Issue #434: Invoice group member expired unfunded; group rollback triggered.
-    GroupMemberExpired = 27,
+    GroupMemberExpired = 30,
 }
