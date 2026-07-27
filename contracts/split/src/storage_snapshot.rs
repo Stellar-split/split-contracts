@@ -303,7 +303,10 @@ fn storage_key_snapshot() {
     // -----------------------------------------------------------------------
     // Compare against committed baseline
     // -----------------------------------------------------------------------
-    let baseline = include_str!("../../../tests/snapshots/storage_keys.json");
+    // Normalise line endings: on Windows checkouts git may materialise the
+    // baseline with CRLF, while `generated` is always joined with "\n".
+    let baseline = include_str!("../../../tests/snapshots/storage_keys.json").replace("\r\n", "\n");
+    let baseline = baseline.as_str();
 
     if generated != baseline {
         panic!(
