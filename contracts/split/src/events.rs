@@ -956,6 +956,7 @@ pub fn escrow_resolved(env: &Env, invoice_id: u64, resolution_hash: &BytesN<32>)
 /// Issue #437: Emitted when a delayed payout is scheduled on release.
 /// Topics: (split, dlypay_s, invoice_id)
 /// Data: (recipient, claimable_at_ledger)
+#[allow(dead_code)]
 pub fn delayed_payout_scheduled(
     env: &Env,
     invoice_id: u64,
@@ -1017,6 +1018,7 @@ pub fn contract_thawed(env: &Env, admin: &Address) {
 /// Issue #431: Emitted when a duplicate payment is detected and rejected.
 /// Topics: (split, dup_pay, invoice_id)
 /// Data: (payer, amount, fingerprint_hash)
+#[allow(dead_code)]
 pub fn duplicate_payment_rejected(
     env: &Env,
     invoice_id: u64,
@@ -1033,6 +1035,7 @@ pub fn duplicate_payment_rejected(
 /// Issue #432: Emitted when a referrer receives a reward share.
 /// Topics: (split, ref_rwd, invoice_id)
 /// Data: (referrer, amount)
+#[allow(dead_code)]
 pub fn referrer_rewarded(env: &Env, invoice_id: u64, referrer: &Address, amount: i128) {
     env.events().publish(
         (symbol_short!("split"), symbol_short!("ref_rwd"), invoice_id),
@@ -1043,6 +1046,7 @@ pub fn referrer_rewarded(env: &Env, invoice_id: u64, referrer: &Address, amount:
 /// Issue #434: Emitted when a group member expires unfunded.
 /// Topics: (split, grp_exp, invoice_id)
 /// Data: group_id
+#[allow(dead_code)]
 pub fn group_member_expired(env: &Env, invoice_id: u64, group_id: u64) {
     env.events().publish(
         (symbol_short!("split"), symbol_short!("grp_exp"), invoice_id),
@@ -1053,6 +1057,7 @@ pub fn group_member_expired(env: &Env, invoice_id: u64, group_id: u64) {
 /// Issue #434: Emitted when a group rollback is triggered.
 /// Topics: (split, grp_roll, group_id)
 /// Data: member_count
+#[allow(dead_code)]
 pub fn group_rollback_triggered(env: &Env, group_id: u64, member_count: u32) {
     env.events().publish(
         (symbol_short!("split"), symbol_short!("grp_roll"), group_id),

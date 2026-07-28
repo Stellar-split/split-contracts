@@ -19,6 +19,26 @@ pub enum OverflowBehavior {
     Donate,
 }
 
+/// Issue #420: creator-configurable behaviour when a payment would push an
+/// invoice's `funded` total past its target.
+///
+/// This is the authority for overfunding decisions in `_pay`. `Cap` — the
+/// default, and the value legacy invoices are migrated to — preserves the
+/// historical behaviour by delegating to the per-invoice [`OverflowBehavior`]
+/// setting, so invoices created before this field existed are unaffected.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum OverfundingPolicy {
+    /// Reject any payment that would take `funded` past the invoice total.
+    Cap,
+    /// Accept the payment in full; `funded` is allowed to exceed the total and
+    /// the surplus is distributed pro-rata to recipients at release time.
+    AcceptAll,
+    /// Accept only the portion that fits under the total and immediately
+    /// transfer the remainder back to the payer.
+    ReturnSurplus,
+}
+
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct CloneOverrides {
@@ -400,6 +420,10 @@ pub struct InvoiceOptions2 {
     pub recipient_whitelist_enabled: bool,
     /// Issue #188: escrow hold period in ledgers.
     pub escrow_hold_period: Option<u32>,
+    /// Issue #420: how overfunding payments are handled. Use `Cap` for the
+    /// historical behaviour. (Not `Option`-wrapped: `#[contracttype]` cannot
+    /// derive the `ScVal` conversions for `Option<CustomEnum>`.)
+    pub overfunding_policy: OverfundingPolicy,
     /// Issue #489: number of ledgers after creation during which contributions
     /// qualify for the discounted `early_bird_fee_bps` platform fee. 0 disables
     /// the early-bird discount entirely.
@@ -565,6 +589,8 @@ pub struct InvoiceExt2 {
     pub release_condition_hash: Option<BytesN<32>>,
     /// Issue #417: recipient whitelist enforcement flag.
     pub recipient_whitelist_enabled: bool,
+    /// Issue #420: creator-configurable overfunding behaviour.
+    pub overfunding_policy: OverfundingPolicy,
     /// Issue #485: optional contributor allowlist; when Some only listed addresses may call pay/contribute.
     pub contributor_allowlist: Option<Vec<Address>>,
     /// Issue #489: ledgers after creation during which contributions qualify
@@ -753,6 +779,8 @@ pub struct Invoice {
     pub release_condition_hash: Option<BytesN<32>>,
     /// Issue #417: recipient whitelist enforcement flag.
     pub recipient_whitelist_enabled: bool,
+    /// Issue #420: creator-configurable overfunding behaviour.
+    pub overfunding_policy: OverfundingPolicy,
     pub predecessor_id: Option<u64>,
     /// Issue #485: optional contributor allowlist; when Some only listed addresses may call pay/contribute.
     pub contributor_allowlist: Option<Vec<Address>>,
@@ -867,6 +895,7 @@ impl Invoice {
                 twafr_last_ledger: self.twafr_last_ledger,
                 release_condition_hash: self.release_condition_hash,
                 recipient_whitelist_enabled: self.recipient_whitelist_enabled,
+                overfunding_policy: self.overfunding_policy,
                 contributor_allowlist: self.contributor_allowlist,
                 early_bird_window_ledgers: self.early_bird_window_ledgers,
                 early_bird_fee_bps: self.early_bird_fee_bps,
@@ -969,6 +998,7 @@ impl Invoice {
             twafr_last_ledger: ext2.twafr_last_ledger,
             release_condition_hash: ext2.release_condition_hash,
             recipient_whitelist_enabled: ext2.recipient_whitelist_enabled,
+            overfunding_policy: ext2.overfunding_policy,
             contributor_allowlist: ext2.contributor_allowlist,
             early_bird_window_ledgers: ext2.early_bird_window_ledgers,
             early_bird_fee_bps: ext2.early_bird_fee_bps,
@@ -1209,6 +1239,10 @@ impl Invoice {
             twafr_last_ledger: 0,
             release_condition_hash: None,
             recipient_whitelist_enabled: false,
+            // Issue #420: legacy invoices predate the policy field; `Cap`
+            // delegates to `overflow_behavior` and so preserves their
+            // original overfunding semantics exactly.
+            overfunding_policy: OverfundingPolicy::Cap,
             predecessor_id: None,
             contributor_allowlist: None,
             early_bird_window_ledgers: 0,

@@ -52,6 +52,10 @@ pub enum ContractError {
     /// Issue #451: payer-provided memo does not match the required memo hash.
     MemoMismatch = 33,
     /// Issue #439: Creator is in cooldown after cancelling an invoice.
+    CreatorCooldownActive = 34,
+    /// Issue #420: Payment rejected because the invoice's `Cap` overfunding
+    /// policy does not allow `funded` to exceed the invoice total.
+    InvoiceFullyFunded = 35,
     CreatorCooldownActive = 31,
     /// The provided ratios do not sum to exactly BASIS_POINTS_TOTAL (10 000).
     InvalidRatioSum = 33,

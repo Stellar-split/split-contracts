@@ -61,6 +61,10 @@ use types::{
     CreateInvoiceParams, CreatorStats, DelayedPayout, DisputeOutcome, DisputeRecord, DisputeStatus,
     FeeBracket, FeeTier, InstalmentPlan, Invoice, InvoiceCore, InvoiceExt, InvoiceExt2,
     InvoiceExt3, InvoiceHot, InvoiceOptions, InvoiceOptions2, InvoicePayment, InvoiceStatus,
+    InvoiceTemplate, LegacyInvoice, OverflowBehavior, OverfundingPolicy, Payment,
+    PaymentCertificate, PaymentCommitment, PaymentProof, ProtocolFeeConfig, QueuedAction,
+    RebateTier, Recipient, RepScore, ResolveAction, ResolveRule, SimulateReleaseResult, SplitRule,
+    SubscriptionParams, TimelockAction, Tranche, TreasuryRecord, UpgradeProposal,
     InvoiceTemplate, LegacyInvoice, OverflowBehavior, Payment, PaymentCertificate,
     PaymentCommitment, PaymentProof, ProtocolFeeConfig, QueuedAction, RebateTier, Recipient,
     RepScore, ResolveAction, ResolveRule, SimulateReleaseResult, SplitRule, SubscriptionParams,
@@ -1131,6 +1135,9 @@ fn anonymous_recipients_key(invoice_id: u64) -> (Symbol, u64) {
 }
 
 /// Issue #438: recipient commitment hash — persistent storage (invoice_id, index).
+// Issue #438: storage key for the recipient reveal scheme; the reveal entry
+// point that consumes it is not wired up yet.
+#[allow(dead_code)]
 fn recipient_commitment_key(invoice_id: u64, index: u32) -> (Symbol, u64, u32) {
     (symbol_short!("rec_cmt"), invoice_id, index)
 }
@@ -1156,6 +1163,9 @@ fn upgrade_checkpoint_key() -> Symbol {
 }
 
 /// Issue #431: duplicate payment fingerprint — persistent storage (with TTL).
+// Issue #431: duplicate-payment detection is implemented below but not yet
+// called from the payment path.
+#[allow(dead_code)]
 fn payment_fingerprint_key(fingerprint_hash: &BytesN<32>) -> (Symbol, BytesN<32>) {
     (symbol_short!("dup_fp"), fingerprint_hash.clone())
 }
@@ -1186,6 +1196,7 @@ fn invoice_group_id_key(invoice_id: u64) -> (Symbol, u64) {
 }
 
 /// Issue #434: group counter — instance storage.
+#[allow(dead_code)]
 fn group_counter_key() -> Symbol {
     symbol_short!("grp_ctr")
 }
@@ -1210,6 +1221,28 @@ fn bump_invoice_ttl(env: &Env) {
     env.storage()
         .instance()
         .extend_ttl(INVOICE_HOT_TTL_LEDGERS / 2, INVOICE_HOT_TTL_LEDGERS);
+}
+
+/// Extend the TTL of an invoice's *persistent* entries.
+///
+/// [`bump_invoice_ttl`] only covers the instance bucket, but core/ext/ext2 and
+/// the compact overlay live in persistent storage — without this they archive
+/// out from under an invoice that is still being paid.
+fn bump_invoice_entry_ttl(env: &Env, id: u64) {
+    // Clamp to the network's ceiling rather than relying on the host to do it.
+    let extend_to = INVOICE_HOT_TTL_LEDGERS.min(env.storage().max_ttl());
+    let threshold = extend_to / 2;
+    let storage = env.storage().persistent();
+    for key in [
+        invoice_key(id),
+        invoice_ext_key(id),
+        invoice_ext2_key(id),
+        invoice_compact_key(id),
+    ] {
+        if storage.has(&key) {
+            storage.extend_ttl(&key, threshold, extend_to);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1298,6 +1331,7 @@ fn archive_invoice_storage(env: &Env, id: u64, core: &InvoiceCore) {
             twafr_last_ledger: 0,
             release_condition_hash: None,
             recipient_whitelist_enabled: false,
+            overfunding_policy: OverfundingPolicy::Cap,
             contributor_allowlist: None,
             early_bird_window_ledgers: 0,
             early_bird_fee_bps: 0,
@@ -1373,9 +1407,14 @@ fn maybe_archive_invoice(env: &Env, id: u64) {
         return;
     }
 
-    let created_ledger: u64 = env
+    // Stored as a u32 ledger sequence by every writer — read it as one and
+    // widen here, rather than asking the host for a u64 it never wrote.
+    let created_ledger: u32 = env
         .storage()
         .persistent()
+        .get(&created_ledger_key(id))
+        .or_else(|| env.storage().instance().get(&created_ledger_key(id)))
+        .unwrap_or_else(|| env.ledger().sequence());
         .get::<_, u32>(&created_ledger_key(id))
         .or_else(|| env.storage().instance().get::<_, u32>(&created_ledger_key(id)))
         .unwrap_or_else(|| env.ledger().sequence()) as u64;
@@ -1384,7 +1423,7 @@ fn maybe_archive_invoice(env: &Env, id: u64) {
         .instance()
         .get(&archive_after_ledgers_key())
         .unwrap_or(ARCHIVE_AFTER_LEDGERS);
-    if (env.ledger().sequence() as u64).saturating_sub(created_ledger) < archive_after {
+    if (env.ledger().sequence() as u64).saturating_sub(created_ledger as u64) < archive_after {
         return;
     }
 
@@ -1509,6 +1548,7 @@ fn load_invoice(env: &Env, id: u64) -> Invoice {
             twafr_last_ledger: 0,
             release_condition_hash: None,
             recipient_whitelist_enabled: false,
+            overfunding_policy: OverfundingPolicy::Cap,
             contributor_allowlist: None,
             early_bird_window_ledgers: 0,
             early_bird_fee_bps: 0,
@@ -1645,6 +1685,20 @@ fn save_invoice(env: &Env, id: u64, invoice: &Invoice) {
     save_compact_status(env, id, &invoice.status);
 
     bump_invoice_ttl(env);
+    bump_invoice_entry_ttl(env, id);
+}
+
+/// Issue #420: persist a creator-selected overfunding policy on a freshly
+/// created invoice. `None` leaves the invoice on the default `Cap` policy, so
+/// callers that never set the option pay no storage cost.
+fn apply_overfunding_policy(env: &Env, id: u64, policy: OverfundingPolicy) {
+    // `Cap` is already what the invoice was created with, so writing it back
+    // would only burn a storage write.
+    if policy != OverfundingPolicy::Cap {
+        let mut invoice = load_invoice(env, id);
+        invoice.overfunding_policy = policy;
+        save_invoice(env, id, &invoice);
+    }
 }
 
 fn funding_token_for(invoice: &Invoice) -> Address {
@@ -2164,6 +2218,7 @@ fn require_role(env: &Env, caller: &Address, roles: &[Role]) {
 const DEFAULT_DUPLICATE_WINDOW_LEDGERS: u32 = 100;
 
 /// Compute payment fingerprint hash: sha256(invoice_id || payer || amount || ledger).
+#[allow(dead_code)]
 fn compute_payment_fingerprint(
     env: &Env,
     invoice_id: u64,
@@ -2190,6 +2245,7 @@ fn compute_payment_fingerprint(
 }
 
 /// Check if payment fingerprint exists (duplicate detection).
+#[allow(dead_code)]
 fn check_duplicate_payment(env: &Env, fingerprint: &BytesN<32>) -> bool {
     env.storage()
         .persistent()
@@ -2197,6 +2253,7 @@ fn check_duplicate_payment(env: &Env, fingerprint: &BytesN<32>) -> bool {
 }
 
 /// Record payment fingerprint with TTL.
+#[allow(dead_code)]
 fn record_payment_fingerprint(env: &Env, fingerprint: &BytesN<32>, current_ledger: u32) {
     let window_ledgers: u32 = env
         .storage()
@@ -2218,6 +2275,9 @@ fn record_payment_fingerprint(env: &Env, fingerprint: &BytesN<32>, current_ledge
 // ---------------------------------------------------------------------------
 
 /// Set referrer reward percentage (admin-only via separate call).
+// Issue #432: referral rewards are stored and read here, but no contract entry
+// point exposes them yet.
+#[allow(dead_code)]
 fn set_referrer_reward_bps(env: &Env, reward_bps: u32) {
     assert!(reward_bps <= 10_000, "reward_bps must be ≤ 10000");
     env.storage()
@@ -2226,6 +2286,7 @@ fn set_referrer_reward_bps(env: &Env, reward_bps: u32) {
 }
 
 /// Get current referrer reward percentage.
+#[allow(dead_code)]
 fn get_referrer_reward_bps(env: &Env) -> u32 {
     env.storage()
         .instance()
@@ -2238,6 +2299,7 @@ fn get_referrer_reward_bps(env: &Env) -> u32 {
 // ---------------------------------------------------------------------------
 
 /// Create a new invoice group and assign group_id to all members.
+#[allow(dead_code)]
 fn create_group_for_invoices(env: &Env, invoice_ids: &Vec<u64>) -> u64 {
     let group_id: u64 = env
         .storage()
@@ -3259,6 +3321,7 @@ impl SplitContract {
                         twafr_last_ledger: 0,
                         release_condition_hash: None,
                         recipient_whitelist_enabled: false,
+                        overfunding_policy: types::OverfundingPolicy::Cap,
                         contributor_allowlist: None,
             contributor_allowlist: None,
                         early_bird_window_ledgers: 0,
@@ -3450,7 +3513,7 @@ impl SplitContract {
         plan: InstalmentPlan,
     ) {
         payer.require_auth();
-        assert!(plan.tranches.len() > 0, "tranches must not be empty");
+        assert!(!plan.tranches.is_empty(), "tranches must not be empty");
         let mut prev_ledger = 0;
         for i in 0..plan.tranches.len() {
             let t = plan.tranches.get(i).unwrap();
@@ -3494,7 +3557,7 @@ impl SplitContract {
     pub fn set_fee_brackets(env: Env, admin: Address, brackets: Vec<FeeBracket>) {
         let _admin_addr = require_admin(&env);
         let _ = admin;
-        assert!(brackets.len() > 0, "brackets must not be empty");
+        assert!(!brackets.is_empty(), "brackets must not be empty");
         let mut prev_max = -1;
         for i in 0..brackets.len() {
             let b = brackets.get(i).unwrap();
@@ -3895,6 +3958,11 @@ impl SplitContract {
             assert!(balance > 0, "nft gate: not a holder");
         }
 
+        // Issue #420: captured before `options` is consumed below; applied to the
+        // stored invoice once `_create_invoice_inner` has allocated its id.
+        let overfunding_policy = options.ext.overfunding_policy.clone();
+
+        let id = Self::_create_invoice_inner(
         // Validate split ratios (if provided) before any storage is touched.
         if !options.ratios.is_empty() {
             if let Err(e) = validate_ratios(&options.ratios) {
@@ -3963,6 +4031,10 @@ impl SplitContract {
             options.ext.recipient_max_payouts,
             options.ext.recipient_whitelist_enabled,
             options.ext.release_condition_hash,
+        );
+
+        apply_overfunding_policy(&env, id, overfunding_policy);
+        id
             options.ext.early_bird_window_ledgers,
             options.ext.early_bird_fee_bps,
         )
@@ -4021,7 +4093,11 @@ impl SplitContract {
         }
         creator.require_auth();
         Self::_apply_rate_limit(&env, &creator);
-        Self::_create_invoice_inner(
+
+        // Issue #420: see `create_invoice` — captured before `options` is consumed.
+        let overfunding_policy = options.ext.overfunding_policy.clone();
+
+        let id = Self::_create_invoice_inner(
             &env,
             creator,
             recipient_addrs,
@@ -4082,6 +4158,10 @@ impl SplitContract {
             options.ext.recipient_max_payouts,
             options.ext.recipient_whitelist_enabled,
             options.ext.release_condition_hash,
+        );
+
+        apply_overfunding_policy(&env, id, overfunding_policy);
+        id
             options.ext.early_bird_window_ledgers,
             options.ext.early_bird_fee_bps,
         )
@@ -4404,6 +4484,11 @@ impl SplitContract {
             .unwrap_or(0u64)
             + 1;
         env.storage().persistent().set(&counter_key(), &id);
+        // Record the creation ledger, as the clone and rollover paths do —
+        // TWAFR and archival both measure elapsed time from it.
+        env.storage()
+            .persistent()
+            .set(&created_ledger_key(id), &env.ledger().sequence());
         set_created_ledger(env, id);
 
         // Funding checkpoint progress starts at 0 for each new invoice.
@@ -4614,6 +4699,10 @@ impl SplitContract {
             twafr_last_ledger: 0,
             release_condition_hash,
             recipient_whitelist_enabled,
+            // Issue #420: `_create_invoice_inner` has no options struct; the
+            // creator's choice is applied by the `create_invoice*` wrappers
+            // right after this returns. `Cap` is the default.
+            overfunding_policy: OverfundingPolicy::Cap,
             predecessor_id: None,
             contributor_allowlist: None,
             early_bird_window_ledgers,
@@ -5211,6 +5300,8 @@ impl SplitContract {
             twafr_last_ledger: 0,
             release_condition_hash: source.release_condition_hash.clone(),
             recipient_whitelist_enabled: source.recipient_whitelist_enabled,
+            // Issue #420: a clone inherits the source invoice's policy.
+            overfunding_policy: source.overfunding_policy.clone(),
             predecessor_id: None,
             contributor_allowlist: source.contributor_allowlist.clone(),
             early_bird_window_ledgers: source.early_bird_window_ledgers,
@@ -5475,6 +5566,13 @@ impl SplitContract {
             commit_ledger: env.ledger().sequence(),
         };
         env.storage().persistent().set(&key, &commitment);
+        // Keep the entry readable well past its expiry window, so a late
+        // reveal reports `CommitmentExpired` instead of faulting on an
+        // archived storage entry.
+        let keep_alive = current_commitment_expiry(&env).saturating_mul(2);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, keep_alive, keep_alive);
         // Keep the commitment entry alive at least through its expiry window so
         // an expired commitment surfaces the intended "CommitmentExpired" business
         // error in reveal_payment rather than a storage-archival host error.
@@ -5728,10 +5826,14 @@ impl SplitContract {
                     .set(&accum_key(invoice_id, payer), &accumulator);
                 return;
             }
-            assert!(
-                accumulator <= remaining,
-                "payment exceeds remaining balance"
-            );
+            // Issue #420: only `Cap` invoices reject an over-target flush here;
+            // `AcceptAll` and `ReturnSurplus` handle the excess further below.
+            if invoice.overfunding_policy == OverfundingPolicy::Cap {
+                assert!(
+                    accumulator <= remaining,
+                    "InvoiceFullyFunded: payment exceeds remaining balance"
+                );
+            }
             env.storage()
                 .persistent()
                 .remove(&accum_key(invoice_id, payer));
@@ -5813,25 +5915,45 @@ impl SplitContract {
 
         let token_client = token::Client::new(env, &funding_token_for(&invoice));
 
-        let credited_amount = match invoice.overflow_behavior {
-            OverflowBehavior::Reject => {
-                assert!(amount <= remaining, "payment exceeds remaining balance");
-                amount
+        // Issue #420: `overfunding_policy` decides what happens when this payment
+        // would push `funded` past `total`. `Cap` — the default and the value all
+        // pre-#420 invoices carry — delegates to the legacy `overflow_behavior`
+        // setting so existing invoices behave exactly as before.
+        let credited_amount = match invoice.overfunding_policy {
+            // Credit the full payment. `funded` may exceed `total`; the surplus is
+            // distributed pro-rata at release because `_release_full` apportions
+            // `funded` (not `total`) across recipients.
+            OverfundingPolicy::AcceptAll => amount,
+            // Credit only what fits under the target; the remainder is transferred
+            // straight back to the payer below.
+            OverfundingPolicy::ReturnSurplus => {
+                // `remaining` can be negative if an earlier `AcceptAll` phase
+                // overshot the target, so clamp before comparing.
+                amount.min(remaining.max(0))
             }
-            OverflowBehavior::Refund => {
-                if amount <= remaining {
+            OverfundingPolicy::Cap => match invoice.overflow_behavior {
+                OverflowBehavior::Reject => {
+                    assert!(
+                        amount <= remaining,
+                        "InvoiceFullyFunded: payment exceeds remaining balance"
+                    );
                     amount
-                } else {
-                    remaining
                 }
-            }
-            OverflowBehavior::Donate => {
-                if amount <= remaining {
-                    amount
-                } else {
-                    remaining
+                OverflowBehavior::Refund => {
+                    if amount <= remaining {
+                        amount
+                    } else {
+                        remaining
+                    }
                 }
-            }
+                OverflowBehavior::Donate => {
+                    if amount <= remaining {
+                        amount
+                    } else {
+                        remaining
+                    }
+                }
+            },
         };
 
         let premium =
@@ -5840,19 +5962,25 @@ impl SplitContract {
         let excess = amount - credited_amount;
         let total_charge = credited_amount + premium + excess;
         token_client.transfer(payer, &env.current_contract_address(), &total_charge);
-        match invoice.overflow_behavior {
-            OverflowBehavior::Refund if excess > 0 => {
-                token_client.transfer(&env.current_contract_address(), payer, &excess);
+        // Issue #420: `ReturnSurplus` refunds the uncredited remainder immediately,
+        // regardless of the legacy `overflow_behavior` setting.
+        if invoice.overfunding_policy == OverfundingPolicy::ReturnSurplus && excess > 0 {
+            token_client.transfer(&env.current_contract_address(), payer, &excess);
+        } else {
+            match invoice.overflow_behavior {
+                OverflowBehavior::Refund if excess > 0 => {
+                    token_client.transfer(&env.current_contract_address(), payer, &excess);
+                }
+                OverflowBehavior::Donate if excess > 0 => {
+                    let treasury: Address = env
+                        .storage()
+                        .instance()
+                        .get(&treasury_key())
+                        .expect("treasury not set");
+                    token_client.transfer(&env.current_contract_address(), &treasury, &excess);
+                }
+                _ => {}
             }
-            OverflowBehavior::Donate if excess > 0 => {
-                let treasury: Address = env
-                    .storage()
-                    .instance()
-                    .get(&treasury_key())
-                    .expect("treasury not set");
-                token_client.transfer(&env.current_contract_address(), &treasury, &excess);
-            }
-            _ => {}
         }
 
         invoice.insurance_fund += premium;
@@ -6472,6 +6600,7 @@ impl SplitContract {
     /// For tranche invoices, only distributes tranches whose timestamp ≤ now.
     /// Blocks with "prerequisite not released" until the prerequisite invoice is Released.
     /// If an approver is set, requires the invoice to be approved first (issue #25).
+    pub fn release_invoice(env: Env, _caller: Address, invoice_id: u64, preimage: Option<Bytes>) {
     pub fn release_invoice(
         env: Env,
         caller: Address,
@@ -7147,6 +7276,41 @@ impl SplitContract {
         append_audit_entry(&env, invoice_id, symbol_short!("rel_cond"), &creator);
     }
 
+    /// Issue #420: Set the overfunding policy for an invoice.
+    ///
+    /// Only the creator may call this, and only while the invoice is still
+    /// `Pending` and unfunded — changing the rule mid-funding would apply
+    /// different terms to payers who have already paid.
+    pub fn set_overfunding_policy(
+        env: Env,
+        creator: Address,
+        invoice_id: u64,
+        policy: OverfundingPolicy,
+    ) {
+        require_not_paused(&env);
+        creator.require_auth();
+
+        let mut invoice = load_invoice(&env, invoice_id);
+        assert!(
+            invoice.creator == creator,
+            "only creator can set overfunding policy"
+        );
+        assert!(
+            invoice.status == InvoiceStatus::Pending,
+            "invoice is not pending"
+        );
+        assert!(invoice.funded == 0, "invoice already funded");
+
+        invoice.overfunding_policy = policy;
+        save_invoice(&env, invoice_id, &invoice);
+        append_audit_entry(&env, invoice_id, symbol_short!("ovrfund"), &creator);
+    }
+
+    /// Issue #420: Read the overfunding policy currently in force for an invoice.
+    pub fn get_overfunding_policy(env: Env, invoice_id: u64) -> OverfundingPolicy {
+        load_invoice(&env, invoice_id).overfunding_policy
+    }
+
     /// Issue #330: Release funds to a single recipient by their share.
     ///
     /// The invoice must be fully funded. Each recipient can only be paid once via
@@ -7638,7 +7802,7 @@ impl SplitContract {
         let new_bps = unlocked_bps.saturating_sub(invoice.released_bps);
         assert!(new_bps > 0, "no tranches unlocked");
 
-        let funding_token_client = token::Client::new(env, &funding_token_for(&invoice));
+        let funding_token_client = token::Client::new(env, &funding_token_for(invoice));
 
         let creator_waived: bool = {
             let cfw: Vec<Address> = env
@@ -9069,7 +9233,12 @@ impl SplitContract {
         );
     }
 
-    /// Refund all payers after the invoice has been marked expired.
+    /// Refund all payers once the invoice has expired.
+    ///
+    /// Accepts an invoice already marked `Expired` via `notify_expired`, and
+    /// also lazily expires a `Pending` invoice whose deadline (plus any
+    /// `refund_grace_secs`) has passed — callers should not have to make a
+    /// separate `notify_expired` call just to unlock their funds.
     pub fn refund(env: Env, invoice_id: u64) {
         // --- Reentrancy guard (issue #451-reentrancy) ---
         let re_key = reentrancy_lock_key();
@@ -9081,6 +9250,12 @@ impl SplitContract {
         require_fn_not_paused(&env, &symbol_short!("refund"));
         let mut invoice = load_invoice(&env, invoice_id);
 
+        if invoice.status == InvoiceStatus::Pending {
+            let refund_deadline = match invoice.refund_grace_secs {
+                Some(grace_secs) => invoice.deadline.saturating_add(grace_secs),
+                None => invoice.deadline,
+            };
+            assert!(env.ledger().timestamp() > refund_deadline, "InvalidStatus");
         // Lazy expiry: a Pending invoice past its deadline is treated as
         // Expired without requiring a separate notify_expired() call first.
         if invoice.status == InvoiceStatus::Pending && env.ledger().timestamp() >= invoice.deadline {
@@ -9370,6 +9545,8 @@ impl SplitContract {
             twafr_last_ledger: 0,
             release_condition_hash: None,
             recipient_whitelist_enabled: false,
+            // Issue #420: carried over alongside `overflow_behavior`.
+            overfunding_policy: old_invoice.overfunding_policy.clone(),
             contributor_allowlist: None,
             predecessor_id: Some(old_invoice_id),
             early_bird_window_ledgers: old_invoice.early_bird_window_ledgers,
@@ -9432,6 +9609,7 @@ impl SplitContract {
             invoice.status == InvoiceStatus::Released,
             "invoice is not released"
         );
+        assert!((1..=5).contains(&score), "InvalidRating");
         assert!(score >= 1 && score <= 5, "InvalidRating");
         assert!(
             Self::get_payer_total(env.clone(), invoice_id, payer.clone()) > 0,
@@ -10574,7 +10752,10 @@ impl SplitContract {
 
     pub fn get_twafr(env: Env, invoice_id: u64) -> i128 {
         let invoice = load_invoice(&env, invoice_id);
-        if invoice.payments.is_empty() {
+        // Payments live in sharded storage (issue #177), so `invoice.payments`
+        // is always empty — `twafr_last_ledger` is what actually records
+        // whether any payment has been accumulated.
+        if invoice.twafr_last_ledger == 0 {
             return 0;
         }
         let creation_ledger: u32 = env
@@ -10643,12 +10824,12 @@ impl SplitContract {
             .persistent()
             .get(&invoice_phase_key(invoice_id))
             .unwrap_or(types::InvoicePhase::Draft);
-        let valid = match (&current_phase, &new_phase) {
-            (types::InvoicePhase::Draft, types::InvoicePhase::Active) => true,
-            (types::InvoicePhase::Active, types::InvoicePhase::Locked) => true,
-            (types::InvoicePhase::Locked, types::InvoicePhase::Released) => true,
-            _ => false,
-        };
+        let valid = matches!(
+            (&current_phase, &new_phase),
+            (types::InvoicePhase::Draft, types::InvoicePhase::Active)
+                | (types::InvoicePhase::Active, types::InvoicePhase::Locked)
+                | (types::InvoicePhase::Locked, types::InvoicePhase::Released)
+        );
         assert!(valid, "InvalidPhaseTransition");
         env.storage()
             .persistent()
@@ -11015,6 +11196,7 @@ impl SplitContract {
                 twafr_last_ledger: 0,
                 release_condition_hash: None,
                 recipient_whitelist_enabled: false,
+                overfunding_policy: OverfundingPolicy::Cap,
                 contributor_allowlist: None,
             contributor_allowlist: None,
                 early_bird_window_ledgers: 0,
@@ -11138,6 +11320,7 @@ impl SplitContract {
                         twafr_last_ledger: 0,
                         release_condition_hash: None,
                         recipient_whitelist_enabled: false,
+                        overfunding_policy: OverfundingPolicy::Cap,
                         contributor_allowlist: None,
             contributor_allowlist: None,
                         early_bird_window_ledgers: 0,
@@ -11383,7 +11566,7 @@ impl SplitContract {
             return;
         }
 
-        let now = env.ledger().sequence() as u32;
+        let now = env.ledger().sequence();
         let timestamps: Vec<u32> = env
             .storage()
             .persistent()
@@ -11418,7 +11601,7 @@ impl SplitContract {
             return;
         }
 
-        let now = env.ledger().sequence() as u32;
+        let now = env.ledger().sequence();
         let timestamps: Vec<u32> = env
             .storage()
             .persistent()
@@ -12731,6 +12914,8 @@ impl SplitContract {
 
     /// Rollback a group: set all members to Refunded and process refunds.
     /// Internal function called when a group member expires.
+    // Issue #434: group rollback is not yet triggered from the expiry path.
+    #[allow(dead_code)]
     fn rollback_invoice_group(env: &Env, group_id: u64) {
         let members = get_group_members(env, group_id);
 

@@ -1,5 +1,8 @@
 #![cfg(test)]
 #![allow(clippy::all)]
+// Reference-model helpers kept alongside the properties they support; not every
+// one is referenced by the currently-enabled proptest cases.
+#![allow(dead_code)]
 
 extern crate std;
 
