@@ -106,6 +106,7 @@ fn default_options(env: &Env) -> InvoiceOptions {
         priorities: Vec::new(env),
         require_kyc: false,
         scheduled_release_at: None,
+        ratios: Vec::new(env),
         ext: types::InvoiceOptions2 {
             target_usd_cents: None,
             payment_token: None,
@@ -199,6 +200,7 @@ fn invoice_options(
         priorities: Vec::new(env),
         require_kyc: false,
         scheduled_release_at: None,
+        ratios: Vec::new(env),
         ext: types::InvoiceOptions2 {
             target_usd_cents: None,
             payment_token: None,
@@ -9822,6 +9824,117 @@ fn test_milestones_auto_release() {
     assert_eq!(c.get_invoice(&id).status, InvoiceStatus::Released);
 }
 
+// ---------------------------------------------------------------------------
+// validate_ratios unit tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_validate_ratios_exact_sum_accepted() {
+    // A single entry of 10 000 must be accepted.
+    let env = Env::default();
+    let mut ratios: Vec<u32> = Vec::new(&env);
+    ratios.push_back(10_000u32);
+    assert!(validate_ratios(&ratios).is_ok());
+}
+
+#[test]
+fn test_validate_ratios_multi_entry_accepted() {
+    // Multiple entries summing to exactly 10 000 must be accepted.
+    let env = Env::default();
+    let mut ratios: Vec<u32> = Vec::new(&env);
+    ratios.push_back(5_000u32);
+    ratios.push_back(3_000u32);
+    ratios.push_back(2_000u32);
+    assert!(validate_ratios(&ratios).is_ok());
+}
+
+#[test]
+fn test_validate_ratios_under_sum_rejected() {
+    // Sum < 10 000 must return InvalidRatioSum.
+    let env = Env::default();
+    let mut ratios: Vec<u32> = Vec::new(&env);
+    ratios.push_back(4_000u32);
+    ratios.push_back(4_000u32); // sum = 8 000
+    assert_eq!(
+        validate_ratios(&ratios),
+        Err(ContractError::InvalidRatioSum)
+    );
+}
+
+#[test]
+fn test_validate_ratios_over_sum_rejected() {
+    // Sum > 10 000 must return InvalidRatioSum.
+    let env = Env::default();
+    let mut ratios: Vec<u32> = Vec::new(&env);
+    ratios.push_back(6_000u32);
+    ratios.push_back(6_000u32); // sum = 12 000
+    assert_eq!(
+        validate_ratios(&ratios),
+        Err(ContractError::InvalidRatioSum)
+    );
+}
+
+#[test]
+fn test_validate_ratios_empty_rejected() {
+    // An empty ratios vec must return EmptyRecipientList.
+    let env = Env::default();
+    let ratios: Vec<u32> = Vec::new(&env);
+    assert_eq!(
+        validate_ratios(&ratios),
+        Err(ContractError::EmptyRecipientList)
+    );
+}
+
+#[test]
+fn test_create_invoice_valid_ratios_accepted() {
+    // create_invoice with a valid ratios vec (sums to 10 000) should succeed.
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    set_ledger(&env, 1, 1_000);
+
+    let mut ratios: Vec<u32> = Vec::new(&env);
+    ratios.push_back(10_000u32);
+
+    let mut opts = default_options(&env);
+    opts.ratios = ratios;
+
+    let id = c.create_invoice(
+        &creator,
+        &one_address_vec(&env, &recipient),
+        &one_amount_vec(&env, 100_i128),
+        &token_id,
+        &9_999_u64,
+        &opts,
+    );
+    assert!(id > 0);
+}
+
+#[test]
+#[should_panic]
+fn test_create_invoice_invalid_ratios_panics() {
+    // create_invoice with ratios not summing to 10 000 must panic.
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    set_ledger(&env, 1, 1_000);
+
+    let mut ratios: Vec<u32> = Vec::new(&env);
+    ratios.push_back(5_000u32); // sum = 5 000, not 10 000
+
+    let mut opts = default_options(&env);
+    opts.ratios = ratios;
+
+    c.create_invoice(
+        &creator,
+        &one_address_vec(&env, &recipient),
+        &one_amount_vec(&env, 100_i128),
+        &token_id,
+        &9_999_u64,
+        &opts,
+    );
 fn configured_checkpoint_setup() -> (Env, Address, Address, Address) {
     let (env, contract_id, token_id) = setup();
     let c = client(&env, &contract_id);

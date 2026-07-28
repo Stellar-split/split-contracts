@@ -77,7 +77,7 @@ use types::{
     TreasuryRecord, UpgradeProposal,
     ProtocolFeeConfig, QueuedAction, Recipient, RecipientAddress, RebateTier, RepScore, ResolveAction, ResolveRule,
     SimulateReleaseResult, SplitRule, SubscriptionParams, TimelockAction, Tranche, TreasuryRecord,
-    UpgradeProposal,
+    UpgradeProposal, BASIS_POINTS_TOTAL,
 };
 
 // ---------------------------------------------------------------------------
@@ -1013,6 +1013,22 @@ fn validate_milestones(env: &Env, milestones: &Vec<u32>) {
     }
     assert!(prev == 10_000, "milestones must end at 10000");
     let _ = env;
+}
+
+/// Validate that `ratios` is non-empty and sums to exactly [`BASIS_POINTS_TOTAL`] (10 000).
+///
+/// Returns `Ok(())` on success, or:
+/// - [`ContractError::EmptyRecipientList`] when the slice is empty.
+/// - [`ContractError::InvalidRatioSum`] when the sum differs from 10 000.
+pub(crate) fn validate_ratios(ratios: &Vec<u32>) -> Result<(), ContractError> {
+    if ratios.is_empty() {
+        return Err(ContractError::EmptyRecipientList);
+    }
+    let sum: u32 = ratios.iter().fold(0u32, |acc, r| acc.saturating_add(r));
+    if sum != BASIS_POINTS_TOTAL {
+        return Err(ContractError::InvalidRatioSum);
+    }
+    Ok(())
 }
 
 /// Issue #299: Update creator stats on invoice creation.
@@ -3877,6 +3893,13 @@ impl SplitContract {
                 (creator.clone(),).into_val(&env),
             );
             assert!(balance > 0, "nft gate: not a holder");
+        }
+
+        // Validate split ratios (if provided) before any storage is touched.
+        if !options.ratios.is_empty() {
+            if let Err(e) = validate_ratios(&options.ratios) {
+                env.panic_with_error(e);
+            }
         }
 
         Self::_create_invoice_inner(
