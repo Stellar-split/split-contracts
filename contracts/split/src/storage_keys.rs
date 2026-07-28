@@ -318,3 +318,8 @@ pub fn template_id_key(creator: &Address, template_id: u64) -> (Symbol, Address,
 pub fn template_id_counter_key(creator: &Address) -> (Symbol, Address) {
     (symbol_short!("tmpl_ctr"), creator.clone())
 }
+/// Issue #485: per-invoice contributor allowlist — persistent storage.
+pub fn contributor_allowlist_key(invoice_id: u64) -> (Symbol, u64) { (symbol_short!("ctr_al"), invoice_id) }
+/// Issue #473: Allowed payment tokens list — persistent storage.
+pub fn allowed_tokens_key() -> Symbol { symbol_short!("alw_toks") }
+
