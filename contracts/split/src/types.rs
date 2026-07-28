@@ -498,6 +498,8 @@ pub struct InvoiceCore {
     pub released_bps: u32,
     pub clone_depth: u32,
     pub predecessor_id: Option<u64>,
+    /// Issue #329: optional IPFS CID / SHA-256 hash of off-chain invoice metadata.
+    pub metadata_hash: Option<BytesN<32>>,
 }
 
 #[contracttype]
@@ -784,6 +786,8 @@ pub struct Invoice {
     /// Issue #420: creator-configurable overfunding behaviour.
     pub overfunding_policy: OverfundingPolicy,
     pub predecessor_id: Option<u64>,
+    /// Issue #329: optional IPFS CID / SHA-256 hash of off-chain invoice metadata.
+    pub metadata_hash: Option<BytesN<32>>,
     /// Issue #485: optional contributor allowlist; when Some only listed addresses may call pay/contribute.
     pub contributor_allowlist: Option<Vec<Address>>,
     /// Issue #489: ledgers after creation during which contributions qualify
@@ -825,6 +829,7 @@ impl Invoice {
                 released_bps: self.released_bps,
                 clone_depth: self.clone_depth,
                 predecessor_id: self.predecessor_id,
+                metadata_hash: self.metadata_hash,
             },
             InvoiceExt {
                 co_signers: self.co_signers,
@@ -932,6 +937,7 @@ impl Invoice {
             released_bps: core.released_bps,
             clone_depth: core.clone_depth,
             predecessor_id: core.predecessor_id,
+            metadata_hash: core.metadata_hash,
             co_signers: ext.co_signers,
             required_signatures: ext.required_signatures,
             signatures: ext.signatures,
@@ -1250,6 +1256,7 @@ impl Invoice {
             // original overfunding semantics exactly.
             overfunding_policy: OverfundingPolicy::Cap,
             predecessor_id: None,
+            metadata_hash: None,
             contributor_allowlist: None,
             early_bird_window_ledgers: 0,
             early_bird_fee_bps: 0,
