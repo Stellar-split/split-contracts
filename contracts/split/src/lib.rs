@@ -72,6 +72,9 @@ use types::{
     Recipient, RebateTier, RepScore, ResolveAction, ResolveRule, SimulateReleaseResult, SplitRule,
     SubscriptionParams, TimelockAction, Tranche, TreasuryRecord, UpgradeProposal,
     LegacyInvoice, OverflowBehavior, Payment, PaymentCertificate, PaymentCommitment, PaymentProof,
+    ProtocolFeeConfig, QueuedAction, Recipient, RebateTier, RepScore, ResolveAction, ResolveRule,
+    Role, SimulateReleaseResult, SplitRule, SubscriptionParams, TimelockAction, Tranche,
+    TreasuryRecord, UpgradeProposal,
     ProtocolFeeConfig, QueuedAction, Recipient, RecipientAddress, RebateTier, RepScore, ResolveAction, ResolveRule,
     SimulateReleaseResult, SplitRule, SubscriptionParams, TimelockAction, Tranche, TreasuryRecord,
     UpgradeProposal,
@@ -211,6 +214,20 @@ fn milestone_flags_key(id: u64) -> (Symbol, u64) {
     (symbol_short!("ms_flgs"), id)
 }
 
+/// RBAC: per-(address, role) assignment flag — persistent storage.
+/// Stored as `bool`; absent key means role is not held.
+fn role_key(address: &Address, role_discriminant: u32) -> (Symbol, Address, u32) {
+    (symbol_short!("role_asn"), address.clone(), role_discriminant)
+}
+
+/// Convert a `Role` to its stable u32 discriminant used as the storage key component.
+fn role_discriminant(role: &Role) -> u32 {
+    match role {
+        Role::Admin    => 0,
+        Role::Creator  => 1,
+        Role::Operator => 2,
+        Role::Auditor  => 3,
+    }
 /// Contract-level funding progress checkpoints in basis points.
 fn funding_checkpoints_key() -> Symbol {
     symbol_short!("fnd_chk")
@@ -2041,6 +2058,39 @@ fn require_not_frozen(env: &Env) {
         .get(&upgrade_freeze_key())
         .unwrap_or(false);
     assert!(!is_frozen, "contract is frozen for upgrade");
+}
+
+// ---------------------------------------------------------------------------
+// RBAC helpers
+// ---------------------------------------------------------------------------
+
+/// Return `true` when `address` holds `role` **or** holds `Role::Admin`.
+/// Admin is a super-role that implies all other roles.
+fn has_role(env: &Env, address: &Address, role: &Role) -> bool {
+    // Admin implies every role
+    let admin_disc = role_discriminant(&Role::Admin);
+    let role_disc  = role_discriminant(role);
+    env.storage()
+        .persistent()
+        .get::<_, bool>(&role_key(address, admin_disc))
+        .unwrap_or(false)
+        || env.storage()
+            .persistent()
+            .get::<_, bool>(&role_key(address, role_disc))
+            .unwrap_or(false)
+}
+
+/// Require that `caller` holds at least one of the supplied roles.
+/// Also requires `caller.require_auth()` so the call is signed.
+/// Panics with "RoleNotHeld" when no role matches.
+fn require_role(env: &Env, caller: &Address, roles: &[Role]) {
+    caller.require_auth();
+    for role in roles {
+        if has_role(env, caller, role) {
+            return;
+        }
+    }
+    panic!("RoleNotHeld");
 }
 
 // ---------------------------------------------------------------------------

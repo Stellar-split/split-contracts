@@ -53,6 +53,8 @@ pub enum ContractError {
     MemoMismatch = 33,
     /// Issue #439: Creator is in cooldown after cancelling an invoice.
     CreatorCooldownActive = 31,
+    /// RBAC: Caller does not hold the required role for this entry point.
+    RoleNotHeld = 33,
     /// Issue #482: Intermediate multiplication or division overflowed i128 bounds.
     ArithmeticOverflow = 33,
     /// Issue #483: A zero-value or negative amount was passed where a positive amount is required.

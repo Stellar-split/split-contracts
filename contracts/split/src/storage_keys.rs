@@ -282,6 +282,15 @@ pub fn required_memo_hash_key(invoice_id: u64) -> (Symbol, u64) { (symbol_short!
 pub fn invoice_tags_key(invoice_id: u64) -> (Symbol, u64) { (symbol_short!("inv_tags"), invoice_id) }
 
 // ---------------------------------------------------------------------------
+// RBAC: Role assignment storage
+// ---------------------------------------------------------------------------
+
+/// Per-address per-role assignment flag — persistent storage.
+/// Stored as a boolean `true`; absence means the role is not held.
+/// Key: ("role_asn", address, role_u32) where role_u32 is the Role discriminant.
+pub fn role_key(address: &Address, role_discriminant: u32) -> (Symbol, Address, u32) {
+    (symbol_short!("role_asn"), address.clone(), role_discriminant)
+}
 // Issue #474: Invoice cancellation
 // ---------------------------------------------------------------------------
 

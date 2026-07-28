@@ -142,6 +142,20 @@ pub enum AdminRole {
     Operator,
 }
 
+/// Issue RBAC: Fine-grained role assigned to an address.
+/// - Admin    : may perform any action (equivalent to SuperAdmin for RBAC gates).
+/// - Creator  : may call `create_invoice`.
+/// - Operator : may call `release` / `release_invoice`.
+/// - Auditor  : read-only; may call `get_invoice` and other query entry points.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum Role {
+    Admin,
+    Creator,
+    Operator,
+    Auditor,
+}
+
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct Payment {
