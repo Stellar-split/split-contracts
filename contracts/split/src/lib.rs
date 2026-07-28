@@ -2572,8 +2572,7 @@ impl SplitContract {
     /// Only permitted while the invoice is in Pending status (Open/PartiallyFunded).
     /// The caller receives exactly the amount they contributed, the contribution
     /// storage entry is deleted, and `invoice.funded` is decremented.
-    pub fn withdraw_contribution(env: Env, invoice_id: u64) -> Result<(), ContractError> {
-        let payer = env.current_contract_address();
+    pub fn withdraw_contribution(env: Env, payer: Address, invoice_id: u64) -> Result<(), ContractError> {
         payer.require_auth();
 
         let mut invoice = load_invoice(&env, invoice_id);
@@ -8749,18 +8748,6 @@ impl SplitContract {
                 continue;
             }
 
-            // Skip locked recipients and accumulate their share.
-            let is_locked: bool = env
-                .storage()
-                .persistent()
-                .get(&recipient_lock_key(invoice_id, &recipient))
-                .unwrap_or(false);
-            if is_locked {
-                unreleased_locked = unreleased_locked.saturating_add(amount);
-                payouts.push_back(0i128);
-                continue;
-            }
-
             // Issue: if split_rules are defined, compute payout from rule instead of amounts[].
             let proportional = if !invoice.split_rules.is_empty() {
                 let rule = invoice.split_rules.get(i).unwrap();
@@ -8799,6 +8786,20 @@ impl SplitContract {
             } else {
                 proportional
             };
+
+            // Skip locked recipients: accumulate their computed proportional
+            // share into UnreleasedFunds instead of transferring it.
+            let is_locked: bool = env
+                .storage()
+                .persistent()
+                .get(&recipient_lock_key(invoice_id, &recipient))
+                .unwrap_or(false);
+            if is_locked {
+                unreleased_locked = unreleased_locked.saturating_add(capped_proportional);
+                payouts.push_back(0i128);
+                continue;
+            }
+
             distributed += capped_proportional;
 
             // Issue #482: use checked arithmetic to prevent overflow.
