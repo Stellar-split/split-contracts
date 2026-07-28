@@ -53,6 +53,10 @@ pub enum ContractError {
     MemoMismatch = 33,
     /// Issue #439: Creator is in cooldown after cancelling an invoice.
     CreatorCooldownActive = 31,
+    /// Reentrant call detected: a fund-moving function was invoked recursively
+    /// within the same transaction. Cleared automatically at transaction boundary
+    /// because the lock lives in temporary storage.
+    ReentrantCall = 33,
     /// RBAC: Caller does not hold the required role for this entry point.
     RoleNotHeld = 33,
     /// Issue #482: Intermediate multiplication or division overflowed i128 bounds.
