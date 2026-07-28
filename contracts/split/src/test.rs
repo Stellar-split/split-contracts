@@ -111,6 +111,7 @@ fn default_options(env: &Env) -> InvoiceOptions {
         priorities: Vec::new(env),
         require_kyc: false,
         scheduled_release_at: None,
+        ratios: Vec::new(env),
         ext: types::InvoiceOptions2 {
             target_usd_cents: None,
             payment_token: None,
@@ -131,6 +132,8 @@ fn default_options(env: &Env) -> InvoiceOptions {
             recipient_whitelist_enabled: false,
             escrow_hold_period: None,
             overfunding_policy: types::OverfundingPolicy::Cap,
+            early_bird_window_ledgers: 0,
+            early_bird_fee_bps: 0,
         },
     }
 }
@@ -156,6 +159,8 @@ fn default_options2(_env: &Env) -> InvoiceOptions2 {
         recipient_whitelist_enabled: false,
         escrow_hold_period: None,
         overfunding_policy: types::OverfundingPolicy::Cap,
+        early_bird_window_ledgers: 0,
+        early_bird_fee_bps: 0,
     }
 }
 
@@ -202,6 +207,7 @@ fn invoice_options(
         priorities: Vec::new(env),
         require_kyc: false,
         scheduled_release_at: None,
+        ratios: Vec::new(env),
         ext: types::InvoiceOptions2 {
             target_usd_cents: None,
             payment_token: None,
@@ -222,6 +228,8 @@ fn invoice_options(
             recipient_whitelist_enabled: false,
             escrow_hold_period: None,
             overfunding_policy: types::OverfundingPolicy::Cap,
+            early_bird_window_ledgers: 0,
+            early_bird_fee_bps: 0,
         },
     }
 }
@@ -3149,6 +3157,193 @@ fn test_platform_fee_bps_multi_recipient() {
     assert_eq!(tk.balance(&r3), 475);
     // Treasury gets 50.
     assert_eq!(tk.balance(&treasury), 50);
+}
+
+// ---------------------------------------------------------------------------
+// Issue #489: Early-bird discounted platform fee
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_early_bird_within_window_uses_discounted_fee() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+    let tk = token_client(&env, &token_id);
+
+    let admin = Address::generate(&env);
+    let creator = Address::generate(&env);
+    let payer = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    StellarAssetClient::new(&env, &token_id).mint(&payer, &1_000);
+    set_ledger(&env, 10, 1_000);
+
+    c.initialize(
+        &admin, &0_i128, &treasury, &token_id, &1_000_u32, &None, &0_u32, &0_u32, &0_u64,
+    ); // standard fee 10%
+
+    let mut options = default_options(&env);
+    options.ext.early_bird_window_ledgers = 100;
+    options.ext.early_bird_fee_bps = 200; // 2%
+
+    let id = c.create_invoice(
+        &creator,
+        &one_address_vec(&env, &recipient),
+        &one_amount_vec(&env, 500_i128),
+        &token_id,
+        &9_999_u64,
+        &options,
+    );
+
+    // Paid immediately, well within the 100-ledger early-bird window.
+    c.pay(&payer, &id, &500_i128, &0_u64, &false, &false);
+
+    // discount = 500 * (10% - 2%) = 40
+    let events = env.events().all();
+    let has_early_bird_event = events.iter().any(|e| {
+        let topics = e.1;
+        topics.len() >= 2
+            && Symbol::try_from_val(&env, &topics.get(1).unwrap())
+                .map(|sym: Symbol| sym == Symbol::new(&env, "ebird_pay"))
+                .unwrap_or(false)
+    });
+    assert!(has_early_bird_event, "EarlyBirdPayment event should be emitted");
+
+    assert_eq!(c.get_invoice(&id).status, InvoiceStatus::Released);
+    // Discounted fee (2%) of 500 == 10; recipient nets 490, treasury collects 10.
+    assert_eq!(tk.balance(&recipient), 490);
+    assert_eq!(tk.balance(&treasury), 10);
+}
+
+#[test]
+fn test_early_bird_outside_window_uses_standard_fee() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+    let tk = token_client(&env, &token_id);
+
+    let admin = Address::generate(&env);
+    let creator = Address::generate(&env);
+    let payer = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    StellarAssetClient::new(&env, &token_id).mint(&payer, &1_000);
+    set_ledger(&env, 10, 1_000);
+
+    c.initialize(
+        &admin, &0_i128, &treasury, &token_id, &1_000_u32, &None, &0_u32, &0_u32, &0_u64,
+    ); // standard fee 10%
+
+    let mut options = default_options(&env);
+    options.ext.early_bird_window_ledgers = 5;
+    options.ext.early_bird_fee_bps = 200; // 2%
+
+    let id = c.create_invoice(
+        &creator,
+        &one_address_vec(&env, &recipient),
+        &one_amount_vec(&env, 500_i128),
+        &token_id,
+        &9_999_u64,
+        &options,
+    );
+
+    // Advance past the 5-ledger early-bird window before paying.
+    set_ledger(&env, 20, 1_100);
+    c.pay(&payer, &id, &500_i128, &0_u64, &false, &false);
+
+    let events = env.events().all();
+    let has_early_bird_event = events.iter().any(|e| {
+        let topics = e.1;
+        topics.len() >= 2
+            && Symbol::try_from_val(&env, &topics.get(1).unwrap())
+                .map(|sym: Symbol| sym == Symbol::new(&env, "ebird_pay"))
+                .unwrap_or(false)
+    });
+    assert!(!has_early_bird_event, "no EarlyBirdPayment event once the window has passed");
+
+    assert_eq!(c.get_invoice(&id).status, InvoiceStatus::Released);
+    // Standard fee (10%) of 500 == 50; recipient nets 450, treasury collects 50.
+    assert_eq!(tk.balance(&recipient), 450);
+    assert_eq!(tk.balance(&treasury), 50);
+}
+
+#[test]
+fn test_early_bird_window_zero_disables_discount() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+    let tk = token_client(&env, &token_id);
+
+    let admin = Address::generate(&env);
+    let creator = Address::generate(&env);
+    let payer = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    StellarAssetClient::new(&env, &token_id).mint(&payer, &1_000);
+    set_ledger(&env, 10, 1_000);
+
+    c.initialize(
+        &admin, &0_i128, &treasury, &token_id, &1_000_u32, &None, &0_u32, &0_u32, &0_u64,
+    ); // standard fee 10%
+
+    let mut options = default_options(&env);
+    options.ext.early_bird_window_ledgers = 0; // disabled
+    options.ext.early_bird_fee_bps = 200;
+
+    let id = c.create_invoice(
+        &creator,
+        &one_address_vec(&env, &recipient),
+        &one_amount_vec(&env, 500_i128),
+        &token_id,
+        &9_999_u64,
+        &options,
+    );
+
+    // Paid immediately — would be "within window" by timing alone, but the
+    // window is disabled so the standard fee must apply.
+    c.pay(&payer, &id, &500_i128, &0_u64, &false, &false);
+
+    let events = env.events().all();
+    let has_early_bird_event = events.iter().any(|e| {
+        let topics = e.1;
+        topics.len() >= 2
+            && Symbol::try_from_val(&env, &topics.get(1).unwrap())
+                .map(|sym: Symbol| sym == Symbol::new(&env, "ebird_pay"))
+                .unwrap_or(false)
+    });
+    assert!(!has_early_bird_event, "a zero-length window must never emit a discount");
+
+    assert_eq!(tk.balance(&recipient), 450);
+    assert_eq!(tk.balance(&treasury), 50);
+}
+
+#[test]
+#[should_panic(expected = "early_bird_fee_bps must not exceed the standard platform fee")]
+fn test_early_bird_fee_bps_must_not_exceed_standard_fee() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    c.initialize(
+        &admin, &0_i128, &treasury, &token_id, &500_u32, &None, &0_u32, &0_u32, &0_u64,
+    ); // standard fee 5%
+
+    let mut options = default_options(&env);
+    options.ext.early_bird_window_ledgers = 100;
+    options.ext.early_bird_fee_bps = 600; // 6% > standard 5%
+
+    c.create_invoice(
+        &creator,
+        &one_address_vec(&env, &recipient),
+        &one_amount_vec(&env, 500_i128),
+        &token_id,
+        &9_999_u64,
+        &options,
+    );
 }
 
 #[test]
@@ -9694,6 +9889,39 @@ fn test_set_overfunding_policy_by_creator() {
     assert_eq!(
         c.get_overfunding_policy(&id),
         types::OverfundingPolicy::AcceptAll
+// validate_ratios unit tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_validate_ratios_exact_sum_accepted() {
+    // A single entry of 10 000 must be accepted.
+    let env = Env::default();
+    let mut ratios: Vec<u32> = Vec::new(&env);
+    ratios.push_back(10_000u32);
+    assert!(validate_ratios(&ratios).is_ok());
+}
+
+#[test]
+fn test_validate_ratios_multi_entry_accepted() {
+    // Multiple entries summing to exactly 10 000 must be accepted.
+    let env = Env::default();
+    let mut ratios: Vec<u32> = Vec::new(&env);
+    ratios.push_back(5_000u32);
+    ratios.push_back(3_000u32);
+    ratios.push_back(2_000u32);
+    assert!(validate_ratios(&ratios).is_ok());
+}
+
+#[test]
+fn test_validate_ratios_under_sum_rejected() {
+    // Sum < 10 000 must return InvalidRatioSum.
+    let env = Env::default();
+    let mut ratios: Vec<u32> = Vec::new(&env);
+    ratios.push_back(4_000u32);
+    ratios.push_back(4_000u32); // sum = 8 000
+    assert_eq!(
+        validate_ratios(&ratios),
+        Err(ContractError::InvalidRatioSum)
     );
 }
 
@@ -9946,6 +10174,114 @@ fn test_overfunding_return_surplus_exact_payment() {
     let (env, contract_id, token_id) = setup();
     let c = client(&env, &contract_id);
     let tk = token_client(&env, &token_id);
+fn test_validate_ratios_over_sum_rejected() {
+    // Sum > 10 000 must return InvalidRatioSum.
+    let env = Env::default();
+    let mut ratios: Vec<u32> = Vec::new(&env);
+    ratios.push_back(6_000u32);
+    ratios.push_back(6_000u32); // sum = 12 000
+    assert_eq!(
+        validate_ratios(&ratios),
+        Err(ContractError::InvalidRatioSum)
+    );
+}
+
+#[test]
+fn test_validate_ratios_empty_rejected() {
+    // An empty ratios vec must return EmptyRecipientList.
+    let env = Env::default();
+    let ratios: Vec<u32> = Vec::new(&env);
+    assert_eq!(
+        validate_ratios(&ratios),
+        Err(ContractError::EmptyRecipientList)
+    );
+}
+
+#[test]
+fn test_create_invoice_valid_ratios_accepted() {
+    // create_invoice with a valid ratios vec (sums to 10 000) should succeed.
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    set_ledger(&env, 1, 1_000);
+
+    let mut ratios: Vec<u32> = Vec::new(&env);
+    ratios.push_back(10_000u32);
+
+    let mut opts = default_options(&env);
+    opts.ratios = ratios;
+
+    let id = c.create_invoice(
+        &creator,
+        &one_address_vec(&env, &recipient),
+        &one_amount_vec(&env, 100_i128),
+        &token_id,
+        &9_999_u64,
+        &opts,
+    );
+    assert!(id > 0);
+}
+
+#[test]
+#[should_panic]
+fn test_create_invoice_invalid_ratios_panics() {
+    // create_invoice with ratios not summing to 10 000 must panic.
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    set_ledger(&env, 1, 1_000);
+
+    let mut ratios: Vec<u32> = Vec::new(&env);
+    ratios.push_back(5_000u32); // sum = 5 000, not 10 000
+
+    let mut opts = default_options(&env);
+    opts.ratios = ratios;
+
+    c.create_invoice(
+        &creator,
+        &one_address_vec(&env, &recipient),
+        &one_amount_vec(&env, 100_i128),
+        &token_id,
+        &9_999_u64,
+        &opts,
+    );
+fn configured_checkpoint_setup() -> (Env, Address, Address, Address) {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    c.initialize(
+        &admin, &0_i128, &treasury, &token_id, &0_u32, &None, &0_u32, &0_u32, &0_u64,
+    );
+    (env, contract_id, token_id, admin)
+}
+
+fn funding_checkpoint_events(env: &Env) -> Vec<events::FundingCheckpoint> {
+    let mut checkpoints = Vec::new(env);
+    for event in env.events().all().iter() {
+        let topics = event.1;
+        if topics.len() < 2 {
+            continue;
+        }
+        let Ok(topic) = Symbol::try_from_val(env, &topics.get(1).unwrap()) else {
+            continue;
+        };
+        if topic == symbol_short!("fnd_chk") {
+            checkpoints.push_back(
+                events::FundingCheckpoint::try_from_val(env, &event.2)
+                    .expect("funding checkpoint event data should decode"),
+            );
+        }
+    }
+    checkpoints
+}
+
+#[test]
+fn test_funding_checkpoint_single_hit() {
+    let (env, contract_id, token_id, admin) = configured_checkpoint_setup();
+    let c = client(&env, &contract_id);
 
     let creator = Address::generate(&env);
     let payer = Address::generate(&env);
@@ -10005,6 +10341,32 @@ fn test_overfunding_return_surplus_over_payment_refunds_remainder() {
     let (env, contract_id, token_id) = setup();
     let c = client(&env, &contract_id);
     let tk = token_client(&env, &token_id);
+    StellarAssetClient::new(&env, &token_id).mint(&payer, &1_000);
+    env.ledger().set_timestamp(1_000);
+
+    let mut checkpoints = Vec::new(&env);
+    checkpoints.push_back(2_500);
+    c.set_funding_checkpoints(&admin, &checkpoints);
+
+    let id = make_invoice(&env, &c, &creator, &recipient, 1_000, &token_id, 9_999);
+    assert_eq!(c.get_last_funding_checkpoint(&id), 0);
+
+    c.pay(&payer, &id, &250_i128, &0_u64, &false, &false);
+
+    let events = funding_checkpoint_events(&env);
+    assert_eq!(events.len(), 1);
+    let evt = events.get(0).unwrap();
+    assert_eq!(evt.invoice_id, id);
+    assert_eq!(evt.threshold_bps, 2_500);
+    assert_eq!(evt.funded, 250);
+    assert_eq!(evt.total, 1_000);
+    assert_eq!(c.get_last_funding_checkpoint(&id), 2_500);
+}
+
+#[test]
+fn test_funding_checkpoint_multiple_in_one_payment() {
+    let (env, contract_id, token_id, admin) = configured_checkpoint_setup();
+    let c = client(&env, &contract_id);
 
     let creator = Address::generate(&env);
     let payer = Address::generate(&env);
@@ -10036,6 +10398,37 @@ fn test_overfunding_return_surplus_partial_then_over_payment() {
     let (env, contract_id, token_id) = setup();
     let c = client(&env, &contract_id);
     let tk = token_client(&env, &token_id);
+    StellarAssetClient::new(&env, &token_id).mint(&payer, &1_000);
+    env.ledger().set_timestamp(1_000);
+
+    let mut checkpoints = Vec::new(&env);
+    checkpoints.push_back(1_000);
+    checkpoints.push_back(2_500);
+    checkpoints.push_back(5_000);
+    checkpoints.push_back(7_500);
+    c.set_funding_checkpoints(&admin, &checkpoints);
+
+    let id = make_invoice(&env, &c, &creator, &recipient, 1_000, &token_id, 9_999);
+    c.pay(&payer, &id, &800_i128, &0_u64, &false, &false);
+
+    let events = funding_checkpoint_events(&env);
+    assert_eq!(events.len(), 4);
+    assert_eq!(events.get(0).unwrap().threshold_bps, 1_000);
+    assert_eq!(events.get(1).unwrap().threshold_bps, 2_500);
+    assert_eq!(events.get(2).unwrap().threshold_bps, 5_000);
+    assert_eq!(events.get(3).unwrap().threshold_bps, 7_500);
+    for evt in events.iter() {
+        assert_eq!(evt.invoice_id, id);
+        assert_eq!(evt.funded, 800);
+        assert_eq!(evt.total, 1_000);
+    }
+    assert_eq!(c.get_last_funding_checkpoint(&id), 7_500);
+}
+
+#[test]
+fn test_funding_checkpoint_not_reemitted_on_subsequent_payments() {
+    let (env, contract_id, token_id, admin) = configured_checkpoint_setup();
+    let c = client(&env, &contract_id);
 
     let creator = Address::generate(&env);
     let payer = Address::generate(&env);
@@ -10063,4 +10456,22 @@ fn test_overfunding_return_surplus_partial_then_over_payment() {
     assert_eq!(c.get_invoice(&id).status, InvoiceStatus::Released);
     assert_eq!(tk.balance(&recipient), 100);
     assert_eq!(tk.balance(&payer), 900);
+    StellarAssetClient::new(&env, &token_id).mint(&payer, &1_000);
+    env.ledger().set_timestamp(1_000);
+
+    let mut checkpoints = Vec::new(&env);
+    checkpoints.push_back(2_500);
+    checkpoints.push_back(5_000);
+    c.set_funding_checkpoints(&admin, &checkpoints);
+
+    let id = make_invoice(&env, &c, &creator, &recipient, 1_000, &token_id, 9_999);
+    c.pay(&payer, &id, &300_i128, &0_u64, &false, &false);
+    assert_eq!(funding_checkpoint_events(&env).len(), 1);
+
+    c.pay(&payer, &id, &200_i128, &1_u64, &false, &false);
+    let events = funding_checkpoint_events(&env);
+    assert_eq!(events.len(), 2);
+    assert_eq!(events.get(0).unwrap().threshold_bps, 2_500);
+    assert_eq!(events.get(1).unwrap().threshold_bps, 5_000);
+    assert_eq!(c.get_last_funding_checkpoint(&id), 5_000);
 }

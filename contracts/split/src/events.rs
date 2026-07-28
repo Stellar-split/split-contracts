@@ -1,5 +1,5 @@
 use crate::types::{DisputeOutcome, InvoiceStatus, RepScore, TimelockAction};
-use soroban_sdk::{symbol_short, Address, BytesN, Env, String, Vec};
+use soroban_sdk::{contracttype, symbol_short, Address, BytesN, Env, String, Vec};
 
 /// Emitted when a new invoice is created.
 /// Topics: (split, created, invoice_id)
@@ -745,6 +745,41 @@ pub fn milestone_reached(env: &Env, invoice_id: u64, milestone_bps: u32, funded_
     );
 }
 
+/// Emitted when an invoice crosses an admin-configured funding checkpoint.
+///
+/// Checkpoints are contract-level thresholds expressed in basis points where
+/// `10_000 = 100%`. A single payment can emit multiple checkpoint events when it
+/// crosses several configured thresholds at once.
+///
+/// Topics: (split, fnd_chk, invoice_id)
+/// Data: FundingCheckpoint { invoice_id, threshold_bps, funded, total }
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FundingCheckpoint {
+    pub invoice_id: u64,
+    pub threshold_bps: u32,
+    pub funded: i128,
+    pub total: i128,
+}
+
+pub fn funding_checkpoint(
+    env: &Env,
+    invoice_id: u64,
+    threshold_bps: u32,
+    funded: i128,
+    total: i128,
+) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("fnd_chk"), invoice_id),
+        FundingCheckpoint {
+            invoice_id,
+            threshold_bps,
+            funded,
+            total,
+        },
+    );
+}
+
 /// Issue #315: Emitted when a delegated payment is executed.
 /// Topics: (split, dlgt_pay, invoice_id)
 /// Data: (payer, executor, amount, ledger)
@@ -1030,6 +1065,17 @@ pub fn group_rollback_triggered(env: &Env, group_id: u64, member_count: u32) {
     );
 }
 
+/// Issue #489: Emitted when a contribution qualifies for the early-bird discounted
+/// platform fee.
+/// Topics: (split, ebird_pay, invoice_id)
+/// Data: (payer, discount_amount)
+pub fn early_bird_payment(env: &Env, invoice_id: u64, payer: &Address, discount_amount: i128) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("ebird_pay"), invoice_id),
+        (payer.clone(), discount_amount),
+    );
+}
+
 /// Issue #439: Emitted when a creator's cancellation cooldown is set.
 /// Topics: (split, cr_cool, creator)
 /// Data: (until_ledger, cooldown_ledgers)
@@ -1048,3 +1094,162 @@ pub fn creator_cooldown_set(
         (until_ledger, cooldown_ledgers),
     );
 }
+
+/// RBAC: Emitted when an admin grants a role to an address.
+/// Topics: (split, role_grt, grantee)
+/// Data: (role_discriminant, admin)
+pub fn role_granted(env: &Env, grantee: &Address, role_discriminant: u32, admin: &Address) {
+    env.events().publish(
+        (
+            symbol_short!("split"),
+            symbol_short!("role_grt"),
+            grantee.clone(),
+        ),
+        (role_discriminant, admin.clone()),
+    );
+}
+
+/// RBAC: Emitted when an admin revokes a role from an address.
+/// Topics: (split, role_rev, grantee)
+/// Data: (role_discriminant, admin)
+pub fn role_revoked(env: &Env, grantee: &Address, role_discriminant: u32, admin: &Address) {
+    env.events().publish(
+        (
+            symbol_short!("split"),
+            symbol_short!("role_rev"),
+            grantee.clone(),
+        ),
+        (role_discriminant, admin.clone()),
+    );
+}
+/// Issue #474: Emitted when a creator cancels an open invoice and all contributors are refunded.
+/// Topics: (split, inv_cncl, invoice_id)
+/// Data: (creator, total_refunded, ledger)
+pub fn invoice_cancelled(env: &Env, invoice_id: u64, creator: &Address, total_refunded: i128) {
+    env.events().publish(
+        (
+            symbol_short!("split"),
+            symbol_short!("inv_cncl"),
+            invoice_id,
+        ),
+        (creator.clone(), total_refunded, env.ledger().sequence()),
+    );
+}
+
+/// Issue #475: Emitted when a multi-sig admin action is proposed.
+/// Topics: (split, adm_prop, action_hash)
+/// Data: (proposer, ledger)
+pub fn admin_action_proposed(env: &Env, action_hash: &BytesN<32>, proposer: &Address) {
+    env.events().publish(
+        (
+            symbol_short!("split"),
+            symbol_short!("adm_prop"),
+            action_hash.clone(),
+        ),
+        (proposer.clone(), env.ledger().sequence()),
+    );
+}
+
+/// Issue #475: Emitted when a signer approves a pending admin action.
+/// Topics: (split, adm_appr, action_hash)
+/// Data: (approver, approval_count, ledger)
+pub fn admin_action_approved(
+    env: &Env,
+    action_hash: &BytesN<32>,
+    approver: &Address,
+    approval_count: u32,
+/// Issue #470: Emitted when an overpayment results in a partial refund.
+/// Topics: (split, RefundIssued, invoice_id)
+/// Data: (payer, refund_amount)
+pub fn refund_issued(env: &Env, invoice_id: u64, payer: &Address, refund_amount: i128) {
+    env.events().publish(
+        (
+            symbol_short!("split"),
+            soroban_sdk::Symbol::new(env, "RefundIssued"),
+            invoice_id,
+        ),
+        (payer.clone(), refund_amount),
+    );
+}
+
+/// Issue #471: Emitted when a recipient rotates their payout address.
+/// Topics: (split, RecipientAddressRotated, invoice_id)
+/// Data: (old_address, new_address)
+pub fn recipient_address_rotated(
+    env: &Env,
+    invoice_id: u64,
+    old_address: &Address,
+    new_address: &Address,
+) {
+    env.events().publish(
+        (
+            symbol_short!("split"),
+            symbol_short!("adm_appr"),
+            action_hash.clone(),
+        ),
+        (approver.clone(), approval_count, env.ledger().sequence()),
+    );
+}
+
+/// Issue #475: Emitted when a multi-sig admin action reaches threshold and executes.
+/// Topics: (split, adm_exec, action_hash)
+/// Data: ledger
+pub fn admin_action_executed(env: &Env, action_hash: &BytesN<32>) {
+    env.events().publish(
+        (
+            symbol_short!("split"),
+            symbol_short!("adm_exec"),
+            action_hash.clone(),
+        ),
+        env.ledger().sequence(),
+    );
+}
+
+/// Issue #476: Emitted when a creator stores a new reusable invoice template.
+/// Topics: (split, tmpl_crt, creator)
+/// Data: (template_id, ledger)
+pub fn template_created(env: &Env, creator: &Address, template_id: u64) {
+    env.events().publish(
+        (
+            symbol_short!("split"),
+            symbol_short!("tmpl_crt"),
+            creator.clone(),
+        ),
+        (template_id, env.ledger().sequence()),
+    );
+}
+
+/// Issue #476: Emitted when a creator deletes a stored invoice template.
+/// Topics: (split, tmpl_del, creator)
+/// Data: (template_id, ledger)
+pub fn template_deleted(env: &Env, creator: &Address, template_id: u64) {
+    env.events().publish(
+        (
+            symbol_short!("split"),
+            symbol_short!("tmpl_del"),
+            creator.clone(),
+        ),
+        (template_id, env.ledger().sequence()),
+    );
+}
+
+/// Issue #476: Emitted when an invoice is instantiated from a template.
+/// Topics: (split, tmpl_inv, invoice_id)
+/// Data: (creator, template_id, ledger)
+pub fn invoice_from_template(env: &Env, invoice_id: u64, creator: &Address, template_id: u64) {
+    env.events().publish(
+        (
+            symbol_short!("split"),
+            symbol_short!("tmpl_inv"),
+            invoice_id,
+        ),
+        (creator.clone(), template_id, env.ledger().sequence()),
+    );
+}
+            soroban_sdk::Symbol::new(env, "RecipientAddressRotated"),
+            invoice_id,
+        ),
+        (old_address.clone(), new_address.clone()),
+    );
+}
+

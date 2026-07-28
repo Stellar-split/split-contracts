@@ -1,5 +1,8 @@
 use soroban_sdk::{contracttype, Address, Bytes, BytesN, Env, String, Symbol, Vec};
 
+/// Total basis points representing 100% — ratio vecs must sum to exactly this value.
+pub const BASIS_POINTS_TOTAL: u32 = 10_000;
+
 /// (base, quote) asset pair for oracle-priced invoices.
 #[contracttype]
 #[derive(Clone, Debug)]
@@ -160,6 +163,20 @@ pub struct InvoiceAnalytics {
 pub enum AdminRole {
     SuperAdmin,
     Operator,
+}
+
+/// Issue RBAC: Fine-grained role assigned to an address.
+/// - Admin    : may perform any action (equivalent to SuperAdmin for RBAC gates).
+/// - Creator  : may call `create_invoice`.
+/// - Operator : may call `release` / `release_invoice`.
+/// - Auditor  : read-only; may call `get_invoice` and other query entry points.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum Role {
+    Admin,
+    Creator,
+    Operator,
+    Auditor,
 }
 
 #[contracttype]
@@ -350,6 +367,9 @@ pub struct InvoiceOptions {
     pub scheduled_release_at: Option<u64>,
     /// KYC verification requirement.
     pub require_kyc: bool,
+    /// Per-recipient split ratios in basis points (must sum to [`BASIS_POINTS_TOTAL`] = 10 000
+    /// when non-empty).  Empty vec means "no ratio constraint — use amounts directly."
+    pub ratios: Vec<u32>,
     /// Overflow fields that would otherwise push this struct past Soroban's
     /// 40-field `#[contracttype]` limit — see [`InvoiceOptions2`].
     pub ext: InvoiceOptions2,
@@ -404,6 +424,14 @@ pub struct InvoiceOptions2 {
     /// historical behaviour. (Not `Option`-wrapped: `#[contracttype]` cannot
     /// derive the `ScVal` conversions for `Option<CustomEnum>`.)
     pub overfunding_policy: OverfundingPolicy,
+    /// Issue #489: number of ledgers after creation during which contributions
+    /// qualify for the discounted `early_bird_fee_bps` platform fee. 0 disables
+    /// the early-bird discount entirely.
+    pub early_bird_window_ledgers: u32,
+    /// Issue #489: discounted platform fee (bps) applied to contributions made
+    /// within `early_bird_window_ledgers` of invoice creation. Must be ≤ the
+    /// standard platform fee in effect at creation time.
+    pub early_bird_fee_bps: u32,
 }
 
 /// Legacy invoice layout used by stored invoices created before the `version`
@@ -563,6 +591,17 @@ pub struct InvoiceExt2 {
     pub recipient_whitelist_enabled: bool,
     /// Issue #420: creator-configurable overfunding behaviour.
     pub overfunding_policy: OverfundingPolicy,
+    /// Issue #485: optional contributor allowlist; when Some only listed addresses may call pay/contribute.
+    pub contributor_allowlist: Option<Vec<Address>>,
+    /// Issue #489: ledgers after creation during which contributions qualify
+    /// for `early_bird_fee_bps`. 0 disables the discount.
+    pub early_bird_window_ledgers: u32,
+    /// Issue #489: discounted platform fee (bps) for contributions made within
+    /// the early-bird window.
+    pub early_bird_fee_bps: u32,
+    /// Issue #489: total platform-fee discount accrued from early-bird
+    /// contributions so far; deducted from the platform fee at release.
+    pub early_bird_fee_credit: i128,
 }
 
 /// Issue #211: A single escalating penalty tier (seconds_after_deadline, bps).
@@ -571,6 +610,49 @@ pub struct InvoiceExt2 {
 pub struct PenaltyTier {
     pub seconds_after_deadline: u64,
     pub bps: u32,
+}
+
+/// Issue #475: Multi-signature admin set — replaces the single-admin model.
+/// Sensitive operations require `threshold`-of-N signers to approve.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct AdminSet {
+    /// All recognised admin signers.
+    pub signers: Vec<Address>,
+    /// Minimum number of approvals required to finalise an action.
+    pub threshold: u32,
+}
+
+/// Issue #475: Discriminated union of admin actions that can be proposed.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum AdminAction {
+    /// Pause the entire contract.
+    PauseContract,
+    /// Unpause the contract.
+    UnpauseContract,
+    /// Update the platform fee in basis points.
+    SetPlatformFeeBps(u32),
+    /// Replace the treasury address.
+    SetTreasury(Address),
+    /// Replace the full AdminSet (rotate signers / change threshold).
+    ReplaceAdminSet(AdminSet),
+}
+
+/// Issue #475: On-chain record of a pending multi-sig admin proposal.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct PendingAdminAction {
+    /// Keccak-like identifier (SHA-256 hash of the serialised action payload).
+    pub action_hash: BytesN<32>,
+    /// The actual action to execute once approved.
+    pub action: AdminAction,
+    /// Ledger timestamp when the proposal was created.
+    pub proposed_at: u64,
+    /// Set of signers who have already approved this proposal.
+    pub approvals: Vec<Address>,
+    /// Whether the proposal has been executed.
+    pub executed: bool,
 }
 
 /// Timelocked admin action queued for future execution.
@@ -700,6 +782,17 @@ pub struct Invoice {
     /// Issue #420: creator-configurable overfunding behaviour.
     pub overfunding_policy: OverfundingPolicy,
     pub predecessor_id: Option<u64>,
+    /// Issue #485: optional contributor allowlist; when Some only listed addresses may call pay/contribute.
+    pub contributor_allowlist: Option<Vec<Address>>,
+    /// Issue #489: ledgers after creation during which contributions qualify
+    /// for `early_bird_fee_bps`. 0 disables the discount.
+    pub early_bird_window_ledgers: u32,
+    /// Issue #489: discounted platform fee (bps) for contributions made within
+    /// the early-bird window.
+    pub early_bird_fee_bps: u32,
+    /// Issue #489: total platform-fee discount accrued from early-bird
+    /// contributions so far; deducted from the platform fee at release.
+    pub early_bird_fee_credit: i128,
 }
 
 impl Invoice {
@@ -803,6 +896,10 @@ impl Invoice {
                 release_condition_hash: self.release_condition_hash,
                 recipient_whitelist_enabled: self.recipient_whitelist_enabled,
                 overfunding_policy: self.overfunding_policy,
+                contributor_allowlist: self.contributor_allowlist,
+                early_bird_window_ledgers: self.early_bird_window_ledgers,
+                early_bird_fee_bps: self.early_bird_fee_bps,
+                early_bird_fee_credit: self.early_bird_fee_credit,
             },
         )
     }
@@ -902,6 +999,10 @@ impl Invoice {
             release_condition_hash: ext2.release_condition_hash,
             recipient_whitelist_enabled: ext2.recipient_whitelist_enabled,
             overfunding_policy: ext2.overfunding_policy,
+            contributor_allowlist: ext2.contributor_allowlist,
+            early_bird_window_ledgers: ext2.early_bird_window_ledgers,
+            early_bird_fee_bps: ext2.early_bird_fee_bps,
+            early_bird_fee_credit: ext2.early_bird_fee_credit,
         }
     }
 }
@@ -1143,6 +1244,10 @@ impl Invoice {
             // original overfunding semantics exactly.
             overfunding_policy: OverfundingPolicy::Cap,
             predecessor_id: None,
+            contributor_allowlist: None,
+            early_bird_window_ledgers: 0,
+            early_bird_fee_bps: 0,
+            early_bird_fee_credit: 0,
         }
     }
 }
@@ -1346,6 +1451,33 @@ pub struct FeeBracket {
     pub rate_bps: u32,
 }
 
+/// Issue #476: Reusable invoice template stored on-chain under a numeric ID.
+/// A creator stores this once and instantiates invoices from it via
+/// `invoice_from_template(template_id, total_amount, deadline)`.
+///
+/// `ratios` is parallel to `recipients` and encodes each recipient's share in
+/// basis points (sum must equal 10 000).  On instantiation the contract
+/// distributes `total_amount * ratio / 10 000` to each recipient.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct InvoiceTemplateRecord {
+    /// Ordered list of recipient addresses.
+    pub recipients: Vec<Address>,
+    /// Per-recipient share in basis points, parallel to `recipients`.
+    /// Must sum to 10 000.
+    pub ratios: Vec<u32>,
+    /// Token used for payment and payout.
+    pub token: Address,
+}
+
+/// Issue #476: Counter (u64) of templates created by a given creator.
+/// Stored under `TemplateCtr(creator)` in persistent storage.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct TemplateCounter {
+    pub next_id: u64,
+}
+
 /// Issue #437: Delayed payout stored per recipient until claimable.
 #[contracttype]
 #[derive(Clone, Debug)]
@@ -1355,3 +1487,18 @@ pub struct DelayedPayout {
     /// Ledger sequence at which this payout becomes claimable.
     pub claimable_at_ledger: u32,
 }
+
+/// Issue #470: Result of contribute containing amount applied and refund amount.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ContributionResult {
+    pub invoice_id: u64,
+    pub amount_applied: i128,
+    pub refund_amount: i128,
+}
+
+/// Issue #471: Storage key for recipient address rotation mapping.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct RecipientAddress(pub u64, pub Address);
+

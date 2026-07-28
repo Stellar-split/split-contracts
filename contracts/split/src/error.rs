@@ -56,4 +56,25 @@ pub enum ContractError {
     /// Issue #420: Payment rejected because the invoice's `Cap` overfunding
     /// policy does not allow `funded` to exceed the invoice total.
     InvoiceFullyFunded = 35,
+    CreatorCooldownActive = 31,
+    /// The provided ratios do not sum to exactly BASIS_POINTS_TOTAL (10 000).
+    InvalidRatioSum = 33,
+    /// The recipient/ratio list is empty; at least one entry is required.
+    EmptyRecipientList = 34,
+    /// Reentrant call detected: a fund-moving function was invoked recursively
+    /// within the same transaction. Cleared automatically at transaction boundary
+    /// because the lock lives in temporary storage.
+    ReentrantCall = 33,
+    /// RBAC: Caller does not hold the required role for this entry point.
+    RoleNotHeld = 33,
+    /// Issue #482: Intermediate multiplication or division overflowed i128 bounds.
+    ArithmeticOverflow = 33,
+    /// Issue #483: A zero-value or negative amount was passed where a positive amount is required.
+    ZeroAmountNotAllowed = 34,
+    /// Issue #485: Caller is not on the invoice contributor allowlist.
+    ContributorNotAllowed = 35,
+    CreatorCooldownActive = 34,
+    /// Issue #473: Token is not in the allowed tokens list.
+    UnauthorisedToken = 35,
 }
+
