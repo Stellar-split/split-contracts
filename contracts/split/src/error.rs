@@ -53,4 +53,6 @@ pub enum ContractError {
     MemoMismatch = 31,
     /// Issue #439: Creator is in cooldown after cancelling an invoice.
     CreatorCooldownActive = 31,
+    /// Issue #477: initialize() has already been called; contract is fully initialised.
+    AlreadyInitialised = 33,
 }
