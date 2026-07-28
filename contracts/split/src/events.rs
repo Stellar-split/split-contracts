@@ -1090,6 +1090,42 @@ pub fn creator_cooldown_set(
     );
 }
 
+/// Issue #474: Emitted when a creator cancels an open invoice and all contributors are refunded.
+/// Topics: (split, inv_cncl, invoice_id)
+/// Data: (creator, total_refunded, ledger)
+pub fn invoice_cancelled(env: &Env, invoice_id: u64, creator: &Address, total_refunded: i128) {
+    env.events().publish(
+        (
+            symbol_short!("split"),
+            symbol_short!("inv_cncl"),
+            invoice_id,
+        ),
+        (creator.clone(), total_refunded, env.ledger().sequence()),
+    );
+}
+
+/// Issue #475: Emitted when a multi-sig admin action is proposed.
+/// Topics: (split, adm_prop, action_hash)
+/// Data: (proposer, ledger)
+pub fn admin_action_proposed(env: &Env, action_hash: &BytesN<32>, proposer: &Address) {
+    env.events().publish(
+        (
+            symbol_short!("split"),
+            symbol_short!("adm_prop"),
+            action_hash.clone(),
+        ),
+        (proposer.clone(), env.ledger().sequence()),
+    );
+}
+
+/// Issue #475: Emitted when a signer approves a pending admin action.
+/// Topics: (split, adm_appr, action_hash)
+/// Data: (approver, approval_count, ledger)
+pub fn admin_action_approved(
+    env: &Env,
+    action_hash: &BytesN<32>,
+    approver: &Address,
+    approval_count: u32,
 /// Issue #470: Emitted when an overpayment results in a partial refund.
 /// Topics: (split, RefundIssued, invoice_id)
 /// Data: (payer, refund_amount)
@@ -1116,6 +1152,68 @@ pub fn recipient_address_rotated(
     env.events().publish(
         (
             symbol_short!("split"),
+            symbol_short!("adm_appr"),
+            action_hash.clone(),
+        ),
+        (approver.clone(), approval_count, env.ledger().sequence()),
+    );
+}
+
+/// Issue #475: Emitted when a multi-sig admin action reaches threshold and executes.
+/// Topics: (split, adm_exec, action_hash)
+/// Data: ledger
+pub fn admin_action_executed(env: &Env, action_hash: &BytesN<32>) {
+    env.events().publish(
+        (
+            symbol_short!("split"),
+            symbol_short!("adm_exec"),
+            action_hash.clone(),
+        ),
+        env.ledger().sequence(),
+    );
+}
+
+/// Issue #476: Emitted when a creator stores a new reusable invoice template.
+/// Topics: (split, tmpl_crt, creator)
+/// Data: (template_id, ledger)
+pub fn template_created(env: &Env, creator: &Address, template_id: u64) {
+    env.events().publish(
+        (
+            symbol_short!("split"),
+            symbol_short!("tmpl_crt"),
+            creator.clone(),
+        ),
+        (template_id, env.ledger().sequence()),
+    );
+}
+
+/// Issue #476: Emitted when a creator deletes a stored invoice template.
+/// Topics: (split, tmpl_del, creator)
+/// Data: (template_id, ledger)
+pub fn template_deleted(env: &Env, creator: &Address, template_id: u64) {
+    env.events().publish(
+        (
+            symbol_short!("split"),
+            symbol_short!("tmpl_del"),
+            creator.clone(),
+        ),
+        (template_id, env.ledger().sequence()),
+    );
+}
+
+/// Issue #476: Emitted when an invoice is instantiated from a template.
+/// Topics: (split, tmpl_inv, invoice_id)
+/// Data: (creator, template_id, ledger)
+pub fn invoice_from_template(env: &Env, invoice_id: u64, creator: &Address, template_id: u64) {
+    env.events().publish(
+        (
+            symbol_short!("split"),
+            symbol_short!("tmpl_inv"),
+            invoice_id,
+        ),
+        (creator.clone(), template_id, env.ledger().sequence()),
+    );
+}
             soroban_sdk::Symbol::new(env, "RecipientAddressRotated"),
             invoice_id,
         ),

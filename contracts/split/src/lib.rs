@@ -54,6 +54,8 @@ use soroban_sdk::{
     Symbol, TryFromVal, Val, Vec,
 };
 use types::{
+    AdminAction, AdminRole, AdminSet, AuditEntry, Bid, CircuitBreakerStatus, CloneOverrides,
+    CompactInvoice, CompactMigrateResult, CompletionProof, ComputeEstimate, ConfidentialPayment,
     AdminRole, AuditEntry, Bid, CircuitBreakerStatus, CloneOverrides, CompactInvoice,
     CompactMigrateResult, CompletionProof, ComputeEstimate, ConfidentialPayment, ContributionResult,
     CreateInvoiceParams, CreatorStats, DelayedPayout, DisputeOutcome, DisputeRecord, DisputeStatus,
@@ -65,6 +67,10 @@ use types::{
     TimelockAction, Tranche, TreasuryRecord, UpgradeProposal,
     FeeBracket, FeeTier, InstalmentPlan, Invoice, InvoiceCore, InvoiceExt, InvoiceExt2, InvoiceExt3,
     InvoiceHot, InvoiceOptions, InvoiceOptions2, InvoicePayment, InvoiceStatus, InvoiceTemplate,
+    InvoiceTemplateRecord, LegacyInvoice, OverflowBehavior, Payment, PaymentCertificate,
+    PaymentCommitment, PaymentProof, PendingAdminAction, ProtocolFeeConfig, QueuedAction,
+    Recipient, RebateTier, RepScore, ResolveAction, ResolveRule, SimulateReleaseResult, SplitRule,
+    SubscriptionParams, TimelockAction, Tranche, TreasuryRecord, UpgradeProposal,
     LegacyInvoice, OverflowBehavior, Payment, PaymentCertificate, PaymentCommitment, PaymentProof,
     ProtocolFeeConfig, QueuedAction, Recipient, RecipientAddress, RebateTier, RepScore, ResolveAction, ResolveRule,
     SimulateReleaseResult, SplitRule, SubscriptionParams, TimelockAction, Tranche, TreasuryRecord,
@@ -322,6 +328,26 @@ fn reminder_key(invoice_id: u64, address: &Address) -> (Symbol, u64, Address) {
 
 fn group_treasury_key(group_id: u64) -> (Symbol, u64) {
     (symbol_short!("grp_tr"), group_id)
+}
+
+/// Issue #476: ID-based invoice template — persistent storage.
+fn template_id_key(creator: &Address, template_id: u64) -> (Symbol, Address, u64) {
+    (symbol_short!("tmpl_id"), creator.clone(), template_id)
+}
+
+/// Issue #476: Template ID counter per creator — persistent storage.
+fn template_id_counter_key(creator: &Address) -> (Symbol, Address) {
+    (symbol_short!("tmpl_ctr"), creator.clone())
+}
+
+/// Issue #475: The multi-sig admin set — instance storage.
+fn admin_set_key() -> Symbol {
+    symbol_short!("adm_set")
+}
+
+/// Issue #475: Pending multi-sig admin action keyed by its action hash — persistent storage.
+fn pending_admin_action_key(action_hash: &BytesN<32>) -> (Symbol, BytesN<32>) {
+    (symbol_short!("adm_pnd"), action_hash.clone())
 }
 
 fn template_key(creator: &Address, name: &Symbol) -> (Symbol, Address, Symbol) {
@@ -12578,5 +12604,476 @@ impl SplitContract {
         }
 
         events::group_rollback_triggered(env, group_id, members.len() as u32);
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #474: Invoice Cancellation with Full Contributor Refunds
+    // -----------------------------------------------------------------------
+
+    /// Cancel an open (Pending) invoice and atomically refund every contributor.
+    ///
+    /// Only the invoice creator may call this function. The invoice must be in
+    /// `Pending` status — it cannot be cancelled once released, refunded, or
+    /// already cancelled. All contributions stored across every payment shard
+    /// are summed per payer and transferred back in a single pass. The invoice
+    /// status is then set to `Cancelled` and the `InvoiceCancelled` event is
+    /// emitted.
+    ///
+    /// A cancellation cooldown is applied to the creator after a successful
+    /// cancellation to prevent abuse (configurable via
+    /// `set_cancellation_cooldown_ledgers`; defaults to ~1 day).
+    pub fn cancel_invoice(env: Env, invoice_id: u64) {
+        require_not_frozen(&env);
+        require_fn_not_paused(&env, &symbol_short!("cancel"));
+
+        let mut invoice = load_invoice(&env, invoice_id);
+
+        // Only the creator is authorised to cancel.
+        invoice.creator.require_auth();
+
+        assert!(
+            invoice.status == InvoiceStatus::Pending,
+            "InvalidStatus: invoice must be Pending to cancel"
+        );
+
+        let token_client = token::Client::new(&env, &invoice.tokens.get(0).expect("no token"));
+
+        // Aggregate all contributions per payer across every shard.
+        let mut totals: Map<Address, i128> = Map::new(&env);
+        for shard_id in 0..SHARD_COUNT {
+            if let Some(shard_payments) = env
+                .storage()
+                .persistent()
+                .get::<(Symbol, u64, u64), Vec<Payment>>(&pay_shard_key(invoice_id, shard_id))
+            {
+                for payment in shard_payments.iter() {
+                    let prev = totals.get(payment.payer.clone()).unwrap_or(0);
+                    totals.set(payment.payer.clone(), prev + payment.amount);
+                }
+            }
+        }
+
+        // Refund every contributor. All transfers happen before state is mutated
+        // so the operation is effectively atomic: if any transfer panics the
+        // entire transaction is rolled back (Soroban's standard behaviour).
+        let mut total_refunded: i128 = 0;
+        for (payer, amount) in totals.iter() {
+            if amount > 0 {
+                token_client.transfer(&env.current_contract_address(), &payer, &amount);
+                total_refunded += amount;
+                events::payer_refunded(&env, invoice_id, &payer, amount);
+            }
+        }
+
+        // Transition status to Cancelled.
+        let prev_status = invoice.status.clone();
+        invoice.status = InvoiceStatus::Cancelled;
+        invoice.completion_time = Some(env.ledger().timestamp());
+        save_invoice(&env, invoice_id, &invoice);
+
+        append_audit_entry(&env, invoice_id, symbol_short!("cancel"), &invoice.creator);
+
+        events::invoice_cancelled(&env, invoice_id, &invoice.creator, total_refunded);
+        events::invoice_state_changed(
+            &env,
+            invoice_id,
+            Some(&prev_status),
+            &InvoiceStatus::Cancelled,
+            &invoice.creator,
+        );
+
+        // Increment per-creator cancellation counter.
+        let cancel_cnt: u32 = env
+            .storage()
+            .persistent()
+            .get(&cancel_count_key(&invoice.creator))
+            .unwrap_or(0u32);
+        env.storage()
+            .persistent()
+            .set(&cancel_count_key(&invoice.creator), &(cancel_cnt + 1));
+
+        // Apply cooldown so the creator cannot immediately spam new invoices.
+        let cooldown_ledgers: u64 = env
+            .storage()
+            .instance()
+            .get(&cancellation_cooldown_ledgers_key())
+            .unwrap_or(DEFAULT_CANCELLATION_COOLDOWN_LEDGERS);
+        let current_ledger = env.ledger().sequence() as u64;
+        let until_ledger = current_ledger.saturating_add(cooldown_ledgers);
+        env.storage()
+            .persistent()
+            .set(&creator_cooldown_key(&invoice.creator), &until_ledger);
+        events::creator_cooldown_set(&env, &invoice.creator, until_ledger, cooldown_ledgers);
+
+        notify_invoice(
+            &env,
+            invoice_id,
+            symbol_short!("cancel"),
+            &invoice.notification_contract,
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #475: Multi-Signature Admin Control
+    // -----------------------------------------------------------------------
+
+    /// Initialise (or replace) the multi-sig AdminSet.
+    ///
+    /// Requires the current single admin to authenticate. Once called, all
+    /// sensitive operations that go through `propose_admin_action` /
+    /// `approve_admin_action` will require `threshold`-of-N signers.
+    pub fn set_admin_set(env: Env, admin: Address, signers: Vec<Address>, threshold: u32) {
+        require_admin(&env);
+        let _ = admin;
+        assert!(!signers.is_empty(), "signers must not be empty");
+        assert!(
+            threshold > 0 && threshold <= signers.len(),
+            "threshold must be between 1 and signers.len()"
+        );
+        let admin_set = AdminSet { signers, threshold };
+        env.storage().instance().set(&admin_set_key(), &admin_set);
+    }
+
+    /// Return the current AdminSet, or None if not yet configured.
+    pub fn get_admin_set(env: Env) -> Option<AdminSet> {
+        env.storage().instance().get(&admin_set_key())
+    }
+
+    /// Propose a new admin action under the multi-sig scheme.
+    ///
+    /// The caller must be one of the registered signers. The action is stored
+    /// on-chain keyed by the SHA-256 hash of its XDR serialisation. The
+    /// proposer's approval is counted automatically.
+    ///
+    /// Returns the 32-byte action hash that identifies this proposal.
+    pub fn propose_admin_action(
+        env: Env,
+        proposer: Address,
+        action: AdminAction,
+    ) -> BytesN<32> {
+        proposer.require_auth();
+
+        let admin_set: AdminSet = env
+            .storage()
+            .instance()
+            .get(&admin_set_key())
+            .expect("AdminSet not configured; call set_admin_set first");
+
+        // Verify the proposer is a recognised signer.
+        assert!(
+            admin_set.signers.iter().any(|s| s == proposer),
+            "NotAuthorized: proposer is not a registered admin signer"
+        );
+
+        // Compute a deterministic hash over the serialised action to use as key.
+        let action_bytes = action.clone().to_xdr(&env);
+        let action_hash: BytesN<32> = env.crypto().sha256(&action_bytes).into();
+
+        // Ensure no duplicate proposal for the same action.
+        assert!(
+            !env.storage()
+                .persistent()
+                .has(&pending_admin_action_key(&action_hash)),
+            "proposal already exists for this action"
+        );
+
+        let mut approvals: Vec<Address> = Vec::new(&env);
+        approvals.push_back(proposer.clone());
+
+        let pending = PendingAdminAction {
+            action_hash: action_hash.clone(),
+            action,
+            proposed_at: env.ledger().timestamp(),
+            approvals,
+            executed: false,
+        };
+
+        env.storage()
+            .persistent()
+            .set(&pending_admin_action_key(&action_hash), &pending);
+
+        events::admin_action_proposed(&env, &action_hash, &proposer);
+
+        action_hash
+    }
+
+    /// Approve a pending admin action and execute it if the threshold is met.
+    ///
+    /// The caller must be a registered signer who has not already approved
+    /// this proposal. Once the cumulative approval count reaches `threshold`
+    /// the action is executed immediately and marked as done.
+    pub fn approve_admin_action(env: Env, approver: Address, action_hash: BytesN<32>) {
+        approver.require_auth();
+
+        let admin_set: AdminSet = env
+            .storage()
+            .instance()
+            .get(&admin_set_key())
+            .expect("AdminSet not configured");
+
+        assert!(
+            admin_set.signers.iter().any(|s| s == approver),
+            "NotAuthorized: approver is not a registered admin signer"
+        );
+
+        let mut pending: PendingAdminAction = env
+            .storage()
+            .persistent()
+            .get(&pending_admin_action_key(&action_hash))
+            .expect("no pending action with this hash");
+
+        assert!(!pending.executed, "action already executed");
+
+        // Ensure the approver hasn't already voted.
+        assert!(
+            !pending.approvals.iter().any(|a| a == approver),
+            "signer has already approved this action"
+        );
+
+        pending.approvals.push_back(approver.clone());
+        let approval_count = pending.approvals.len();
+
+        events::admin_action_approved(&env, &action_hash, &approver, approval_count);
+
+        if approval_count >= admin_set.threshold {
+            // Execute the action.
+            match pending.action.clone() {
+                AdminAction::PauseContract => {
+                    env.storage().persistent().set(&paused_key(), &true);
+                }
+                AdminAction::UnpauseContract => {
+                    env.storage().persistent().set(&paused_key(), &false);
+                }
+                AdminAction::SetPlatformFeeBps(bps) => {
+                    assert!(bps <= 10_000, "fee_bps must be ≤ 10000");
+                    env.storage()
+                        .instance()
+                        .set(&platform_fee_bps_key(), &bps);
+                }
+                AdminAction::SetTreasury(addr) => {
+                    env.storage().instance().set(&treasury_key(), &addr);
+                }
+                AdminAction::ReplaceAdminSet(new_set) => {
+                    assert!(!new_set.signers.is_empty(), "signers must not be empty");
+                    assert!(
+                        new_set.threshold > 0 && new_set.threshold <= new_set.signers.len(),
+                        "invalid threshold"
+                    );
+                    env.storage().instance().set(&admin_set_key(), &new_set);
+                }
+            }
+
+            pending.executed = true;
+            env.storage()
+                .persistent()
+                .set(&pending_admin_action_key(&action_hash), &pending);
+
+            events::admin_action_executed(&env, &action_hash);
+        } else {
+            // Not yet at threshold — persist the updated approval list.
+            env.storage()
+                .persistent()
+                .set(&pending_admin_action_key(&action_hash), &pending);
+        }
+    }
+
+    /// Return a pending admin action by its action hash, or None.
+    pub fn get_pending_admin_action(
+        env: Env,
+        action_hash: BytesN<32>,
+    ) -> Option<PendingAdminAction> {
+        env.storage()
+            .persistent()
+            .get(&pending_admin_action_key(&action_hash))
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #476: Invoice Template Factory (ID-based)
+    // -----------------------------------------------------------------------
+
+    /// Store a new reusable invoice template on-chain.
+    ///
+    /// The template is keyed by a monotonically-increasing numeric ID scoped
+    /// to the creator, making it easy to reference programmatically without
+    /// choosing a name. `ratios` must be parallel to `recipients` and must
+    /// sum to exactly 10 000 basis points.
+    ///
+    /// Returns the assigned `template_id`.
+    pub fn create_template(
+        env: Env,
+        creator: Address,
+        recipients: Vec<Address>,
+        ratios: Vec<u32>,
+        token: Address,
+    ) -> u64 {
+        creator.require_auth();
+
+        assert!(
+            !recipients.is_empty(),
+            "must have at least one recipient"
+        );
+        assert!(
+            recipients.len() == ratios.len(),
+            "recipients and ratios must have the same length"
+        );
+
+        // Ratios must sum to exactly 10 000 bps.
+        let ratio_sum: u32 = ratios.iter().sum();
+        assert!(ratio_sum == 10_000, "ratios must sum to 10000 basis points");
+
+        // Assign the next template ID for this creator.
+        let next_id: u64 = env
+            .storage()
+            .persistent()
+            .get(&template_id_counter_key(&creator))
+            .unwrap_or(0u64);
+        let template_id = next_id + 1;
+
+        let template = InvoiceTemplateRecord {
+            recipients,
+            ratios,
+            token,
+        };
+
+        env.storage()
+            .persistent()
+            .set(&template_id_key(&creator, template_id), &template);
+        env.storage()
+            .persistent()
+            .set(&template_id_counter_key(&creator), &template_id);
+
+        events::template_created(&env, &creator, template_id);
+
+        template_id
+    }
+
+    /// Delete a previously stored template.
+    ///
+    /// Only the creator who owns the template may delete it. Deleting a
+    /// template does not affect invoices already instantiated from it.
+    pub fn delete_template(env: Env, creator: Address, template_id: u64) {
+        creator.require_auth();
+
+        assert!(
+            env.storage()
+                .persistent()
+                .has(&template_id_key(&creator, template_id)),
+            "template not found"
+        );
+
+        env.storage()
+            .persistent()
+            .remove(&template_id_key(&creator, template_id));
+
+        events::template_deleted(&env, &creator, template_id);
+    }
+
+    /// Instantiate a new invoice from a stored template in a single call.
+    ///
+    /// The template's `ratios` are applied to `total_amount` to derive each
+    /// recipient's individual amount: `amount_i = total_amount * ratio_i / 10_000`.
+    /// The resulting amounts vector is passed directly to the standard invoice
+    /// creation logic so all existing guards (min funding, deadlines, etc.) apply.
+    ///
+    /// Returns the newly created invoice ID.
+    pub fn invoice_from_template(
+        env: Env,
+        creator: Address,
+        template_id: u64,
+        total_amount: i128,
+        deadline: u64,
+    ) -> u64 {
+        creator.require_auth();
+
+        assert!(total_amount > 0, "total_amount must be positive");
+
+        let template: InvoiceTemplateRecord = env
+            .storage()
+            .persistent()
+            .get(&template_id_key(&creator, template_id))
+            .expect("template not found");
+
+        // Compute per-recipient amounts from basis-point ratios.
+        let mut amounts: Vec<i128> = Vec::new(&env);
+        for ratio in template.ratios.iter() {
+            let amt = total_amount * (ratio as i128) / 10_000;
+            assert!(amt > 0, "computed amount for a recipient is zero; increase total_amount");
+            amounts.push_back(amt);
+        }
+
+        let invoice_id = Self::_create_invoice_inner(
+            &env,
+            creator.clone(),
+            template.recipients,
+            amounts,
+            Vec::new(&env),       // recipient_tokens
+            template.token,       // funding_token
+            deadline,
+            Vec::new(&env),       // co_creators
+            false,                // allow_early_withdrawal
+            0,                    // bonus_pool
+            0,                    // bonus_max_payers
+            None,                 // prerequisite_id
+            Vec::new(&env),       // tranches
+            Vec::new(&env),       // co_signers
+            0,                    // required_signatures
+            0,                    // penalty_bps
+            0,                    // penalty_deadline
+            0,                    // min_funding_bps
+            Vec::new(&env),       // release_stages
+            None,                 // price_oracle
+            Vec::new(&env),       // swap_tokens
+            None,                 // oracle_address
+            0,                    // tax_bps
+            None,                 // tax_authority
+            0,                    // insurance_premium_bps
+            false,                // smart_route
+            None,                 // notification_contract
+            OverflowBehavior::Reject,
+            false,                // convert_to_stream
+            Vec::new(&env),       // accepted_tokens
+            None,                 // forward_to
+            None,                 // forward_invoice_id
+            None,                 // creator_cosigner
+            0,                    // velocity_limit
+            0,                    // velocity_window
+            Vec::new(&env),       // split_rules
+            Vec::new(&env),       // auto_resolve_rules
+            None,                 // cross_chain_ref
+            None,                 // allowed_payers
+            None,                 // payment_cooldown_secs
+            None,                 // max_payments_per_window
+            None,                 // payment_window_secs
+            None,                 // refund_grace_secs
+            Vec::new(&env),       // priorities
+            false,                // require_kyc
+            None,                 // scheduled_release_at
+            None,                 // min_payer_rep
+            None,                 // release_delay_ledgers
+            None,                 // metadata_hash
+            None,                 // target_usd_cents
+            None,                 // oracle
+            None,                 // oracle_asset_pair_base
+            None,                 // oracle_asset_pair_quote
+            None,                 // escrow_hold_period
+            None,                 // payment_open_at
+            None,                 // payment_close_at
+            None,                 // milestones
+            None,                 // recipient_max_payouts
+            false,                // recipient_whitelist_enabled
+            None,                 // release_condition_hash
+        );
+
+        events::invoice_from_template(&env, invoice_id, &creator, template_id);
+
+        invoice_id
+    }
+
+    /// Return a stored template by creator and ID, or panic if not found.
+    pub fn get_template(env: Env, creator: Address, template_id: u64) -> InvoiceTemplateRecord {
+        env.storage()
+            .persistent()
+            .get(&template_id_key(&creator, template_id))
+            .expect("template not found")
     }
 }

@@ -566,6 +566,49 @@ pub struct PenaltyTier {
     pub bps: u32,
 }
 
+/// Issue #475: Multi-signature admin set — replaces the single-admin model.
+/// Sensitive operations require `threshold`-of-N signers to approve.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct AdminSet {
+    /// All recognised admin signers.
+    pub signers: Vec<Address>,
+    /// Minimum number of approvals required to finalise an action.
+    pub threshold: u32,
+}
+
+/// Issue #475: Discriminated union of admin actions that can be proposed.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum AdminAction {
+    /// Pause the entire contract.
+    PauseContract,
+    /// Unpause the contract.
+    UnpauseContract,
+    /// Update the platform fee in basis points.
+    SetPlatformFeeBps(u32),
+    /// Replace the treasury address.
+    SetTreasury(Address),
+    /// Replace the full AdminSet (rotate signers / change threshold).
+    ReplaceAdminSet(AdminSet),
+}
+
+/// Issue #475: On-chain record of a pending multi-sig admin proposal.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct PendingAdminAction {
+    /// Keccak-like identifier (SHA-256 hash of the serialised action payload).
+    pub action_hash: BytesN<32>,
+    /// The actual action to execute once approved.
+    pub action: AdminAction,
+    /// Ledger timestamp when the proposal was created.
+    pub proposed_at: u64,
+    /// Set of signers who have already approved this proposal.
+    pub approvals: Vec<Address>,
+    /// Whether the proposal has been executed.
+    pub executed: bool,
+}
+
 /// Timelocked admin action queued for future execution.
 #[contracttype]
 #[derive(Clone, Debug)]
@@ -1352,6 +1395,33 @@ pub struct InstalmentPlan {
 pub struct FeeBracket {
     pub max_amount: i128,
     pub rate_bps: u32,
+}
+
+/// Issue #476: Reusable invoice template stored on-chain under a numeric ID.
+/// A creator stores this once and instantiates invoices from it via
+/// `invoice_from_template(template_id, total_amount, deadline)`.
+///
+/// `ratios` is parallel to `recipients` and encodes each recipient's share in
+/// basis points (sum must equal 10 000).  On instantiation the contract
+/// distributes `total_amount * ratio / 10 000` to each recipient.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct InvoiceTemplateRecord {
+    /// Ordered list of recipient addresses.
+    pub recipients: Vec<Address>,
+    /// Per-recipient share in basis points, parallel to `recipients`.
+    /// Must sum to 10 000.
+    pub ratios: Vec<u32>,
+    /// Token used for payment and payout.
+    pub token: Address,
+}
+
+/// Issue #476: Counter (u64) of templates created by a given creator.
+/// Stored under `TemplateCtr(creator)` in persistent storage.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct TemplateCounter {
+    pub next_id: u64,
 }
 
 /// Issue #437: Delayed payout stored per recipient until claimable.
