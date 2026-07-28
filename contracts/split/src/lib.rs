@@ -57,6 +57,12 @@ use types::{
     AdminRole, AuditEntry, Bid, CircuitBreakerStatus, CloneOverrides, CompactInvoice,
     CompactMigrateResult, CompletionProof, ComputeEstimate, ConfidentialPayment, ContributionResult,
     CreateInvoiceParams, CreatorStats, DelayedPayout, DisputeOutcome, DisputeRecord, DisputeStatus,
+    FeeBracket, FeeTier, InstalmentPlan, Invoice, InvoiceCore, InvoiceExt, InvoiceExt2,
+    InvoiceExt3, InvoiceHot, InvoiceOptions, InvoiceOptions2, InvoicePayment, InvoiceStatus,
+    InvoiceTemplate, LegacyInvoice, OverflowBehavior, Payment, PaymentCertificate,
+    PaymentCommitment, PaymentProof, ProtocolFeeConfig, QueuedAction, RebateTier, Recipient,
+    RepScore, ResolveAction, ResolveRule, SimulateReleaseResult, SplitRule, SubscriptionParams,
+    TimelockAction, Tranche, TreasuryRecord, UpgradeProposal,
     FeeBracket, FeeTier, InstalmentPlan, Invoice, InvoiceCore, InvoiceExt, InvoiceExt2, InvoiceExt3,
     InvoiceHot, InvoiceOptions, InvoiceOptions2, InvoicePayment, InvoiceStatus, InvoiceTemplate,
     LegacyInvoice, OverflowBehavior, Payment, PaymentCertificate, PaymentCommitment, PaymentProof,
@@ -197,6 +203,16 @@ fn paid_flags_key(id: u64) -> (Symbol, u64) {
 /// Bit 0 = 25 %, Bit 1 = 50 %, Bit 2 = 75 %, Bit 3 = 100 %.
 fn milestone_flags_key(id: u64) -> (Symbol, u64) {
     (symbol_short!("ms_flgs"), id)
+}
+
+/// Contract-level funding progress checkpoints in basis points.
+fn funding_checkpoints_key() -> Symbol {
+    symbol_short!("fnd_chk")
+}
+
+/// Highest admin-configured funding checkpoint already emitted per invoice.
+fn last_checkpoint_key(invoice_id: u64) -> (Symbol, u64) {
+    (symbol_short!("last_chk"), invoice_id)
 }
 
 /// Cliff + vesting schedule: bitmask (u32) of tranche indices already released
@@ -509,7 +525,6 @@ fn cancellation_cooldown_ledgers_key() -> Symbol {
     symbol_short!("cnl_cool")
 }
 
-
 /// Storage key for a pending recipient-replacement proposal.
 /// Keyed by (invoice_id, old_recipient).
 #[allow(dead_code)]
@@ -605,6 +620,8 @@ fn invoice_phase_key(invoice_id: u64) -> (Symbol, u64) {
 /// Issue #448: per-invoice slippage tolerance in basis points.
 fn slippage_tolerance_key(invoice_id: u64) -> (Symbol, u64) {
     (symbol_short!("slp_tol"), invoice_id)
+}
+
 /// Issue #451: per-invoice required memo hash.
 fn required_memo_hash_key(invoice_id: u64) -> (Symbol, u64) {
     (symbol_short!("req_memo"), invoice_id)
@@ -835,7 +852,10 @@ fn validate_milestones(env: &Env, milestones: &Vec<u32>) {
     let mut prev = 0u32;
     for milestone in milestones.iter() {
         assert!(milestone > prev, "milestones must be strictly ascending");
-        assert!(milestone <= 10_000, "milestone basis points must be <= 10000");
+        assert!(
+            milestone <= 10_000,
+            "milestone basis points must be <= 10000"
+        );
         prev = milestone;
     }
     assert!(prev == 10_000, "milestones must end at 10000");
@@ -912,9 +932,7 @@ fn accrue_creator_rebate(env: &Env, creator: &Address, release_amount: i128, tot
             let new_balance = current_balance
                 .checked_add(rebate)
                 .expect("rebate balance overflow");
-            env.storage()
-                .persistent()
-                .set(&balance_key, &new_balance);
+            env.storage().persistent().set(&balance_key, &new_balance);
             events::rebate_accrued(env, creator, rebate, tier.rebate_bps);
         }
     }
@@ -1750,6 +1768,59 @@ fn check_and_emit_milestones(
     }
 }
 
+/// Validate contract-level funding checkpoints. Checkpoints are basis-point
+/// thresholds and must be sorted ascending so events are emitted in order.
+fn validate_funding_checkpoints(checkpoints: &Vec<u32>) {
+    let mut prev = 0u32;
+    for checkpoint in checkpoints.iter() {
+        assert!(
+            checkpoint <= 10_000,
+            "checkpoint basis points must be <= 10000"
+        );
+        assert!(checkpoint > prev, "checkpoints must be sorted ascending");
+        prev = checkpoint;
+    }
+}
+
+/// Emit admin-configured funding checkpoint events for any thresholds newly
+/// crossed by this payment. Progress is calculated as `(funded * 10_000) / total`
+/// and compared against the contract-level checkpoint list.
+fn check_and_emit_funding_checkpoints(env: &Env, invoice_id: u64, funded: i128, total: i128) {
+    if total <= 0 || funded <= 0 {
+        return;
+    }
+
+    let checkpoints: Vec<u32> = env
+        .storage()
+        .instance()
+        .get(&funding_checkpoints_key())
+        .unwrap_or_else(|| Vec::new(env));
+    if checkpoints.is_empty() {
+        return;
+    }
+
+    let progress_bps = (funded.saturating_mul(10_000)) / total;
+    let last_emitted: u32 = env
+        .storage()
+        .persistent()
+        .get(&last_checkpoint_key(invoice_id))
+        .unwrap_or(0u32);
+    let mut highest_emitted = last_emitted;
+
+    for threshold_bps in checkpoints.iter() {
+        if threshold_bps > last_emitted && (threshold_bps as i128) <= progress_bps {
+            events::funding_checkpoint(env, invoice_id, threshold_bps, funded, total);
+            highest_emitted = threshold_bps;
+        }
+    }
+
+    if highest_emitted != last_emitted {
+        env.storage()
+            .persistent()
+            .set(&last_checkpoint_key(invoice_id), &highest_emitted);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Issue #334: Compact status helpers
 // ---------------------------------------------------------------------------
@@ -1860,7 +1931,13 @@ fn require_not_frozen(env: &Env) {
 const DEFAULT_DUPLICATE_WINDOW_LEDGERS: u32 = 100;
 
 /// Compute payment fingerprint hash: sha256(invoice_id || payer || amount || ledger).
-fn compute_payment_fingerprint(env: &Env, invoice_id: u64, payer: &Address, amount: i128, ledger: u32) -> BytesN<32> {
+fn compute_payment_fingerprint(
+    env: &Env,
+    invoice_id: u64,
+    payer: &Address,
+    amount: i128,
+    ledger: u32,
+) -> BytesN<32> {
     let mut input = Bytes::new(env);
     for byte in invoice_id.to_be_bytes().iter() {
         input.push_back(*byte);
@@ -1896,9 +1973,11 @@ fn record_payment_fingerprint(env: &Env, fingerprint: &BytesN<32>, current_ledge
     env.storage()
         .persistent()
         .set(&payment_fingerprint_key(fingerprint), &current_ledger);
-    env.storage()
-        .persistent()
-        .extend_ttl(&payment_fingerprint_key(fingerprint), window_ledgers, window_ledgers);
+    env.storage().persistent().extend_ttl(
+        &payment_fingerprint_key(fingerprint),
+        window_ledgers,
+        window_ledgers,
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1908,7 +1987,9 @@ fn record_payment_fingerprint(env: &Env, fingerprint: &BytesN<32>, current_ledge
 /// Set referrer reward percentage (admin-only via separate call).
 fn set_referrer_reward_bps(env: &Env, reward_bps: u32) {
     assert!(reward_bps <= 10_000, "reward_bps must be ≤ 10000");
-    env.storage().instance().set(&referrer_reward_bps_key(), &reward_bps);
+    env.storage()
+        .instance()
+        .set(&referrer_reward_bps_key(), &reward_bps);
 }
 
 /// Get current referrer reward percentage.
@@ -1929,8 +2010,11 @@ fn create_group_for_invoices(env: &Env, invoice_ids: &Vec<u64>) -> u64 {
         .storage()
         .instance()
         .get(&group_counter_key())
-        .unwrap_or(0u64) + 1;
-    env.storage().instance().set(&group_counter_key(), &group_id);
+        .unwrap_or(0u64)
+        + 1;
+    env.storage()
+        .instance()
+        .set(&group_counter_key(), &group_id);
 
     env.storage()
         .persistent()
@@ -2324,6 +2408,33 @@ impl SplitContract {
             .unwrap_or(DEFAULT_INVOICE_STORAGE_QUOTA)
     }
 
+    /// Configure contract-level funding progress checkpoints. Each checkpoint is
+    /// a basis-point threshold (`10_000 = 100%`). The list must be sorted in
+    /// strictly ascending order and every value must be <= 10_000.
+    pub fn set_funding_checkpoints(env: Env, admin: Address, checkpoints: Vec<u32>) {
+        require_role(&env, &admin, AdminRole::Operator);
+        validate_funding_checkpoints(&checkpoints);
+        env.storage()
+            .instance()
+            .set(&funding_checkpoints_key(), &checkpoints);
+    }
+
+    /// Return the currently configured funding progress checkpoints.
+    pub fn get_funding_checkpoints(env: Env) -> Vec<u32> {
+        env.storage()
+            .instance()
+            .get(&funding_checkpoints_key())
+            .unwrap_or_else(|| Vec::new(&env))
+    }
+
+    /// Return the highest funding checkpoint already emitted for an invoice.
+    pub fn get_last_funding_checkpoint(env: Env, invoice_id: u64) -> u32 {
+        env.storage()
+            .persistent()
+            .get(&last_checkpoint_key(invoice_id))
+            .unwrap_or(0u32)
+    }
+
     /// Issue #439: Set the cancellation cooldown period in ledgers. Requires admin auth.
     /// After a creator cancels an invoice, they must wait this many ledgers before creating a new one.
     /// Set to 0 to disable the cooldown.
@@ -2702,7 +2813,10 @@ impl SplitContract {
         creator.require_auth();
 
         let invoice = load_invoice(&env, invoice_id);
-        assert!(invoice.creator == creator, "only creator can modify whitelist");
+        assert!(
+            invoice.creator == creator,
+            "only creator can modify whitelist"
+        );
         assert!(
             invoice.status == InvoiceStatus::Pending,
             "invoice is not draft"
@@ -2734,7 +2848,10 @@ impl SplitContract {
         creator.require_auth();
 
         let invoice = load_invoice(&env, invoice_id);
-        assert!(invoice.creator == creator, "only creator can modify whitelist");
+        assert!(
+            invoice.creator == creator,
+            "only creator can modify whitelist"
+        );
         assert!(
             invoice.status == InvoiceStatus::Pending,
             "invoice is not draft"
@@ -3088,14 +3205,22 @@ impl SplitContract {
         env.storage().persistent().get(&key).unwrap_or(0)
     }
 
-    pub fn register_instalment_plan(env: Env, payer: Address, invoice_id: u64, plan: InstalmentPlan) {
+    pub fn register_instalment_plan(
+        env: Env,
+        payer: Address,
+        invoice_id: u64,
+        plan: InstalmentPlan,
+    ) {
         payer.require_auth();
         assert!(plan.tranches.len() > 0, "tranches must not be empty");
         let mut prev_ledger = 0;
         for i in 0..plan.tranches.len() {
             let t = plan.tranches.get(i).unwrap();
             assert!(t.amount > 0, "tranche amount must be positive");
-            assert!(t.ledger >= prev_ledger, "tranches must be in ascending ledger order");
+            assert!(
+                t.ledger >= prev_ledger,
+                "tranches must be in ascending ledger order"
+            );
             prev_ledger = t.ledger;
         }
         let key = plan_key(invoice_id, &payer);
@@ -3111,7 +3236,12 @@ impl SplitContract {
         }
     }
 
-    pub fn resolve_escrow(env: Env, creator: Address, invoice_id: u64, resolution_hash: BytesN<32>) {
+    pub fn resolve_escrow(
+        env: Env,
+        creator: Address,
+        invoice_id: u64,
+        resolution_hash: BytesN<32>,
+    ) {
         creator.require_auth();
         let mut invoice = load_invoice(&env, invoice_id);
         assert!(
@@ -3131,11 +3261,17 @@ impl SplitContract {
         for i in 0..brackets.len() {
             let b = brackets.get(i).unwrap();
             assert!(b.rate_bps <= 10_000, "rate_bps must be <= 10000");
-            assert!(b.max_amount > prev_max, "max_amount must be strictly ascending");
+            assert!(
+                b.max_amount > prev_max,
+                "max_amount must be strictly ascending"
+            );
             prev_max = b.max_amount;
         }
         let last = brackets.get(brackets.len() - 1).unwrap();
-        assert!(last.max_amount == i128::MAX, "last bracket max_amount must be i128::MAX");
+        assert!(
+            last.max_amount == i128::MAX,
+            "last bracket max_amount must be i128::MAX"
+        );
 
         env.storage().instance().set(&fee_brackets_key(), &brackets);
     }
@@ -3168,7 +3304,11 @@ impl SplitContract {
         for i in 0..brackets.len() {
             let b = brackets.get(i).unwrap();
             let slice_limit = b.max_amount.saturating_sub(prev_max);
-            let slice = if remaining > slice_limit { slice_limit } else { remaining };
+            let slice = if remaining > slice_limit {
+                slice_limit
+            } else {
+                remaining
+            };
             if slice > 0 {
                 fee += (slice as u128 * b.rate_bps as u128 / 10_000u128) as i128;
                 remaining -= slice;
@@ -3190,7 +3330,10 @@ impl SplitContract {
         for i in 1..tiers.len() {
             let prev = tiers.get(i - 1).unwrap();
             let curr = tiers.get(i).unwrap();
-            assert!(prev.min_volume < curr.min_volume, "rebate tiers must be sorted");
+            assert!(
+                prev.min_volume < curr.min_volume,
+                "rebate tiers must be sorted"
+            );
         }
 
         env.storage().instance().set(&rebate_tiers_key(), &tiers);
@@ -3590,7 +3733,10 @@ impl SplitContract {
         options: InvoiceOptions,
         options2: InvoiceOptions2,
     ) -> u64 {
-        let options = InvoiceOptions { ext: options2, ..options };
+        let options = InvoiceOptions {
+            ext: options2,
+            ..options
+        };
         Self::create_invoice(env, creator, recipients, amounts, token, deadline, options)
     }
 
@@ -3991,6 +4137,11 @@ impl SplitContract {
             + 1;
         env.storage().persistent().set(&counter_key(), &id);
 
+        // Funding checkpoint progress starts at 0 for each new invoice.
+        env.storage()
+            .persistent()
+            .set(&last_checkpoint_key(id), &0u32);
+
         if recipient_whitelist_enabled {
             let whitelist: Vec<Address> = env
                 .storage()
@@ -3998,7 +4149,10 @@ impl SplitContract {
                 .get(&recipient_whitelist_key(id))
                 .unwrap_or_else(|| Vec::new(env));
             for recipient in recipients.iter() {
-                assert!(whitelist.iter().any(|a| a == recipient), "recipient not whitelisted");
+                assert!(
+                    whitelist.iter().any(|a| a == recipient),
+                    "recipient not whitelisted"
+                );
             }
         }
 
@@ -4433,38 +4587,38 @@ impl SplitContract {
                 false,          // smart_route
                 None,           // notification_contract
                 OverflowBehavior::Reject,
-                false,            // convert_to_stream
-                Vec::new(&env),   // accepted_tokens
-                None,             // forward_to
-                None,             // forward_invoice_id
-                None,             // creator_cosigner
-                0_i128,           // velocity_limit
-                0_u64,            // velocity_window
-                Vec::new(&env),   // split_rules
-                Vec::new(&env),   // auto_resolve_rules
-                None,             // cross_chain_ref
-                None,             // allowed_payers
-                None,             // payment_cooldown_secs
-                None,             // max_payments_per_window
-                None,             // payment_window_secs
-                None,             // refund_grace_secs
-                Vec::new(&env),   // priorities
-                false,            // require_kyc
-                None,             // scheduled_release_at
-                None,             // min_payer_rep
-                None,             // release_delay_ledgers
-                None,             // metadata_hash
-                None,             // target_usd_cents
-                None,             // oracle
-                None,             // oracle_asset_pair_base
-                None,             // oracle_asset_pair_quote
-                None,             // escrow_hold_period
-                None,             // payment_open_at
-                None,             // payment_close_at
-                None,             // milestones
-                None,             // recipient_max_payouts
-                false,            // recipient_whitelist_enabled
-                None,             // release_condition_hash
+                false,          // convert_to_stream
+                Vec::new(&env), // accepted_tokens
+                None,           // forward_to
+                None,           // forward_invoice_id
+                None,           // creator_cosigner
+                0_i128,         // velocity_limit
+                0_u64,          // velocity_window
+                Vec::new(&env), // split_rules
+                Vec::new(&env), // auto_resolve_rules
+                None,           // cross_chain_ref
+                None,           // allowed_payers
+                None,           // payment_cooldown_secs
+                None,           // max_payments_per_window
+                None,           // payment_window_secs
+                None,           // refund_grace_secs
+                Vec::new(&env), // priorities
+                false,          // require_kyc
+                None,           // scheduled_release_at
+                None,           // min_payer_rep
+                None,           // release_delay_ledgers
+                None,           // metadata_hash
+                None,           // target_usd_cents
+                None,           // oracle
+                None,           // oracle_asset_pair_base
+                None,           // oracle_asset_pair_quote
+                None,           // escrow_hold_period
+                None,           // payment_open_at
+                None,           // payment_close_at
+                None,           // milestones
+                None,           // recipient_max_payouts
+                false,          // recipient_whitelist_enabled
+                None,           // release_condition_hash
             );
             ids.push_back(id);
         }
@@ -4497,14 +4651,14 @@ impl SplitContract {
         }
 
         let deadline = env.ledger().timestamp() + 30 * 24 * 60 * 60;
-            let id = Self::_create_invoice_inner(
-                &env,
-                creator.clone(),
-                recipients.clone(),
-                amounts.clone(),
-                Vec::new(&env),
-                token.clone(),
-                deadline,
+        let id = Self::_create_invoice_inner(
+            &env,
+            creator.clone(),
+            recipients.clone(),
+            amounts.clone(),
+            Vec::new(&env),
+            token.clone(),
+            deadline,
             Vec::new(&env),
             false,
             0,
@@ -4931,6 +5085,7 @@ impl SplitContract {
             events::payment_received(&env, invoice_id, &payer, net_paid);
 
             let total: i128 = invoice.amounts.iter().sum();
+            check_and_emit_funding_checkpoints(&env, invoice_id, invoice.funded, total);
 
             if invoice.funded >= total {
                 let in_group = env
@@ -4994,12 +5149,7 @@ impl SplitContract {
         );
     }
 
-    pub fn commit_payment(
-        env: Env,
-        payer: Address,
-        invoice_id: u64,
-        commitment_hash: BytesN<32>,
-    ) {
+    pub fn commit_payment(env: Env, payer: Address, invoice_id: u64, commitment_hash: BytesN<32>) {
         require_fn_not_paused(&env, &symbol_short!("pay"));
         payer.require_auth();
         let key = commitment_key(invoice_id, &payer);
@@ -5034,7 +5184,12 @@ impl SplitContract {
             .get(&key)
             .expect("commitment not found");
         let expiry = current_commitment_expiry(&env);
-        if env.ledger().sequence().saturating_sub(commitment.commit_ledger) > expiry {
+        if env
+            .ledger()
+            .sequence()
+            .saturating_sub(commitment.commit_ledger)
+            > expiry
+        {
             panic!("CommitmentExpired");
         }
         let computed_hash = compute_payment_commitment_hash(&env, invoice_id, amount, &salt);
@@ -5102,7 +5257,11 @@ impl SplitContract {
         donate_on_failure: bool,
     ) {
         let plan_storage_key = plan_key(invoice_id, payer);
-        if let Some(mut plan) = env.storage().persistent().get::<_, InstalmentPlan>(&plan_storage_key) {
+        if let Some(mut plan) = env
+            .storage()
+            .persistent()
+            .get::<_, InstalmentPlan>(&plan_storage_key)
+        {
             let paid_index = plan.paid_index;
             assert!(
                 (paid_index as usize) < plan.tranches.len().try_into().unwrap(),
@@ -5132,16 +5291,10 @@ impl SplitContract {
 
         // Issue #430: creator-defined payment window.
         if let Some(open_at) = get_payment_open_at_internal(env, invoice_id) {
-            assert!(
-                env.ledger().timestamp() >= open_at,
-                "PaymentWindowNotOpen"
-            );
+            assert!(env.ledger().timestamp() >= open_at, "PaymentWindowNotOpen");
         }
         if let Some(close_at) = get_payment_close_at_internal(env, invoice_id) {
-            assert!(
-                env.ledger().timestamp() <= close_at,
-                "PaymentWindowClosed"
-            );
+            assert!(env.ledger().timestamp() <= close_at, "PaymentWindowClosed");
         }
 
         // Lazy auto-resume: clear frozen if the auto-resume timestamp has passed.
@@ -5190,9 +5343,13 @@ impl SplitContract {
             // target (e.g. "$100 worth of XLM"); the required token total is
             // recomputed from the oracle's live exchange rate on every payment,
             // so it tracks the market instead of being locked in at creation.
-            let pair_base = invoice.oracle_asset_pair_base.clone()
+            let pair_base = invoice
+                .oracle_asset_pair_base
+                .clone()
                 .expect("oracle_asset_pair required when oracle is set");
-            let pair_quote = invoice.oracle_asset_pair_quote.clone()
+            let pair_quote = invoice
+                .oracle_asset_pair_quote
+                .clone()
                 .expect("oracle_asset_pair required when oracle is set");
             let args: Vec<Val> = ((pair_base, pair_quote),).into_val(env);
             let price_result = env.try_invoke_contract::<i128, soroban_sdk::Error>(
@@ -5482,6 +5639,7 @@ impl SplitContract {
                 total_for_milestone,
             );
         }
+        check_and_emit_funding_checkpoints(env, invoice_id, invoice.funded, total);
         update_creator_stats_on_payment(env, &invoice.creator, credited_amount);
         update_creator_payers(env, &invoice.creator, payer);
         notify_invoice(
@@ -5687,6 +5845,7 @@ impl SplitContract {
 
         append_audit_entry(&env, invoice_id, symbol_short!("pay_tok"), &payer);
         events::payment_received(&env, invoice_id, &payer, credited_amount);
+        check_and_emit_funding_checkpoints(&env, invoice_id, invoice.funded, total);
         Self::record_invoice_rate_limit(&env, invoice_id, &payer);
         notify_invoice(
             &env,
@@ -5785,6 +5944,7 @@ impl SplitContract {
 
         append_audit_entry(&env, invoice_id, symbol_short!("brdg_pay"), &payer);
         events::payment_received(&env, invoice_id, &payer, converted);
+        check_and_emit_funding_checkpoints(&env, invoice_id, invoice.funded, total);
         Self::record_invoice_rate_limit(&env, invoice_id, &payer);
         notify_invoice(
             &env,
@@ -5965,12 +6125,7 @@ impl SplitContract {
     /// For tranche invoices, only distributes tranches whose timestamp ≤ now.
     /// Blocks with "prerequisite not released" until the prerequisite invoice is Released.
     /// If an approver is set, requires the invoice to be approved first (issue #25).
-    pub fn release_invoice(
-        env: Env,
-        caller: Address,
-        invoice_id: u64,
-        preimage: Option<Bytes>,
-    ) {
+    pub fn release_invoice(env: Env, caller: Address, invoice_id: u64, preimage: Option<Bytes>) {
         require_fn_not_paused(&env, &symbol_short!("release"));
         require_not_frozen(&env);
         let caller = env.current_contract_address();
@@ -6220,14 +6375,17 @@ impl SplitContract {
                 let recipient = invoice.recipients.get(i).unwrap();
                 let base_amount = invoice.amounts.get(i).unwrap();
                 let proportional = if i == invoice.recipients.len() - 1 {
-                    tranche_amount.saturating_sub(paid_total).saturating_add(tranche_surplus)
+                    tranche_amount
+                        .saturating_sub(paid_total)
+                        .saturating_add(tranche_surplus)
                 } else {
                     (base_amount as u128 * delta_bps as u128 / 10_000u128) as i128
                 };
                 let payout = if !invoice.recipient_max_payouts.is_empty() {
                     match invoice.recipient_max_payouts.get(i).unwrap_or(None) {
                         Some(max_payout) if proportional > max_payout => {
-                            tranche_surplus = tranche_surplus.saturating_add(proportional - max_payout);
+                            tranche_surplus =
+                                tranche_surplus.saturating_add(proportional - max_payout);
                             max_payout
                         }
                         _ => proportional,
@@ -6246,9 +6404,10 @@ impl SplitContract {
                     .persistent()
                     .get(&surplus_key(invoice_id))
                     .unwrap_or(0);
-                env.storage()
-                    .persistent()
-                    .set(&surplus_key(invoice_id), &stored_surplus.saturating_add(tranche_surplus));
+                env.storage().persistent().set(
+                    &surplus_key(invoice_id),
+                    &stored_surplus.saturating_add(tranche_surplus),
+                );
             }
             invoice.milestones_released += 1;
             events::milestone_released(env, invoice_id, milestone_bps, paid_total);
@@ -6479,7 +6638,10 @@ impl SplitContract {
             invoice.creator == creator,
             "only creator can update release condition"
         );
-        assert!(invoice.status == InvoiceStatus::Pending, "invoice is not draft");
+        assert!(
+            invoice.status == InvoiceStatus::Pending,
+            "invoice is not draft"
+        );
         assert!(invoice.funded == 0, "invoice already funded");
 
         invoice.release_condition_hash = new_hash;
@@ -6742,8 +6904,13 @@ impl SplitContract {
         creator.require_auth();
         let invoice = load_invoice(&env, invoice_id);
         assert!(invoice.creator == creator, "only creator can set memo");
-        assert!(invoice.status == InvoiceStatus::Pending, "invoice is not pending");
-        env.storage().persistent().set(&required_memo_hash_key(invoice_id), &memo_hash);
+        assert!(
+            invoice.status == InvoiceStatus::Pending,
+            "invoice is not pending"
+        );
+        env.storage()
+            .persistent()
+            .set(&required_memo_hash_key(invoice_id), &memo_hash);
     }
 
     /// Issue #451: Pay an invoice with memo validation.
@@ -6759,10 +6926,24 @@ impl SplitContract {
     ) {
         require_not_paused(&env);
         payer.require_auth();
-        if let Some(required) = env.storage().persistent().get::<_, BytesN<32>>(&required_memo_hash_key(invoice_id)) {
+        if let Some(required) = env
+            .storage()
+            .persistent()
+            .get::<_, BytesN<32>>(&required_memo_hash_key(invoice_id))
+        {
             assert!(payment_memo == required, "MemoMismatch");
         }
-        Self::_pay(&env, &payer, invoice_id, amount, nonce, auto_convert, via, None, false);
+        Self::_pay(
+            &env,
+            &payer,
+            invoice_id,
+            amount,
+            nonce,
+            auto_convert,
+            via,
+            None,
+            false,
+        );
         events::payment_matched(&env, invoice_id, invoice_id, &payer);
     }
 
@@ -6772,12 +6953,17 @@ impl SplitContract {
         creator.require_auth();
         let invoice = load_invoice(&env, invoice_id);
         assert!(invoice.creator == creator, "only creator can set tags");
-        env.storage().persistent().set(&invoice_tags_key(invoice_id), &tags);
+        env.storage()
+            .persistent()
+            .set(&invoice_tags_key(invoice_id), &tags);
     }
 
     /// Issue #452: Get tags for an invoice.
     pub fn get_invoice_tags(env: Env, invoice_id: u64) -> Vec<String> {
-        env.storage().persistent().get(&invoice_tags_key(invoice_id)).unwrap_or_else(|| Vec::new(&env))
+        env.storage()
+            .persistent()
+            .get(&invoice_tags_key(invoice_id))
+            .unwrap_or_else(|| Vec::new(&env))
     }
 
     /// Claim vesting cliff share after cliff timestamp has passed (issue #27).
@@ -6889,7 +7075,11 @@ impl SplitContract {
 
         assert!(pending > 0, "no pending payout");
 
-        let idx = invoice.recipients.iter().position(|r| r == recipient.clone()).expect("recipient not found") as usize;
+        let idx = invoice
+            .recipients
+            .iter()
+            .position(|r| r == recipient.clone())
+            .expect("recipient not found") as usize;
         let token_client = token::Client::new(&env, &recipient_token_for(&invoice, idx));
         token_client.transfer(&env.current_contract_address(), &recipient, &pending);
 
@@ -6911,7 +7101,9 @@ impl SplitContract {
             .unwrap_or(0);
         assert!(surplus_total > 0, "no surplus available");
         assert!(
-            !env.storage().persistent().has(&surplus_claim_key(invoice_id, &payer)),
+            !env.storage()
+                .persistent()
+                .has(&surplus_claim_key(invoice_id, &payer)),
             "surplus already claimed"
         );
 
@@ -6961,7 +7153,8 @@ impl SplitContract {
 
         let total: i128 = invoice.amounts.iter().sum();
         let funded = invoice.funded;
-        let amount_released = ((funded as u128).saturating_mul(new_bps as u128) / 10_000u128) as i128;
+        let amount_released =
+            ((funded as u128).saturating_mul(new_bps as u128) / 10_000u128) as i128;
 
         let total_tranche_fee = if creator_waived {
             0
@@ -6993,7 +7186,8 @@ impl SplitContract {
                 let fee = if is_waived || amount_released == 0 {
                     0
                 } else {
-                    (payout_raw as u128 * total_tranche_fee as u128 / amount_released as u128) as i128
+                    (payout_raw as u128 * total_tranche_fee as u128 / amount_released as u128)
+                        as i128
                 };
                 let tax = (payout_raw as u128 * invoice.tax_bps as u128 / 10_000u128) as i128;
                 let payout = payout_raw - fee - tax;
@@ -7006,7 +7200,7 @@ impl SplitContract {
                     let transfer_res = env.try_invoke_contract::<(), soroban_sdk::Error>(
                         &funding_token_client.address,
                         &symbol_short!("transfer"),
-                        (&env.current_contract_address(), &recipient, &payout).into_val(env)
+                        (&env.current_contract_address(), &recipient, &payout).into_val(env),
                     );
                     if transfer_res.is_ok() {
                         success = true;
@@ -7025,7 +7219,11 @@ impl SplitContract {
                     token::Client::new(env, &recipient_token_for(invoice, i as usize));
                 let routed = Self::execute_smart_route(env, invoice, &recipient, payout);
                 if !routed {
-                    recipient_token_client.transfer(&env.current_contract_address(), &recipient, &payout);
+                    recipient_token_client.transfer(
+                        &env.current_contract_address(),
+                        &recipient,
+                        &payout,
+                    );
                 }
             }
         }
@@ -7047,7 +7245,11 @@ impl SplitContract {
 
         if total_tax > 0 {
             let tax_authority = invoice.tax_authority.as_ref().unwrap();
-            funding_token_client.transfer(&env.current_contract_address(), tax_authority, &total_tax);
+            funding_token_client.transfer(
+                &env.current_contract_address(),
+                tax_authority,
+                &total_tax,
+            );
         }
 
         // Calculate amount released in this tranche call.
@@ -7128,7 +7330,10 @@ impl SplitContract {
 
         assert!(!invoice.frozen, "invoice is frozen");
         assert!(!invoice.admin_frozen, "invoice frozen by admin");
-        assert!(invoice.status == InvoiceStatus::Pending, "invoice is not pending");
+        assert!(
+            invoice.status == InvoiceStatus::Pending,
+            "invoice is not pending"
+        );
         if let Some(held_until) = invoice.held_until {
             if env.ledger().sequence() < held_until {
                 panic!("EscrowHoldActive");
@@ -7138,7 +7343,10 @@ impl SplitContract {
         let total: i128 = invoice.amounts.iter().sum();
         assert!(invoice.funded >= total, "invoice not fully funded");
 
-        assert!(tranche_index < invoice.tranches.len(), "tranche index out of range");
+        assert!(
+            tranche_index < invoice.tranches.len(),
+            "tranche index out of range"
+        );
         assert!(tranche_index < 32, "tranche index exceeds bitmask capacity");
         let tranche = invoice.tranches.get(tranche_index).unwrap();
 
@@ -7171,7 +7379,9 @@ impl SplitContract {
         }
 
         released_idx |= bit;
-        env.storage().persistent().set(&released_tranche_idx_key(invoice_id), &released_idx);
+        env.storage()
+            .persistent()
+            .set(&released_tranche_idx_key(invoice_id), &released_idx);
 
         invoice.released_bps += tranche.basis_points;
 
@@ -7188,8 +7398,19 @@ impl SplitContract {
             }
             append_audit_entry(&env, invoice_id, symbol_short!("release"), &actor);
             events::invoice_released(&env, invoice_id, &invoice.recipients);
-            events::invoice_state_changed(&env, invoice_id, Some(&InvoiceStatus::Pending), &InvoiceStatus::Released, &actor);
-            notify_invoice(&env, invoice_id, symbol_short!("release"), &invoice.notification_contract);
+            events::invoice_state_changed(
+                &env,
+                invoice_id,
+                Some(&InvoiceStatus::Pending),
+                &InvoiceStatus::Released,
+                &actor,
+            );
+            notify_invoice(
+                &env,
+                invoice_id,
+                symbol_short!("release"),
+                &invoice.notification_contract,
+            );
             maybe_record_released(&env, &invoice.creator, total_paid);
             update_creator_stats_on_release(&env, &invoice.creator, total_paid);
         }
@@ -7606,9 +7827,10 @@ impl SplitContract {
                 .persistent()
                 .get(&surplus_key(invoice_id))
                 .unwrap_or(0);
-            env.storage()
-                .persistent()
-                .set(&surplus_key(invoice_id), &stored_surplus.saturating_add(surplus_total));
+            env.storage().persistent().set(
+                &surplus_key(invoice_id),
+                &stored_surplus.saturating_add(surplus_total),
+            );
         }
 
         // Issue #326: deduct protocol fee from the release amount before distributing.
@@ -7641,7 +7863,11 @@ impl SplitContract {
             // Transfer taxes first.
             if total_tax > 0 {
                 if let Some(ref auth) = invoice.tax_authority {
-                    funding_token_client.transfer(&env.current_contract_address(), auth, &total_tax);
+                    funding_token_client.transfer(
+                        &env.current_contract_address(),
+                        auth,
+                        &total_tax,
+                    );
                 }
             }
 
@@ -7652,12 +7878,20 @@ impl SplitContract {
                     .instance()
                     .get(&treasury_key())
                     .expect("treasury not set");
-                funding_token_client.transfer(&env.current_contract_address(), &treasury, &total_fee);
+                funding_token_client.transfer(
+                    &env.current_contract_address(),
+                    &treasury,
+                    &total_fee,
+                );
             }
 
             let net = distributed - total_tax - total_fee;
             if net > 0 {
-                funding_token_client.transfer(&env.current_contract_address(), &record.treasury, &net);
+                funding_token_client.transfer(
+                    &env.current_contract_address(),
+                    &record.treasury,
+                    &net,
+                );
             }
         } else {
             // Default behavior: transfer to each recipient (or route via DEX/router as configured).
@@ -7693,7 +7927,11 @@ impl SplitContract {
                     args.push_back(out_token.clone().into_val(env));
                     args.push_back(payout.into_val(env));
                     args.push_back(recipient.clone().into_val(env));
-                    let swap_res = env.try_invoke_contract::<i128, soroban_sdk::Error>(&out_token, &Symbol::new(env, "swap"), args);
+                    let swap_res = env.try_invoke_contract::<i128, soroban_sdk::Error>(
+                        &out_token,
+                        &Symbol::new(env, "swap"),
+                        args,
+                    );
                     if swap_res.is_ok() {
                         success = true;
                     }
@@ -7701,7 +7939,7 @@ impl SplitContract {
                     let transfer_res = env.try_invoke_contract::<(), soroban_sdk::Error>(
                         &funding_token_client.address,
                         &symbol_short!("transfer"),
-                        (&env.current_contract_address(), &recipient, &payout).into_val(env)
+                        (&env.current_contract_address(), &recipient, &payout).into_val(env),
                     );
                     if transfer_res.is_ok() {
                         success = true;
@@ -7713,7 +7951,11 @@ impl SplitContract {
                     route_args.push_back(recipient.clone().into_val(env));
                     let recipient_token_client =
                         token::Client::new(env, &recipient_token_for(invoice, i as usize));
-                    recipient_token_client.transfer(&env.current_contract_address(), &recipient, &payout);
+                    recipient_token_client.transfer(
+                        &env.current_contract_address(),
+                        &recipient,
+                        &payout,
+                    );
                 } else if invoice.convert_to_stream {
                     if let Some(stream_contract) = env
                         .storage()
@@ -7724,7 +7966,8 @@ impl SplitContract {
                         let transfer_res = env.try_invoke_contract::<(), soroban_sdk::Error>(
                             &funding_token_client.address,
                             &symbol_short!("transfer"),
-                            (&env.current_contract_address(), &stream_contract, &payout).into_val(env)
+                            (&env.current_contract_address(), &stream_contract, &payout)
+                                .into_val(env),
                         );
                         if transfer_res.is_ok() {
                             let mut args: Vec<Val> = Vec::new(env);
@@ -7759,7 +8002,11 @@ impl SplitContract {
                     } else {
                         let recipient_token_client =
                             token::Client::new(env, &recipient_token_for(invoice, i as usize));
-                        recipient_token_client.transfer(&env.current_contract_address(), &recipient, &payout);
+                        recipient_token_client.transfer(
+                            &env.current_contract_address(),
+                            &recipient,
+                            &payout,
+                        );
                     }
                 } else {
                     let routed = Self::execute_smart_route(env, invoice, &recipient, payout);
@@ -7767,7 +8014,7 @@ impl SplitContract {
                         let transfer_res = env.try_invoke_contract::<(), soroban_sdk::Error>(
                             &funding_token_client.address,
                             &symbol_short!("transfer"),
-                            (&env.current_contract_address(), &recipient, &payout).into_val(env)
+                            (&env.current_contract_address(), &recipient, &payout).into_val(env),
                         );
                         if transfer_res.is_ok() {
                             success = true;
@@ -7776,7 +8023,11 @@ impl SplitContract {
                         success = true;
                         let recipient_token_client =
                             token::Client::new(env, &recipient_token_for(invoice, i as usize));
-                        recipient_token_client.transfer(&env.current_contract_address(), &recipient, &payout);
+                        recipient_token_client.transfer(
+                            &env.current_contract_address(),
+                            &recipient,
+                            &payout,
+                        );
                     }
                 }
 
@@ -7788,7 +8039,11 @@ impl SplitContract {
                 }
 
                 if let Some(ref auth) = invoice.tax_authority {
-                    funding_token_client.transfer(&env.current_contract_address(), auth, &total_tax);
+                    funding_token_client.transfer(
+                        &env.current_contract_address(),
+                        auth,
+                        &total_tax,
+                    );
                 }
             }
 
@@ -7798,7 +8053,11 @@ impl SplitContract {
                     .instance()
                     .get(&treasury_key())
                     .expect("treasury not set");
-                funding_token_client.transfer(&env.current_contract_address(), &treasury, &total_fee);
+                funding_token_client.transfer(
+                    &env.current_contract_address(),
+                    &treasury,
+                    &total_fee,
+                );
             }
         }
 
@@ -8437,21 +8696,34 @@ impl SplitContract {
     }
 
     /// Create a successor invoice for an expired, partially funded invoice.
-    pub fn renew_invoice(env: Env, creator: Address, old_invoice_id: u64, new_deadline: u64) -> u64 {
+    pub fn renew_invoice(
+        env: Env,
+        creator: Address,
+        old_invoice_id: u64,
+        new_deadline: u64,
+    ) -> u64 {
         require_not_paused(&env);
         creator.require_auth();
 
         let mut old_invoice = load_invoice(&env, old_invoice_id);
-        assert!(old_invoice.creator == creator, "only creator can renew invoice");
+        assert!(
+            old_invoice.creator == creator,
+            "only creator can renew invoice"
+        );
         assert!(
             env.ledger().timestamp() > old_invoice.deadline,
             "invoice deadline has not passed"
         );
         assert!(
-            !env.storage().persistent().has(&renewed_to_key(old_invoice_id)),
+            !env.storage()
+                .persistent()
+                .has(&renewed_to_key(old_invoice_id)),
             "invoice already renewed"
         );
-        assert!(new_deadline > env.ledger().timestamp(), "new deadline must be in the future");
+        assert!(
+            new_deadline > env.ledger().timestamp(),
+            "new deadline must be in the future"
+        );
 
         let total: i128 = old_invoice.amounts.iter().sum();
         let carried_amount = total.saturating_sub(old_invoice.funded).max(0);
@@ -8608,7 +8880,9 @@ impl SplitContract {
         let mut invoice = load_invoice(&env, old_invoice_id);
         assert!(invoice.creator != payer, "invalid payer");
         assert!(
-            env.storage().persistent().has(&renewed_to_key(old_invoice_id)),
+            env.storage()
+                .persistent()
+                .has(&renewed_to_key(old_invoice_id)),
             "invoice not renewed"
         );
         assert!(
@@ -8636,9 +8910,15 @@ impl SplitContract {
         payer.require_auth();
 
         let invoice = load_invoice(&env, invoice_id);
-        assert!(invoice.status == InvoiceStatus::Released, "invoice is not released");
+        assert!(
+            invoice.status == InvoiceStatus::Released,
+            "invoice is not released"
+        );
         assert!(score >= 1 && score <= 5, "InvalidRating");
-        assert!(Self::get_payer_total(env.clone(), invoice_id, payer.clone()) > 0, "not a payer");
+        assert!(
+            Self::get_payer_total(env.clone(), invoice_id, payer.clone()) > 0,
+            "not a payer"
+        );
         assert!(
             !env.storage()
                 .persistent()
@@ -8664,7 +8944,9 @@ impl SplitContract {
             .unwrap_or((0u32, 0u32));
         creator_rating.0 += score;
         creator_rating.1 += 1;
-        env.storage().persistent().set(&creator_key, &creator_rating);
+        env.storage()
+            .persistent()
+            .set(&creator_key, &creator_rating);
 
         events::invoice_rated(&env, invoice_id, &payer, score);
     }
@@ -9791,15 +10073,16 @@ impl SplitContract {
 
     /// Issue #447: Get per-invoice analytics.
     pub fn get_invoice_analytics(env: Env, invoice_id: u64) -> types::InvoiceAnalytics {
-        env.storage().persistent().get(&invoice_analytics_key(invoice_id)).unwrap_or(
-            types::InvoiceAnalytics {
+        env.storage()
+            .persistent()
+            .get(&invoice_analytics_key(invoice_id))
+            .unwrap_or(types::InvoiceAnalytics {
                 payment_count: 0,
                 total_funded: 0,
                 unique_payers: 0,
                 first_payment_ledger: 0,
                 last_payment_ledger: 0,
-            },
-        )
+            })
     }
 
     /// Issue #448: Set slippage tolerance (in basis points) for an invoice.
@@ -9810,14 +10093,23 @@ impl SplitContract {
         let invoice = load_invoice(&env, invoice_id);
         assert!(invoice.creator == creator, "only creator can set slippage");
         assert!(slippage_bps <= 10_000, "slippage_bps must be <= 10000");
-        env.storage().persistent().set(&slippage_tolerance_key(invoice_id), &slippage_bps);
+        env.storage()
+            .persistent()
+            .set(&slippage_tolerance_key(invoice_id), &slippage_bps);
     }
 
     /// Issue #449: Set invoice phase. Transitions must follow: Draft -> Active -> Locked -> Released.
-    pub fn set_invoice_phase(env: Env, caller: Address, invoice_id: u64, new_phase: types::InvoicePhase) {
+    pub fn set_invoice_phase(
+        env: Env,
+        caller: Address,
+        invoice_id: u64,
+        new_phase: types::InvoicePhase,
+    ) {
         require_not_paused(&env);
         caller.require_auth();
-        let current_phase: types::InvoicePhase = env.storage().persistent()
+        let current_phase: types::InvoicePhase = env
+            .storage()
+            .persistent()
             .get(&invoice_phase_key(invoice_id))
             .unwrap_or(types::InvoicePhase::Draft);
         let valid = match (&current_phase, &new_phase) {
@@ -9827,12 +10119,15 @@ impl SplitContract {
             _ => false,
         };
         assert!(valid, "InvalidPhaseTransition");
-        env.storage().persistent().set(&invoice_phase_key(invoice_id), &new_phase);
+        env.storage()
+            .persistent()
+            .set(&invoice_phase_key(invoice_id), &new_phase);
     }
 
     /// Issue #449: Get invoice phase.
     pub fn get_invoice_phase(env: Env, invoice_id: u64) -> types::InvoicePhase {
-        env.storage().persistent()
+        env.storage()
+            .persistent()
             .get(&invoice_phase_key(invoice_id))
             .unwrap_or(types::InvoicePhase::Draft)
     }
@@ -10446,6 +10741,7 @@ impl SplitContract {
 
         append_audit_entry(&env, invoice_id, symbol_short!("del_pay"), &delegate);
         events::payment_received(&env, invoice_id, &beneficiary, amount);
+        check_and_emit_funding_checkpoints(&env, invoice_id, invoice.funded, total);
         Self::record_invoice_rate_limit(&env, invoice_id, &beneficiary);
         notify_invoice(
             &env,
@@ -10559,10 +10855,7 @@ impl SplitContract {
         }
 
         if pruned.len() >= max_payments {
-            let next_allowed_ledger = pruned
-                .get(0)
-                .unwrap_or(now)
-                .saturating_add(window_ledgers);
+            let next_allowed_ledger = pruned.get(0).unwrap_or(now).saturating_add(window_ledgers);
             events::rate_limit_hit(env, invoice_id, payer, next_allowed_ledger);
             panic!("RateLimitExceeded");
         }
@@ -11145,6 +11438,7 @@ impl SplitContract {
 
         events::delegated_payment(&env, invoice_id, &on_behalf_of, &executor, amount);
         events::payment_received(&env, invoice_id, &on_behalf_of, amount);
+        check_and_emit_funding_checkpoints(&env, invoice_id, invoice.funded, total);
         Self::record_invoice_rate_limit(&env, invoice_id, &on_behalf_of);
         append_audit_entry(&env, invoice_id, symbol_short!("dlgt_pay"), &executor);
         update_creator_stats_on_payment(&env, &invoice.creator, amount);
@@ -11736,7 +12030,9 @@ impl SplitContract {
     pub fn freeze_for_upgrade(env: Env, admin: Address, checkpoint_hash: BytesN<32>) {
         require_role(&env, &admin, AdminRole::SuperAdmin);
         env.storage().instance().set(&upgrade_freeze_key(), &true);
-        env.storage().instance().set(&upgrade_checkpoint_key(), &checkpoint_hash);
+        env.storage()
+            .instance()
+            .set(&upgrade_checkpoint_key(), &checkpoint_hash);
         events::contract_frozen_for_upgrade(&env, &checkpoint_hash);
     }
 
@@ -11769,7 +12065,9 @@ impl SplitContract {
             None => {
                 // Initial root is sha256(invoice_id)
                 let invoice_id_bytes = invoice_id.to_be_bytes();
-                let hash = env.crypto().sha256(&Bytes::from_slice(&env, &invoice_id_bytes));
+                let hash = env
+                    .crypto()
+                    .sha256(&Bytes::from_slice(&env, &invoice_id_bytes));
                 hash.into()
             }
         }
@@ -11794,10 +12092,7 @@ impl SplitContract {
         );
 
         let invoice = load_invoice(&env, invoice_id);
-        let token = invoice
-            .tokens
-            .get(0)
-            .expect("invoice has no tokens");
+        let token = invoice.tokens.get(0).expect("invoice has no tokens");
         let token_client = token::Client::new(&env, &token);
         token_client.transfer(
             &env.current_contract_address(),
@@ -11832,8 +12127,13 @@ impl SplitContract {
     /// Set the duplicate payment detection window (ledgers). Admin-only.
     pub fn set_duplicate_window_ledgers(env: Env, admin: Address, window_ledgers: u32) {
         require_role(&env, &admin, AdminRole::SuperAdmin);
-        assert!(window_ledgers > 0 && window_ledgers <= 1_000_000, "invalid window size");
-        env.storage().instance().set(&duplicate_window_ledgers_key(), &window_ledgers);
+        assert!(
+            window_ledgers > 0 && window_ledgers <= 1_000_000,
+            "invalid window size"
+        );
+        env.storage()
+            .instance()
+            .set(&duplicate_window_ledgers_key(), &window_ledgers);
     }
 
     /// Get the current duplicate detection window size.
@@ -11852,7 +12152,9 @@ impl SplitContract {
     pub fn set_referrer_reward_bps(env: Env, admin: Address, reward_bps: u32) {
         require_role(&env, &admin, AdminRole::SuperAdmin);
         assert!(reward_bps <= 10_000, "reward_bps must be ≤ 10000");
-        env.storage().instance().set(&referrer_reward_bps_key(), &reward_bps);
+        env.storage()
+            .instance()
+            .set(&referrer_reward_bps_key(), &reward_bps);
     }
 
     /// Get the current referrer reward percentage.
@@ -11903,7 +12205,12 @@ impl SplitContract {
                         &payment.payer,
                         &(payment.amount + payment.tip),
                     );
-                    events::payer_refunded(env, member_id, &payment.payer, payment.amount + payment.tip);
+                    events::payer_refunded(
+                        env,
+                        member_id,
+                        &payment.payer,
+                        payment.amount + payment.tip,
+                    );
                 }
             }
         }
