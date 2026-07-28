@@ -76,5 +76,7 @@ pub enum ContractError {
     CreatorCooldownActive = 34,
     /// Issue #473: Token is not in the allowed tokens list.
     UnauthorisedToken = 35,
+    /// Recipient address not found in invoice's recipient list.
+    RecipientNotFound = 36,
 }
 

@@ -1225,10 +1225,10 @@ pub fn recipient_address_rotated(
     env.events().publish(
         (
             symbol_short!("split"),
-            symbol_short!("adm_appr"),
-            action_hash.clone(),
+            soroban_sdk::Symbol::new(env, "RecipientAddressRotated"),
+            invoice_id,
         ),
-        (approver.clone(), approval_count, env.ledger().sequence()),
+        (old_address.clone(), new_address.clone()),
     );
 }
 
@@ -1287,10 +1287,47 @@ pub fn invoice_from_template(env: &Env, invoice_id: u64, creator: &Address, temp
         (creator.clone(), template_id, env.ledger().sequence()),
     );
 }
-            soroban_sdk::Symbol::new(env, "RecipientAddressRotated"),
+
+/// Emitted when a recipient's share is locked (e.g. during a dispute).
+/// Topics: (split, rcp_locked, invoice_id)
+/// Data: (recipient, admin)
+pub fn recipient_share_locked(env: &Env, invoice_id: u64, recipient: &Address, admin: &Address) {
+    env.events().publish(
+        (
+            symbol_short!("split"),
+            symbol_short!("rcp_locked"),
             invoice_id,
         ),
-        (old_address.clone(), new_address.clone()),
+        (recipient.clone(), admin.clone()),
+    );
+}
+
+/// Emitted when a recipient's share is unlocked after a dispute resolves.
+/// Topics: (split, rcp_unlock, invoice_id)
+/// Data: (recipient, admin)
+pub fn recipient_share_unlocked(env: &Env, invoice_id: u64, recipient: &Address, admin: &Address) {
+    env.events().publish(
+        (
+            symbol_short!("split"),
+            symbol_short!("rcp_unlock"),
+            invoice_id,
+        ),
+        (recipient.clone(), admin.clone()),
+    );
+}
+
+/// Emitted when a contributor withdraws their contribution before an invoice
+/// is fully funded.
+/// Topics: (split, contr_wdr, invoice_id)
+/// Data: (payer, amount)
+pub fn contribution_withdrawn(env: &Env, invoice_id: u64, payer: &Address, amount: i128) {
+    env.events().publish(
+        (
+            symbol_short!("split"),
+            symbol_short!("contr_wdr"),
+            invoice_id,
+        ),
+        (payer.clone(), amount),
     );
 }
 
