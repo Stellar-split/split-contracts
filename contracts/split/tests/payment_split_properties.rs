@@ -92,8 +92,7 @@ proptest! {
 
         for (payout, percentage) in payouts.iter().zip(percentages.iter()) {
             let numerator = total * *percentage as u128;
-            let entitlement_ceiling =
-                (numerator + TOTAL_BPS as u128 - 1) / TOTAL_BPS as u128;
+            let entitlement_ceiling = numerator.div_ceil(TOTAL_BPS as u128);
             prop_assert!(*payout <= entitlement_ceiling);
         }
     }
@@ -128,6 +127,6 @@ proptest! {
     fn recipient_percentages_sum_to_exactly_one_hundred_percent(
         percentages in percentages(),
     ) {
-        prop_assert_eq!(percentages.iter().map(|value| *value as u32).sum::<u32>(), TOTAL_BPS);
+        prop_assert_eq!(percentages.iter().copied().sum::<u32>(), TOTAL_BPS);
     }
 }

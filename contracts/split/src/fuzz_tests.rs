@@ -1,5 +1,8 @@
 #![cfg(test)]
 #![allow(clippy::all)]
+// Reference-model helpers kept alongside the properties they support; not every
+// one is referenced by the currently-enabled proptest cases.
+#![allow(dead_code)]
 
 extern crate std;
 
@@ -148,7 +151,10 @@ fn split_payouts(invoice_amount: u128, percentages: &[u32]) -> Vec<u128> {
             }
         }
 
-        assert!(assigned_in_pass, "no recipient can receive the remaining rounding unit");
+        assert!(
+            assigned_in_pass,
+            "no recipient can receive the remaining rounding unit"
+        );
     }
 
     payouts
