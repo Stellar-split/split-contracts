@@ -1047,11 +1047,7 @@ impl Invoice {
     /// Upgrade a legacy (pre-version) invoice to the current schema.
     /// New fields are filled with their default (empty / zero) values.
     pub fn from_legacy(old: LegacyInvoice, env: &Env) -> Self {
-        let funding_token = old
-            .tokens
-            .get(0)
-            .expect("no token")
-            .clone();
+        let funding_token = old.tokens.get(0).expect("no token").clone();
         Invoice {
             version: 2,
             creator: old.creator,
@@ -1360,3 +1356,18 @@ pub struct DelayedPayout {
     /// Ledger sequence at which this payout becomes claimable.
     pub claimable_at_ledger: u32,
 }
+
+/// Issue #470: Result of contribute containing amount applied and refund amount.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ContributionResult {
+    pub invoice_id: u64,
+    pub amount_applied: i128,
+    pub refund_amount: i128,
+}
+
+/// Issue #471: Storage key for recipient address rotation mapping.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct RecipientAddress(pub u64, pub Address);
+

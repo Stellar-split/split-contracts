@@ -148,7 +148,10 @@ fn split_payouts(invoice_amount: u128, percentages: &[u32]) -> Vec<u128> {
             }
         }
 
-        assert!(assigned_in_pass, "no recipient can receive the remaining rounding unit");
+        assert!(
+            assigned_in_pass,
+            "no recipient can receive the remaining rounding unit"
+        );
     }
 
     payouts

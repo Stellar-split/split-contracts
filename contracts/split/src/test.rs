@@ -1903,9 +1903,18 @@ fn test_release_tranche_full_vesting_schedule() {
 
     // Cliff at t=2_000 (30%), then t=3_000 (30%), then t=4_000 (40%).
     let mut tranches = Vec::new(&env);
-    tranches.push_back(types::Tranche { timestamp: 2_000, basis_points: 3_000 });
-    tranches.push_back(types::Tranche { timestamp: 3_000, basis_points: 3_000 });
-    tranches.push_back(types::Tranche { timestamp: 4_000, basis_points: 4_000 });
+    tranches.push_back(types::Tranche {
+        timestamp: 2_000,
+        basis_points: 3_000,
+    });
+    tranches.push_back(types::Tranche {
+        timestamp: 3_000,
+        basis_points: 3_000,
+    });
+    tranches.push_back(types::Tranche {
+        timestamp: 4_000,
+        basis_points: 4_000,
+    });
 
     let mut recipients = Vec::new(&env);
     recipients.push_back(recipient.clone());
@@ -1966,7 +1975,10 @@ fn test_release_tranche_before_time_panics() {
     env.ledger().set_timestamp(1_000);
 
     let mut tranches = Vec::new(&env);
-    tranches.push_back(types::Tranche { timestamp: 5_000, basis_points: 10_000 });
+    tranches.push_back(types::Tranche {
+        timestamp: 5_000,
+        basis_points: 10_000,
+    });
 
     let mut recipients = Vec::new(&env);
     recipients.push_back(recipient.clone());
@@ -2006,8 +2018,14 @@ fn test_release_tranche_double_release_panics() {
     env.ledger().set_timestamp(1_000);
 
     let mut tranches = Vec::new(&env);
-    tranches.push_back(types::Tranche { timestamp: 1_500, basis_points: 5_000 });
-    tranches.push_back(types::Tranche { timestamp: 2_500, basis_points: 5_000 });
+    tranches.push_back(types::Tranche {
+        timestamp: 1_500,
+        basis_points: 5_000,
+    });
+    tranches.push_back(types::Tranche {
+        timestamp: 2_500,
+        basis_points: 5_000,
+    });
 
     let mut recipients = Vec::new(&env);
     recipients.push_back(recipient.clone());
@@ -2044,8 +2062,14 @@ fn test_create_invoice_tranches_bps_not_10000_panics() {
     let recipient = Address::generate(&env);
 
     let mut tranches = Vec::new(&env);
-    tranches.push_back(types::Tranche { timestamp: 1_000, basis_points: 4_000 });
-    tranches.push_back(types::Tranche { timestamp: 2_000, basis_points: 4_000 });
+    tranches.push_back(types::Tranche {
+        timestamp: 1_000,
+        basis_points: 4_000,
+    });
+    tranches.push_back(types::Tranche {
+        timestamp: 2_000,
+        basis_points: 4_000,
+    });
 
     let mut recipients = Vec::new(&env);
     recipients.push_back(recipient.clone());
@@ -4307,7 +4331,15 @@ fn test_oracle_create_invoice_stores_oracle_address() {
     let mut amounts = Vec::new(&env);
     amounts.push_back(10_000_i128); // $100.00 target, in USD cents
 
-    let id = c.create_invoice_ext(&creator, &recipients, &amounts, &token_id, &9_999, &default_options(&env), &opts2);
+    let id = c.create_invoice_ext(
+        &creator,
+        &recipients,
+        &amounts,
+        &token_id,
+        &9_999,
+        &default_options(&env),
+        &opts2,
+    );
 
     let ext2 = c.get_invoice_ext2(&id);
     assert_eq!(ext2.oracle, Some(oracle_id));
@@ -4336,7 +4368,15 @@ fn test_oracle_create_invoice_requires_asset_pair() {
     let mut amounts = Vec::new(&env);
     amounts.push_back(10_000_i128);
 
-    let result = c.try_create_invoice_ext(&creator, &recipients, &amounts, &token_id, &9_999, &default_options(&env), &opts2);
+    let result = c.try_create_invoice_ext(
+        &creator,
+        &recipients,
+        &amounts,
+        &token_id,
+        &9_999,
+        &default_options(&env),
+        &opts2,
+    );
     assert!(result.is_err());
 }
 
@@ -4366,7 +4406,15 @@ fn test_oracle_price_changes_between_payments() {
     let mut amounts = Vec::new(&env);
     amounts.push_back(10_000_i128); // $100.00 target
 
-    let id = c.create_invoice_ext(&creator, &recipients, &amounts, &token_id, &9_999, &default_options(&env), &opts2);
+    let id = c.create_invoice_ext(
+        &creator,
+        &recipients,
+        &amounts,
+        &token_id,
+        &9_999,
+        &default_options(&env),
+        &opts2,
+    );
 
     // At $0.10/XLM, $100 requires 1000 XLM. Pay 400 of it.
     c.pay(&payer, &id, &400_i128, &0_u64, &false, &false);
@@ -4407,7 +4455,15 @@ fn test_oracle_emits_price_fetched_event() {
     let mut amounts = Vec::new(&env);
     amounts.push_back(10_000_i128); // $100.00 target -> 1000 XLM at $0.10
 
-    let id = c.create_invoice_ext(&creator, &recipients, &amounts, &token_id, &9_999, &default_options(&env), &opts2);
+    let id = c.create_invoice_ext(
+        &creator,
+        &recipients,
+        &amounts,
+        &token_id,
+        &9_999,
+        &default_options(&env),
+        &opts2,
+    );
     c.pay(&payer, &id, &1_000_i128, &0_u64, &false, &false);
 
     let found = env
@@ -4443,7 +4499,15 @@ fn test_oracle_unavailable_panics() {
     let mut amounts = Vec::new(&env);
     amounts.push_back(10_000_i128);
 
-    let id = c.create_invoice_ext(&creator, &recipients, &amounts, &token_id, &9_999, &default_options(&env), &opts2);
+    let id = c.create_invoice_ext(
+        &creator,
+        &recipients,
+        &amounts,
+        &token_id,
+        &9_999,
+        &default_options(&env),
+        &opts2,
+    );
 
     c.pay(&payer, &id, &100_i128, &0_u64, &false, &false);
 }
@@ -4474,7 +4538,15 @@ fn test_oracle_zero_rate_panics() {
     let mut amounts = Vec::new(&env);
     amounts.push_back(10_000_i128);
 
-    let id = c.create_invoice_ext(&creator, &recipients, &amounts, &token_id, &9_999, &default_options(&env), &opts2);
+    let id = c.create_invoice_ext(
+        &creator,
+        &recipients,
+        &amounts,
+        &token_id,
+        &9_999,
+        &default_options(&env),
+        &opts2,
+    );
 
     c.pay(&payer, &id, &100_i128, &0_u64, &false, &false);
 }
@@ -8188,7 +8260,14 @@ fn test_payment_before_open_fails() {
     env.ledger().set_timestamp(1_000);
 
     let id = make_windowed_invoice(
-        &env, &c, &creator, &recipient, &token_id, 9_999, Some(5_000), None,
+        &env,
+        &c,
+        &creator,
+        &recipient,
+        &token_id,
+        9_999,
+        Some(5_000),
+        None,
     );
 
     c.pay(&payer, &id, &300_i128, &0_u64, &false, &false);
@@ -8235,7 +8314,14 @@ fn test_payment_after_close_fails() {
     env.ledger().set_timestamp(1_000);
 
     let id = make_windowed_invoice(
-        &env, &c, &creator, &recipient, &token_id, 9_999, None, Some(2_000),
+        &env,
+        &c,
+        &creator,
+        &recipient,
+        &token_id,
+        9_999,
+        None,
+        Some(2_000),
     );
 
     env.ledger().set_timestamp(3_000);
@@ -8254,7 +8340,14 @@ fn test_payment_only_open_set_no_close_restriction() {
     env.ledger().set_timestamp(1_000);
 
     let id = make_windowed_invoice(
-        &env, &c, &creator, &recipient, &token_id, 9_999, Some(1_000), None,
+        &env,
+        &c,
+        &creator,
+        &recipient,
+        &token_id,
+        9_999,
+        Some(1_000),
+        None,
     );
 
     // Far past the open timestamp, with no close bound to trip.
@@ -8275,7 +8368,14 @@ fn test_payment_only_close_set_no_open_restriction() {
     env.ledger().set_timestamp(500);
 
     let id = make_windowed_invoice(
-        &env, &c, &creator, &recipient, &token_id, 9_999, None, Some(5_000),
+        &env,
+        &c,
+        &creator,
+        &recipient,
+        &token_id,
+        9_999,
+        None,
+        Some(5_000),
     );
 
     // Immediately payable since there is no open bound.
@@ -8295,7 +8395,14 @@ fn test_payment_close_at_must_be_before_deadline() {
 
     // close_at == deadline is rejected; it must be strictly before.
     make_windowed_invoice(
-        &env, &c, &creator, &recipient, &token_id, 9_999, None, Some(9_999),
+        &env,
+        &c,
+        &creator,
+        &recipient,
+        &token_id,
+        9_999,
+        None,
+        Some(9_999),
     );
 }
 
@@ -9713,4 +9820,128 @@ fn test_milestones_auto_release() {
     c.pay(&payer, &id, &50_i128, &1_u64, &false, &false);
     assert_eq!(tk.balance(&recipient), 100);
     assert_eq!(c.get_invoice(&id).status, InvoiceStatus::Released);
+}
+
+fn configured_checkpoint_setup() -> (Env, Address, Address, Address) {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    c.initialize(
+        &admin, &0_i128, &treasury, &token_id, &0_u32, &None, &0_u32, &0_u32, &0_u64,
+    );
+    (env, contract_id, token_id, admin)
+}
+
+fn funding_checkpoint_events(env: &Env) -> Vec<events::FundingCheckpoint> {
+    let mut checkpoints = Vec::new(env);
+    for event in env.events().all().iter() {
+        let topics = event.1;
+        if topics.len() < 2 {
+            continue;
+        }
+        let Ok(topic) = Symbol::try_from_val(env, &topics.get(1).unwrap()) else {
+            continue;
+        };
+        if topic == symbol_short!("fnd_chk") {
+            checkpoints.push_back(
+                events::FundingCheckpoint::try_from_val(env, &event.2)
+                    .expect("funding checkpoint event data should decode"),
+            );
+        }
+    }
+    checkpoints
+}
+
+#[test]
+fn test_funding_checkpoint_single_hit() {
+    let (env, contract_id, token_id, admin) = configured_checkpoint_setup();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let payer = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    StellarAssetClient::new(&env, &token_id).mint(&payer, &1_000);
+    env.ledger().set_timestamp(1_000);
+
+    let mut checkpoints = Vec::new(&env);
+    checkpoints.push_back(2_500);
+    c.set_funding_checkpoints(&admin, &checkpoints);
+
+    let id = make_invoice(&env, &c, &creator, &recipient, 1_000, &token_id, 9_999);
+    assert_eq!(c.get_last_funding_checkpoint(&id), 0);
+
+    c.pay(&payer, &id, &250_i128, &0_u64, &false, &false);
+
+    let events = funding_checkpoint_events(&env);
+    assert_eq!(events.len(), 1);
+    let evt = events.get(0).unwrap();
+    assert_eq!(evt.invoice_id, id);
+    assert_eq!(evt.threshold_bps, 2_500);
+    assert_eq!(evt.funded, 250);
+    assert_eq!(evt.total, 1_000);
+    assert_eq!(c.get_last_funding_checkpoint(&id), 2_500);
+}
+
+#[test]
+fn test_funding_checkpoint_multiple_in_one_payment() {
+    let (env, contract_id, token_id, admin) = configured_checkpoint_setup();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let payer = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    StellarAssetClient::new(&env, &token_id).mint(&payer, &1_000);
+    env.ledger().set_timestamp(1_000);
+
+    let mut checkpoints = Vec::new(&env);
+    checkpoints.push_back(1_000);
+    checkpoints.push_back(2_500);
+    checkpoints.push_back(5_000);
+    checkpoints.push_back(7_500);
+    c.set_funding_checkpoints(&admin, &checkpoints);
+
+    let id = make_invoice(&env, &c, &creator, &recipient, 1_000, &token_id, 9_999);
+    c.pay(&payer, &id, &800_i128, &0_u64, &false, &false);
+
+    let events = funding_checkpoint_events(&env);
+    assert_eq!(events.len(), 4);
+    assert_eq!(events.get(0).unwrap().threshold_bps, 1_000);
+    assert_eq!(events.get(1).unwrap().threshold_bps, 2_500);
+    assert_eq!(events.get(2).unwrap().threshold_bps, 5_000);
+    assert_eq!(events.get(3).unwrap().threshold_bps, 7_500);
+    for evt in events.iter() {
+        assert_eq!(evt.invoice_id, id);
+        assert_eq!(evt.funded, 800);
+        assert_eq!(evt.total, 1_000);
+    }
+    assert_eq!(c.get_last_funding_checkpoint(&id), 7_500);
+}
+
+#[test]
+fn test_funding_checkpoint_not_reemitted_on_subsequent_payments() {
+    let (env, contract_id, token_id, admin) = configured_checkpoint_setup();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let payer = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    StellarAssetClient::new(&env, &token_id).mint(&payer, &1_000);
+    env.ledger().set_timestamp(1_000);
+
+    let mut checkpoints = Vec::new(&env);
+    checkpoints.push_back(2_500);
+    checkpoints.push_back(5_000);
+    c.set_funding_checkpoints(&admin, &checkpoints);
+
+    let id = make_invoice(&env, &c, &creator, &recipient, 1_000, &token_id, 9_999);
+    c.pay(&payer, &id, &300_i128, &0_u64, &false, &false);
+    assert_eq!(funding_checkpoint_events(&env).len(), 1);
+
+    c.pay(&payer, &id, &200_i128, &1_u64, &false, &false);
+    let events = funding_checkpoint_events(&env);
+    assert_eq!(events.len(), 2);
+    assert_eq!(events.get(0).unwrap().threshold_bps, 2_500);
+    assert_eq!(events.get(1).unwrap().threshold_bps, 5_000);
+    assert_eq!(c.get_last_funding_checkpoint(&id), 5_000);
 }
