@@ -605,6 +605,8 @@ fn invoice_phase_key(invoice_id: u64) -> (Symbol, u64) {
 /// Issue #448: per-invoice slippage tolerance in basis points.
 fn slippage_tolerance_key(invoice_id: u64) -> (Symbol, u64) {
     (symbol_short!("slp_tol"), invoice_id)
+}
+
 /// Issue #451: per-invoice required memo hash.
 fn required_memo_hash_key(invoice_id: u64) -> (Symbol, u64) {
     (symbol_short!("req_memo"), invoice_id)
