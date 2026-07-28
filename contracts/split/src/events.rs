@@ -1060,6 +1060,17 @@ pub fn group_rollback_triggered(env: &Env, group_id: u64, member_count: u32) {
     );
 }
 
+/// Issue #489: Emitted when a contribution qualifies for the early-bird discounted
+/// platform fee.
+/// Topics: (split, ebird_pay, invoice_id)
+/// Data: (payer, discount_amount)
+pub fn early_bird_payment(env: &Env, invoice_id: u64, payer: &Address, discount_amount: i128) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("ebird_pay"), invoice_id),
+        (payer.clone(), discount_amount),
+    );
+}
+
 /// Issue #439: Emitted when a creator's cancellation cooldown is set.
 /// Topics: (split, cr_cool, creator)
 /// Data: (until_ledger, cooldown_ledgers)

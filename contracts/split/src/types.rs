@@ -380,6 +380,14 @@ pub struct InvoiceOptions2 {
     pub recipient_whitelist_enabled: bool,
     /// Issue #188: escrow hold period in ledgers.
     pub escrow_hold_period: Option<u32>,
+    /// Issue #489: number of ledgers after creation during which contributions
+    /// qualify for the discounted `early_bird_fee_bps` platform fee. 0 disables
+    /// the early-bird discount entirely.
+    pub early_bird_window_ledgers: u32,
+    /// Issue #489: discounted platform fee (bps) applied to contributions made
+    /// within `early_bird_window_ledgers` of invoice creation. Must be ≤ the
+    /// standard platform fee in effect at creation time.
+    pub early_bird_fee_bps: u32,
 }
 
 /// Legacy invoice layout used by stored invoices created before the `version`
@@ -537,6 +545,15 @@ pub struct InvoiceExt2 {
     pub release_condition_hash: Option<BytesN<32>>,
     /// Issue #417: recipient whitelist enforcement flag.
     pub recipient_whitelist_enabled: bool,
+    /// Issue #489: ledgers after creation during which contributions qualify
+    /// for `early_bird_fee_bps`. 0 disables the discount.
+    pub early_bird_window_ledgers: u32,
+    /// Issue #489: discounted platform fee (bps) for contributions made within
+    /// the early-bird window.
+    pub early_bird_fee_bps: u32,
+    /// Issue #489: total platform-fee discount accrued from early-bird
+    /// contributions so far; deducted from the platform fee at release.
+    pub early_bird_fee_credit: i128,
 }
 
 /// Issue #211: A single escalating penalty tier (seconds_after_deadline, bps).
@@ -672,6 +689,15 @@ pub struct Invoice {
     /// Issue #417: recipient whitelist enforcement flag.
     pub recipient_whitelist_enabled: bool,
     pub predecessor_id: Option<u64>,
+    /// Issue #489: ledgers after creation during which contributions qualify
+    /// for `early_bird_fee_bps`. 0 disables the discount.
+    pub early_bird_window_ledgers: u32,
+    /// Issue #489: discounted platform fee (bps) for contributions made within
+    /// the early-bird window.
+    pub early_bird_fee_bps: u32,
+    /// Issue #489: total platform-fee discount accrued from early-bird
+    /// contributions so far; deducted from the platform fee at release.
+    pub early_bird_fee_credit: i128,
 }
 
 impl Invoice {
@@ -774,6 +800,9 @@ impl Invoice {
                 twafr_last_ledger: self.twafr_last_ledger,
                 release_condition_hash: self.release_condition_hash,
                 recipient_whitelist_enabled: self.recipient_whitelist_enabled,
+                early_bird_window_ledgers: self.early_bird_window_ledgers,
+                early_bird_fee_bps: self.early_bird_fee_bps,
+                early_bird_fee_credit: self.early_bird_fee_credit,
             },
         )
     }
@@ -872,6 +901,9 @@ impl Invoice {
             twafr_last_ledger: ext2.twafr_last_ledger,
             release_condition_hash: ext2.release_condition_hash,
             recipient_whitelist_enabled: ext2.recipient_whitelist_enabled,
+            early_bird_window_ledgers: ext2.early_bird_window_ledgers,
+            early_bird_fee_bps: ext2.early_bird_fee_bps,
+            early_bird_fee_credit: ext2.early_bird_fee_credit,
         }
     }
 }
@@ -1109,6 +1141,9 @@ impl Invoice {
             release_condition_hash: None,
             recipient_whitelist_enabled: false,
             predecessor_id: None,
+            early_bird_window_ledgers: 0,
+            early_bird_fee_bps: 0,
+            early_bird_fee_credit: 0,
         }
     }
 }

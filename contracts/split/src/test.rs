@@ -125,6 +125,8 @@ fn default_options(env: &Env) -> InvoiceOptions {
             release_condition_hash: None,
             recipient_whitelist_enabled: false,
             escrow_hold_period: None,
+            early_bird_window_ledgers: 0,
+            early_bird_fee_bps: 0,
         },
     }
 }
@@ -149,6 +151,8 @@ fn default_options2(_env: &Env) -> InvoiceOptions2 {
         release_condition_hash: None,
         recipient_whitelist_enabled: false,
         escrow_hold_period: None,
+        early_bird_window_ledgers: 0,
+        early_bird_fee_bps: 0,
     }
 }
 
@@ -214,6 +218,8 @@ fn invoice_options(
             release_condition_hash: None,
             recipient_whitelist_enabled: false,
             escrow_hold_period: None,
+            early_bird_window_ledgers: 0,
+            early_bird_fee_bps: 0,
         },
     }
 }
@@ -3141,6 +3147,193 @@ fn test_platform_fee_bps_multi_recipient() {
     assert_eq!(tk.balance(&r3), 475);
     // Treasury gets 50.
     assert_eq!(tk.balance(&treasury), 50);
+}
+
+// ---------------------------------------------------------------------------
+// Issue #489: Early-bird discounted platform fee
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_early_bird_within_window_uses_discounted_fee() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+    let tk = token_client(&env, &token_id);
+
+    let admin = Address::generate(&env);
+    let creator = Address::generate(&env);
+    let payer = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    StellarAssetClient::new(&env, &token_id).mint(&payer, &1_000);
+    set_ledger(&env, 10, 1_000);
+
+    c.initialize(
+        &admin, &0_i128, &treasury, &token_id, &1_000_u32, &None, &0_u32, &0_u32, &0_u64,
+    ); // standard fee 10%
+
+    let mut options = default_options(&env);
+    options.ext.early_bird_window_ledgers = 100;
+    options.ext.early_bird_fee_bps = 200; // 2%
+
+    let id = c.create_invoice(
+        &creator,
+        &one_address_vec(&env, &recipient),
+        &one_amount_vec(&env, 500_i128),
+        &token_id,
+        &9_999_u64,
+        &options,
+    );
+
+    // Paid immediately, well within the 100-ledger early-bird window.
+    c.pay(&payer, &id, &500_i128, &0_u64, &false, &false);
+
+    // discount = 500 * (10% - 2%) = 40
+    let events = env.events().all();
+    let has_early_bird_event = events.iter().any(|e| {
+        let topics = e.1;
+        topics.len() >= 2
+            && Symbol::try_from_val(&env, &topics.get(1).unwrap())
+                .map(|sym: Symbol| sym == Symbol::new(&env, "ebird_pay"))
+                .unwrap_or(false)
+    });
+    assert!(has_early_bird_event, "EarlyBirdPayment event should be emitted");
+
+    assert_eq!(c.get_invoice(&id).status, InvoiceStatus::Released);
+    // Discounted fee (2%) of 500 == 10; recipient nets 490, treasury collects 10.
+    assert_eq!(tk.balance(&recipient), 490);
+    assert_eq!(tk.balance(&treasury), 10);
+}
+
+#[test]
+fn test_early_bird_outside_window_uses_standard_fee() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+    let tk = token_client(&env, &token_id);
+
+    let admin = Address::generate(&env);
+    let creator = Address::generate(&env);
+    let payer = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    StellarAssetClient::new(&env, &token_id).mint(&payer, &1_000);
+    set_ledger(&env, 10, 1_000);
+
+    c.initialize(
+        &admin, &0_i128, &treasury, &token_id, &1_000_u32, &None, &0_u32, &0_u32, &0_u64,
+    ); // standard fee 10%
+
+    let mut options = default_options(&env);
+    options.ext.early_bird_window_ledgers = 5;
+    options.ext.early_bird_fee_bps = 200; // 2%
+
+    let id = c.create_invoice(
+        &creator,
+        &one_address_vec(&env, &recipient),
+        &one_amount_vec(&env, 500_i128),
+        &token_id,
+        &9_999_u64,
+        &options,
+    );
+
+    // Advance past the 5-ledger early-bird window before paying.
+    set_ledger(&env, 20, 1_100);
+    c.pay(&payer, &id, &500_i128, &0_u64, &false, &false);
+
+    let events = env.events().all();
+    let has_early_bird_event = events.iter().any(|e| {
+        let topics = e.1;
+        topics.len() >= 2
+            && Symbol::try_from_val(&env, &topics.get(1).unwrap())
+                .map(|sym: Symbol| sym == Symbol::new(&env, "ebird_pay"))
+                .unwrap_or(false)
+    });
+    assert!(!has_early_bird_event, "no EarlyBirdPayment event once the window has passed");
+
+    assert_eq!(c.get_invoice(&id).status, InvoiceStatus::Released);
+    // Standard fee (10%) of 500 == 50; recipient nets 450, treasury collects 50.
+    assert_eq!(tk.balance(&recipient), 450);
+    assert_eq!(tk.balance(&treasury), 50);
+}
+
+#[test]
+fn test_early_bird_window_zero_disables_discount() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+    let tk = token_client(&env, &token_id);
+
+    let admin = Address::generate(&env);
+    let creator = Address::generate(&env);
+    let payer = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    StellarAssetClient::new(&env, &token_id).mint(&payer, &1_000);
+    set_ledger(&env, 10, 1_000);
+
+    c.initialize(
+        &admin, &0_i128, &treasury, &token_id, &1_000_u32, &None, &0_u32, &0_u32, &0_u64,
+    ); // standard fee 10%
+
+    let mut options = default_options(&env);
+    options.ext.early_bird_window_ledgers = 0; // disabled
+    options.ext.early_bird_fee_bps = 200;
+
+    let id = c.create_invoice(
+        &creator,
+        &one_address_vec(&env, &recipient),
+        &one_amount_vec(&env, 500_i128),
+        &token_id,
+        &9_999_u64,
+        &options,
+    );
+
+    // Paid immediately — would be "within window" by timing alone, but the
+    // window is disabled so the standard fee must apply.
+    c.pay(&payer, &id, &500_i128, &0_u64, &false, &false);
+
+    let events = env.events().all();
+    let has_early_bird_event = events.iter().any(|e| {
+        let topics = e.1;
+        topics.len() >= 2
+            && Symbol::try_from_val(&env, &topics.get(1).unwrap())
+                .map(|sym: Symbol| sym == Symbol::new(&env, "ebird_pay"))
+                .unwrap_or(false)
+    });
+    assert!(!has_early_bird_event, "a zero-length window must never emit a discount");
+
+    assert_eq!(tk.balance(&recipient), 450);
+    assert_eq!(tk.balance(&treasury), 50);
+}
+
+#[test]
+#[should_panic(expected = "early_bird_fee_bps must not exceed the standard platform fee")]
+fn test_early_bird_fee_bps_must_not_exceed_standard_fee() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    c.initialize(
+        &admin, &0_i128, &treasury, &token_id, &500_u32, &None, &0_u32, &0_u32, &0_u64,
+    ); // standard fee 5%
+
+    let mut options = default_options(&env);
+    options.ext.early_bird_window_ledgers = 100;
+    options.ext.early_bird_fee_bps = 600; // 6% > standard 5%
+
+    c.create_invoice(
+        &creator,
+        &one_address_vec(&env, &recipient),
+        &one_amount_vec(&env, 500_i128),
+        &token_id,
+        &9_999_u64,
+        &options,
+    );
 }
 
 #[test]
