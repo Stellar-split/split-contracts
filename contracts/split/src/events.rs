@@ -1294,3 +1294,32 @@ pub fn invoice_from_template(env: &Env, invoice_id: u64, creator: &Address, temp
     );
 }
 
+/// Emitted on every individual cosigner approval recorded via `approve_release`.
+/// Topics: (split, CosignerApproved, invoice_id)
+/// Data: (cosigner, ledger)
+pub fn cosigner_approved(env: &Env, invoice_id: u64, cosigner: &Address) {
+    env.events().publish(
+        (
+            symbol_short!("split"),
+            soroban_sdk::Symbol::new(env, "CosignerApproved"),
+            invoice_id,
+        ),
+        (cosigner.clone(), env.ledger().sequence()),
+    );
+}
+
+/// Emitted once, the moment `approve_release` collects enough approvals to
+/// meet the invoice's configured `cosigner_threshold`.
+/// Topics: (split, CosignerThresholdReached, invoice_id)
+/// Data: ledger
+pub fn cosigner_threshold_reached(env: &Env, invoice_id: u64) {
+    env.events().publish(
+        (
+            symbol_short!("split"),
+            soroban_sdk::Symbol::new(env, "CosignerThresholdReached"),
+            invoice_id,
+        ),
+        env.ledger().sequence(),
+    );
+}
+

@@ -372,6 +372,14 @@ pub struct InvoiceOptions {
     /// Per-recipient split ratios in basis points (must sum to [`BASIS_POINTS_TOTAL`] = 10 000
     /// when non-empty).  Empty vec means "no ratio constraint — use amounts directly."
     pub ratios: Vec<u32>,
+    /// Co-signer addresses whose approval (via `approve_release`) is required
+    /// before this invoice can be released. Independent of the legacy
+    /// `co_signers` / `sign_release` gate above. `None` disables the gate.
+    pub cosigners: Option<Vec<Address>>,
+    /// Number of distinct `cosigners` approvals required before release is
+    /// permitted. Only meaningful when `cosigners` is `Some`; must be in
+    /// `1..=cosigners.len()`.
+    pub cosigner_threshold: Option<u32>,
     /// Overflow fields that would otherwise push this struct past Soroban's
     /// 40-field `#[contracttype]` limit — see [`InvoiceOptions2`].
     pub ext: InvoiceOptions2,
