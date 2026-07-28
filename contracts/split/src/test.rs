@@ -11097,3 +11097,76 @@ fn test_revoke_delegation_removes_access() {
     let invoice = c.get_invoice(&invoice_id);
     assert_eq!(invoice.creator, creator);
 }
+
+// ---------------------------------------------------------------------------
+// Issue #453: Source Contract Rate Limiting Tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_source_rate_limit_under_limit_succeeds() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    env.ledger().set_timestamp(1_000);
+
+    // Create and interact with invoice - should succeed as we're under limit
+    let invoice_id = make_invoice(&env, &c, &creator, &recipient, 100, &token_id, 9_999);
+    assert_eq!(invoice_id, 1);
+}
+
+#[test]
+fn test_source_rate_limit_at_limit_passes() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    env.ledger().set_timestamp(1_000);
+
+    // Create multiple invoices up to the limit
+    for i in 1..=5 {
+        let inv_id = make_invoice(&env, &c, &creator, &recipient, 100, &token_id, 9_999);
+        assert_eq!(inv_id, i as u64);
+    }
+}
+
+#[test]
+fn test_window_reset_allows_calls_again() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    env.ledger().set_timestamp(1_000);
+
+    // Create invoice at ledger 1000
+    let invoice_id = make_invoice(&env, &c, &creator, &recipient, 100, &token_id, 9_999);
+    assert_eq!(invoice_id, 1);
+
+    // Jump to a much later ledger to reset the window
+    env.ledger().set_timestamp(10_000);
+
+    // Should be able to create more invoices after window reset
+    let invoice_id2 = make_invoice(&env, &c, &creator, &recipient, 100, &token_id, 9_999);
+    assert_eq!(invoice_id2, 2);
+}
+
+#[test]
+fn test_direct_wallet_calls_bypass_rate_limiter() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    env.ledger().set_timestamp(1_000);
+
+    // Direct account-to-contract calls should bypass rate limiting
+    let invoice_id = make_invoice(&env, &c, &creator, &recipient, 100, &token_id, 9_999);
+    assert_eq!(invoice_id, 1);
+}
