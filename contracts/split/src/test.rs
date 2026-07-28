@@ -10834,3 +10834,117 @@ fn test_funding_checkpoint_not_reemitted_on_subsequent_payments() {
     assert_eq!(events.get(1).unwrap().threshold_bps, 5_000);
     assert_eq!(c.get_last_funding_checkpoint(&id), 5_000);
 }
+
+// ---------------------------------------------------------------------------
+// Issue #456: Invoice Dependency Chain Tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_linear_dependency_chain_blocks_payment() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+    let tk = token_client(&env, &token_id);
+
+    let creator = Address::generate(&env);
+    let payer = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    StellarAssetClient::new(&env, &token_id).mint(&payer, &500);
+    env.ledger().set_timestamp(1_000);
+
+    let invoice_a_id = make_invoice(&env, &c, &creator, &recipient, 100, &token_id, 9_999);
+
+    // Create invoice B that depends on invoice A
+    let mut recipients = Vec::new(&env);
+    recipients.push_back(recipient.clone());
+    let mut amounts = Vec::new(&env);
+    amounts.push_back(100);
+    let mut options = default_options(&env);
+    options.prerequisite_id = Some(invoice_a_id);
+    let invoice_b_id = c.create_invoice(
+        &creator,
+        &recipients,
+        &amounts,
+        &token_id,
+        &9_999,
+        &options,
+    );
+    assert_eq!(invoice_b_id, 2);
+
+    let invoice_b = c.get_invoice(&invoice_b_id);
+    assert_eq!(invoice_b.prerequisite_id, Some(invoice_a_id));
+
+    // Pay invoice A to release it
+    c.pay(&payer, &invoice_a_id, &100_i128, &0_u64, &false, &false);
+    assert_eq!(c.get_invoice(&invoice_a_id).status, InvoiceStatus::Released);
+
+    // Now paying invoice B should succeed
+    c.pay(&payer, &invoice_b_id, &100_i128, &1_u64, &false, &false);
+    assert_eq!(c.get_invoice(&invoice_b_id).status, InvoiceStatus::Released);
+}
+
+#[test]
+fn test_three_level_dependency_chain() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let payer = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    StellarAssetClient::new(&env, &token_id).mint(&payer, &500);
+    env.ledger().set_timestamp(1_000);
+
+    let invoice_a = make_invoice(&env, &c, &creator, &recipient, 100, &token_id, 9_999);
+
+    let mut options = default_options(&env);
+    options.prerequisite_id = Some(invoice_a);
+    let mut recipients = Vec::new(&env);
+    recipients.push_back(recipient.clone());
+    let mut amounts = Vec::new(&env);
+    amounts.push_back(100);
+    let invoice_b = c.create_invoice(&creator, &recipients, &amounts, &token_id, &9_999, &options);
+
+    let mut options2 = default_options(&env);
+    options2.prerequisite_id = Some(invoice_b);
+    let invoice_c = c.create_invoice(&creator, &recipients, &amounts, &token_id, &9_999, &options2);
+
+    assert_eq!(c.get_invoice(&invoice_b).prerequisite_id, Some(invoice_a));
+    assert_eq!(c.get_invoice(&invoice_c).prerequisite_id, Some(invoice_b));
+
+    c.pay(&payer, &invoice_a, &100_i128, &0_u64, &false, &false);
+    c.pay(&payer, &invoice_b, &100_i128, &1_u64, &false, &false);
+    c.pay(&payer, &invoice_c, &100_i128, &2_u64, &false, &false);
+
+    assert_eq!(c.get_invoice(&invoice_a).status, InvoiceStatus::Released);
+    assert_eq!(c.get_invoice(&invoice_b).status, InvoiceStatus::Released);
+    assert_eq!(c.get_invoice(&invoice_c).status, InvoiceStatus::Released);
+}
+
+#[test]
+fn test_get_dependency_chain_view() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    env.ledger().set_timestamp(1_000);
+
+    let inv1 = make_invoice(&env, &c, &creator, &recipient, 100, &token_id, 9_999);
+
+    let mut options = default_options(&env);
+    options.prerequisite_id = Some(inv1);
+    let mut recipients = Vec::new(&env);
+    recipients.push_back(recipient.clone());
+    let mut amounts = Vec::new(&env);
+    amounts.push_back(100);
+    let inv2 = c.create_invoice(&creator, &recipients, &amounts, &token_id, &9_999, &options);
+
+    let mut options2 = default_options(&env);
+    options2.prerequisite_id = Some(inv2);
+    let inv3 = c.create_invoice(&creator, &recipients, &amounts, &token_id, &9_999, &options2);
+
+    let invoice_c = c.get_invoice(&inv3);
+    assert_eq!(invoice_c.prerequisite_id, Some(inv2));
+}
