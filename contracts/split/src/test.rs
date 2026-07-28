@@ -5985,6 +5985,7 @@ fn test_clone_copies_recipients_and_amounts() {
         new_amounts: None,
         new_recipients: None,
         new_overflow_behavior: None,
+        new_metadata_hash: None,
     };
     let clone_id = c.clone_invoice(&creator, &source_id, &overrides);
 
@@ -6028,6 +6029,7 @@ fn test_clone_with_overrides_replaces_fields() {
         new_amounts: Some(new_amounts.clone()),
         new_recipients: Some(new_recipients.clone()),
         new_overflow_behavior: Some(Symbol::new(&env, "Refund")),
+        new_metadata_hash: None,
     };
     let clone_id = c.clone_invoice(&creator, &source_id, &overrides);
 
@@ -6059,6 +6061,7 @@ fn test_clone_depth_limit_enforced() {
         new_amounts: None,
         new_recipients: None,
         new_overflow_behavior: None,
+        new_metadata_hash: None,
     };
 
     let id0 = make_invoice(&env, &c, &creator, &recipient, 100, &token_id, 9_999);
@@ -6110,6 +6113,7 @@ fn test_clone_resets_payment_state() {
         new_amounts: None,
         new_recipients: None,
         new_overflow_behavior: None,
+        new_metadata_hash: None,
     };
     let clone_id = c.clone_invoice(&creator, &source_id, &overrides);
 
@@ -9520,4 +9524,379 @@ fn test_milestones_auto_release() {
     c.pay(&payer, &id, &50_i128, &1_u64, &false, &false);
     assert_eq!(tk.balance(&recipient), 100);
     assert_eq!(c.get_invoice(&id).status, InvoiceStatus::Released);
+}
+
+// ---------------------------------------------------------------------------
+// Trusted-caller platform fee exemption
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_trusted_caller_exempt_from_platform_fee() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+    let tk = token_client(&env, &token_id);
+
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let trusted_payer = Address::generate(&env);
+
+    c.initialize(
+        &admin, &0_i128, &treasury, &token_id, &1_000_u32, &None, &0_u32, &0_u32, &0_u64,
+    );
+
+    StellarAssetClient::new(&env, &token_id).mint(&trusted_payer, &1_000);
+    env.ledger().set_timestamp(1_000);
+
+    let id = make_invoice(&env, &c, &creator, &recipient, 1_000, &token_id, 9_999);
+
+    c.add_trusted_caller(&admin, &trusted_payer);
+    c.pay(&trusted_payer, &id, &1_000_i128, &0_u64, &false, &false);
+
+    assert_eq!(c.get_invoice(&id).status, InvoiceStatus::Released);
+    assert_eq!(tk.balance(&recipient), 1_000, "no platform fee deducted");
+    assert_eq!(tk.balance(&treasury), 0);
+}
+
+#[test]
+fn test_untrusted_caller_still_pays_platform_fee() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+    let tk = token_client(&env, &token_id);
+
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let payer = Address::generate(&env);
+
+    c.initialize(
+        &admin, &0_i128, &treasury, &token_id, &1_000_u32, &None, &0_u32, &0_u32, &0_u64,
+    );
+
+    StellarAssetClient::new(&env, &token_id).mint(&payer, &1_000);
+    env.ledger().set_timestamp(1_000);
+
+    let id = make_invoice(&env, &c, &creator, &recipient, 1_000, &token_id, 9_999);
+
+    c.pay(&payer, &id, &1_000_i128, &0_u64, &false, &false);
+
+    assert_eq!(c.get_invoice(&id).status, InvoiceStatus::Released);
+    assert_eq!(tk.balance(&recipient), 900);
+    assert_eq!(tk.balance(&treasury), 100);
+}
+
+#[test]
+fn test_remove_trusted_caller_restores_platform_fee() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+    let tk = token_client(&env, &token_id);
+
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let creator = Address::generate(&env);
+    let recipient1 = Address::generate(&env);
+    let recipient2 = Address::generate(&env);
+    let payer = Address::generate(&env);
+
+    c.initialize(
+        &admin, &0_i128, &treasury, &token_id, &1_000_u32, &None, &0_u32, &0_u32, &0_u64,
+    );
+
+    StellarAssetClient::new(&env, &token_id).mint(&payer, &2_000);
+    env.ledger().set_timestamp(1_000);
+
+    c.add_trusted_caller(&admin, &payer);
+    let id1 = make_invoice(&env, &c, &creator, &recipient1, 1_000, &token_id, 9_999);
+    c.pay(&payer, &id1, &1_000_i128, &0_u64, &false, &false);
+    assert_eq!(tk.balance(&recipient1), 1_000, "exempt while trusted");
+
+    c.remove_trusted_caller(&admin, &payer);
+    let id2 = make_invoice(&env, &c, &creator, &recipient2, 1_000, &token_id, 9_999);
+    // Nonce is scoped per (invoice_id, payer), so this fresh invoice starts back at 0.
+    c.pay(&payer, &id2, &1_000_i128, &0_u64, &false, &false);
+    assert_eq!(tk.balance(&recipient2), 900, "fee restored after removal");
+    assert_eq!(tk.balance(&treasury), 100);
+}
+
+#[test]
+fn test_trusting_contract_self_does_not_waive_other_payers_fee() {
+    // Regression test: the trusted-caller check must not match on the contract's
+    // own address, since release() / trigger_scheduled_release() always pass the
+    // contract's own address as `actor` — matching it would let anyone waive the
+    // platform fee on every invoice via those permissionless entry points.
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+    let tk = token_client(&env, &token_id);
+
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let payer = Address::generate(&env);
+
+    c.initialize(
+        &admin, &0_i128, &treasury, &token_id, &1_000_u32, &None, &0_u32, &0_u32, &0_u64,
+    );
+    c.add_trusted_caller(&admin, &contract_id);
+
+    StellarAssetClient::new(&env, &token_id).mint(&payer, &1_000);
+    env.ledger().set_timestamp(1_000);
+
+    let id = make_invoice(&env, &c, &creator, &recipient, 1_000, &token_id, 9_999);
+    c.pay(&payer, &id, &1_000_i128, &0_u64, &false, &false);
+
+    assert_eq!(tk.balance(&recipient), 900, "fee still charged for untrusted payer");
+    assert_eq!(tk.balance(&treasury), 100);
+}
+
+// ---------------------------------------------------------------------------
+// Cumulative contributed / invoice stats
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_get_invoice_stats_cumulative_contributed_survives_withdrawal() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let payer = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    StellarAssetClient::new(&env, &token_id).mint(&payer, &1_000);
+    env.ledger().set_timestamp(1_000);
+
+    let mut options = default_options(&env);
+    options.allow_early_withdrawal = true;
+
+    let id = c.create_invoice(
+        &creator,
+        &one_address_vec(&env, &recipient),
+        &one_amount_vec(&env, 1_000_i128),
+        &token_id,
+        &9_999_u64,
+        &options,
+    );
+
+    c.pay(&payer, &id, &400_i128, &0_u64, &false, &false);
+    let stats = c.get_invoice_stats(&id);
+    assert_eq!(stats.funded, 400);
+    assert_eq!(stats.cumulative_contributed, 400);
+
+    c.withdraw(&id, &payer);
+    let stats_after_withdrawal = c.get_invoice_stats(&id);
+    assert_eq!(stats_after_withdrawal.funded, 0);
+    assert_eq!(
+        stats_after_withdrawal.cumulative_contributed, 400,
+        "cumulative_contributed must never decrease"
+    );
+
+    c.pay(&payer, &id, &400_i128, &1_u64, &false, &false);
+    let stats_final = c.get_invoice_stats(&id);
+    assert_eq!(stats_final.funded, 400);
+    assert_eq!(stats_final.cumulative_contributed, 800);
+}
+
+#[test]
+fn test_cumulative_contributed_tracked_via_pool_pay() {
+    // pool_pay has its own inline funded-crediting logic separate from `_pay`,
+    // so it must independently update cumulative_contributed too.
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let payer = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    StellarAssetClient::new(&env, &token_id).mint(&payer, &1_000);
+    env.ledger().set_timestamp(1_000);
+
+    let id = make_invoice(&env, &c, &creator, &recipient, 1_000, &token_id, 9_999);
+
+    let mut payments = Vec::new(&env);
+    payments.push_back(types::InvoicePayment {
+        invoice_id: id,
+        amount: 300_i128,
+    });
+    c.pool_pay(&payer, &payments);
+
+    let stats = c.get_invoice_stats(&id);
+    assert_eq!(stats.funded, 300);
+    assert_eq!(stats.cumulative_contributed, 300);
+}
+
+// ---------------------------------------------------------------------------
+// Sweep unclaimed (stranded) funds
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_sweep_unclaimed_funds_after_timeout() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+    let tk = token_client(&env, &token_id);
+
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    c.initialize(
+        &admin, &0_i128, &treasury, &token_id, &0_u32, &None, &0_u32, &0_u32, &0_u64,
+    );
+
+    set_ledger(&env, 1_000, 1_000);
+    let id = make_invoice(&env, &c, &creator, &recipient, 500, &token_id, 9_999);
+
+    // Simulate a stranded fallback-escrow balance, as `_release_full` would leave
+    // behind after a failed payout transfer, funded in the invoice's funding token.
+    StellarAssetClient::new(&env, &token_id).mint(&contract_id, &500);
+    env.as_contract(&contract_id, || {
+        env.storage()
+            .persistent()
+            .set(&fallback_escrow_key(id, &recipient), &500_i128);
+        env.storage()
+            .persistent()
+            .set(&last_failed_ledger_key(id), &1_000_u32);
+    });
+
+    c.set_sweep_timeout(&admin, &10_u32);
+    set_ledger(&env, 1_020, 1_020);
+
+    let swept = c.sweep_unclaimed_funds(&admin, &id);
+    assert_eq!(swept, 500);
+    assert_eq!(tk.balance(&treasury), 500);
+    assert_eq!(c.get_fallback_balance(&id, &recipient), 0);
+}
+
+#[test]
+#[should_panic(expected = "sweep timeout has not elapsed")]
+fn test_sweep_unclaimed_funds_before_timeout_panics() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    c.initialize(
+        &admin, &0_i128, &treasury, &token_id, &0_u32, &None, &0_u32, &0_u32, &0_u64,
+    );
+
+    set_ledger(&env, 1_000, 1_000);
+    let id = make_invoice(&env, &c, &creator, &recipient, 500, &token_id, 9_999);
+
+    StellarAssetClient::new(&env, &token_id).mint(&contract_id, &500);
+    env.as_contract(&contract_id, || {
+        env.storage()
+            .persistent()
+            .set(&fallback_escrow_key(id, &recipient), &500_i128);
+        env.storage()
+            .persistent()
+            .set(&last_failed_ledger_key(id), &1_000_u32);
+    });
+
+    c.set_sweep_timeout(&admin, &10_000_u32);
+    set_ledger(&env, 1_005, 1_005);
+
+    c.sweep_unclaimed_funds(&admin, &id);
+}
+
+#[test]
+#[should_panic(expected = "caller is not an admin")]
+fn test_sweep_unclaimed_funds_requires_admin() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let not_admin = Address::generate(&env);
+
+    c.initialize(
+        &admin, &0_i128, &treasury, &token_id, &0_u32, &None, &0_u32, &0_u32, &0_u64,
+    );
+
+    set_ledger(&env, 1_000, 1_000);
+    let id = make_invoice(&env, &c, &creator, &recipient, 500, &token_id, 9_999);
+
+    StellarAssetClient::new(&env, &token_id).mint(&contract_id, &500);
+    env.as_contract(&contract_id, || {
+        env.storage()
+            .persistent()
+            .set(&fallback_escrow_key(id, &recipient), &500_i128);
+        env.storage()
+            .persistent()
+            .set(&last_failed_ledger_key(id), &1_000_u32);
+    });
+
+    c.sweep_unclaimed_funds(&not_admin, &id);
+}
+
+#[test]
+fn test_sweep_unclaimed_funds_uses_funding_token_not_recipient_token() {
+    // Regression test for the bug where sweep_unclaimed_funds resolved the token via
+    // `invoice.tokens.get(0)` (the per-recipient payout token) instead of
+    // `invoice.funding_token` (the token the failed payout was actually re-escrowed
+    // in). Uses a multi-currency invoice where the two differ: if the sweep still
+    // used tokens.get(0), this transfer would trap since the contract never holds
+    // any balance of the payout token.
+    let (env, contract_id, funding_token_id) = setup();
+    let c = client(&env, &contract_id);
+    let tk = token_client(&env, &funding_token_id);
+
+    let payout_token_admin = Address::generate(&env);
+    let payout_token_id = env
+        .register_stellar_asset_contract_v2(payout_token_admin.clone())
+        .address();
+
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    c.initialize(
+        &admin, &0_i128, &treasury, &funding_token_id, &0_u32, &None, &0_u32, &0_u32, &0_u64,
+    );
+
+    set_ledger(&env, 1_000, 1_000);
+
+    let mut recipients = Vec::new(&env);
+    recipients.push_back(types::Recipient {
+        address: recipient.clone(),
+        token: payout_token_id.clone(),
+    });
+    let mut amounts = Vec::new(&env);
+    amounts.push_back(500_i128);
+    let id = c.create_invoice_with_recipients(
+        &creator,
+        &recipients,
+        &amounts,
+        &funding_token_id,
+        &9_999_u64,
+        &default_options(&env),
+    );
+    assert_eq!(c.get_invoice(&id).tokens.get(0).unwrap(), payout_token_id);
+
+    // Fund the contract with the funding token only (what the failed payout was
+    // actually re-escrowed in) — deliberately no balance of payout_token_id.
+    StellarAssetClient::new(&env, &funding_token_id).mint(&contract_id, &500);
+
+    env.as_contract(&contract_id, || {
+        env.storage()
+            .persistent()
+            .set(&fallback_escrow_key(id, &recipient), &500_i128);
+        env.storage()
+            .persistent()
+            .set(&last_failed_ledger_key(id), &1_000_u32);
+    });
+
+    c.set_sweep_timeout(&admin, &10_u32);
+    set_ledger(&env, 1_020, 1_020);
+    let swept = c.sweep_unclaimed_funds(&admin, &id);
+
+    assert_eq!(swept, 500);
+    assert_eq!(tk.balance(&treasury), 500);
 }

@@ -1034,3 +1034,45 @@ pub fn creator_cooldown_set(env: &Env, creator: &Address, until_ledger: u64, coo
         (until_ledger, cooldown_ledgers),
     );
 }
+
+/// Emitted when admin sweeps unclaimed failed-payout funds to treasury.
+/// Topics: (split, swept, invoice_id)
+/// Data: (amount, treasury)
+pub fn funds_swept(env: &Env, invoice_id: u64, amount: i128, treasury: &Address) {
+    env.events().publish(
+        (
+            symbol_short!("split"),
+            symbol_short!("swept"),
+            invoice_id,
+        ),
+        (amount, treasury.clone()),
+    );
+}
+
+/// Emitted when a trusted caller is added to the whitelist.
+/// Topics: (split, tc_add, caller)
+/// Data: ()
+pub fn trusted_caller_added(env: &Env, caller: &Address) {
+    env.events().publish(
+        (
+            symbol_short!("split"),
+            symbol_short!("tc_add"),
+            caller.clone(),
+        ),
+        (),
+    );
+}
+
+/// Emitted when a trusted caller is removed from the whitelist.
+/// Topics: (split, tc_rem, caller)
+/// Data: ()
+pub fn trusted_caller_removed(env: &Env, caller: &Address) {
+    env.events().publish(
+        (
+            symbol_short!("split"),
+            symbol_short!("tc_rem"),
+            caller.clone(),
+        ),
+        (),
+    );
+}
