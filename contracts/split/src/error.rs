@@ -52,6 +52,13 @@ pub enum ContractError {
     /// Issue #451: payer-provided memo does not match the required memo hash.
     MemoMismatch = 33,
     /// Issue #439: Creator is in cooldown after cancelling an invoice.
+    CreatorCooldownActive = 31,
+    /// Issue #482: Intermediate multiplication or division overflowed i128 bounds.
+    ArithmeticOverflow = 33,
+    /// Issue #483: A zero-value or negative amount was passed where a positive amount is required.
+    ZeroAmountNotAllowed = 34,
+    /// Issue #485: Caller is not on the invoice contributor allowlist.
+    ContributorNotAllowed = 35,
     CreatorCooldownActive = 34,
     /// Issue #473: Token is not in the allowed tokens list.
     UnauthorisedToken = 35,

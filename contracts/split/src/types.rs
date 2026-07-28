@@ -545,6 +545,8 @@ pub struct InvoiceExt2 {
     pub release_condition_hash: Option<BytesN<32>>,
     /// Issue #417: recipient whitelist enforcement flag.
     pub recipient_whitelist_enabled: bool,
+    /// Issue #485: optional contributor allowlist; when Some only listed addresses may call pay/contribute.
+    pub contributor_allowlist: Option<Vec<Address>>,
     /// Issue #489: ledgers after creation during which contributions qualify
     /// for `early_bird_fee_bps`. 0 disables the discount.
     pub early_bird_window_ledgers: u32,
@@ -689,6 +691,8 @@ pub struct Invoice {
     /// Issue #417: recipient whitelist enforcement flag.
     pub recipient_whitelist_enabled: bool,
     pub predecessor_id: Option<u64>,
+    /// Issue #485: optional contributor allowlist; when Some only listed addresses may call pay/contribute.
+    pub contributor_allowlist: Option<Vec<Address>>,
     /// Issue #489: ledgers after creation during which contributions qualify
     /// for `early_bird_fee_bps`. 0 disables the discount.
     pub early_bird_window_ledgers: u32,
@@ -800,6 +804,7 @@ impl Invoice {
                 twafr_last_ledger: self.twafr_last_ledger,
                 release_condition_hash: self.release_condition_hash,
                 recipient_whitelist_enabled: self.recipient_whitelist_enabled,
+                contributor_allowlist: self.contributor_allowlist,
                 early_bird_window_ledgers: self.early_bird_window_ledgers,
                 early_bird_fee_bps: self.early_bird_fee_bps,
                 early_bird_fee_credit: self.early_bird_fee_credit,
@@ -901,6 +906,7 @@ impl Invoice {
             twafr_last_ledger: ext2.twafr_last_ledger,
             release_condition_hash: ext2.release_condition_hash,
             recipient_whitelist_enabled: ext2.recipient_whitelist_enabled,
+            contributor_allowlist: ext2.contributor_allowlist,
             early_bird_window_ledgers: ext2.early_bird_window_ledgers,
             early_bird_fee_bps: ext2.early_bird_fee_bps,
             early_bird_fee_credit: ext2.early_bird_fee_credit,
@@ -1141,6 +1147,7 @@ impl Invoice {
             release_condition_hash: None,
             recipient_whitelist_enabled: false,
             predecessor_id: None,
+            contributor_allowlist: None,
             early_bird_window_ledgers: 0,
             early_bird_fee_bps: 0,
             early_bird_fee_credit: 0,

@@ -272,6 +272,9 @@ fn storage_key_snapshot() {
         hex_xdr(&env, template_version_key(&a, &s, 1)),
     ));
 
+    // Issue #485: contributor allowlist key (Symbol, u64)
+    keys.push(("contributor_allowlist_key", hex_xdr(&env, contributor_allowlist_key(1))));
+
     // Sort by key name for deterministic output
     keys.sort_by(|a, b| a.0.cmp(b.0));
 
