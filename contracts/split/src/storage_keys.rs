@@ -291,3 +291,44 @@ pub fn invoice_tags_key(invoice_id: u64) -> (Symbol, u64) { (symbol_short!("inv_
 pub fn role_key(address: &Address, role_discriminant: u32) -> (Symbol, Address, u32) {
     (symbol_short!("role_asn"), address.clone(), role_discriminant)
 }
+// Issue #474: Invoice cancellation
+// ---------------------------------------------------------------------------
+
+/// Per-invoice cancellation flag — persistent storage.
+/// Set to true when the creator cancels a Pending invoice.
+pub fn invoice_cancelled_key(invoice_id: u64) -> (Symbol, u64) { (symbol_short!("inv_cncl"), invoice_id) }
+
+// ---------------------------------------------------------------------------
+// Issue #475: Multi-signature admin control
+// ---------------------------------------------------------------------------
+
+/// The multi-sig admin set (AdminSet) — instance storage.
+/// Replaces the single `admin` key once initialised via set_admin_set.
+pub fn admin_set_key() -> Symbol { symbol_short!("adm_set") }
+
+/// Pending admin action keyed by its 32-byte action hash — persistent storage.
+/// Key: (Symbol, BytesN<32>)
+pub fn pending_admin_action_key(action_hash: &soroban_sdk::BytesN<32>) -> (Symbol, soroban_sdk::BytesN<32>) {
+    (symbol_short!("adm_pnd"), action_hash.clone())
+}
+
+// ---------------------------------------------------------------------------
+// Issue #476: Invoice template factory (ID-based)
+// ---------------------------------------------------------------------------
+
+/// ID-based invoice template — persistent storage.
+/// Key: (Symbol, Address, u64) → InvoiceTemplateRecord
+pub fn template_id_key(creator: &Address, template_id: u64) -> (Symbol, Address, u64) {
+    (symbol_short!("tmpl_id"), creator.clone(), template_id)
+}
+
+/// Template ID counter per creator — persistent storage.
+/// Key: (Symbol, Address) → u64  (next template_id to assign)
+pub fn template_id_counter_key(creator: &Address) -> (Symbol, Address) {
+    (symbol_short!("tmpl_ctr"), creator.clone())
+}
+/// Issue #485: per-invoice contributor allowlist — persistent storage.
+pub fn contributor_allowlist_key(invoice_id: u64) -> (Symbol, u64) { (symbol_short!("ctr_al"), invoice_id) }
+/// Issue #473: Allowed payment tokens list — persistent storage.
+pub fn allowed_tokens_key() -> Symbol { symbol_short!("alw_toks") }
+

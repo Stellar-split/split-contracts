@@ -66,4 +66,11 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "fuzz_split_arithmetic"
+path = "fuzz_targets/fuzz_split_arithmetic.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]

@@ -245,6 +245,13 @@ fn storage_key_snapshot() {
     // Issue #333: milestone flags key (Symbol, u64) — instance storage
     keys.push(("milestone_flags_key", hex_xdr(&env, milestone_flags_key(1))));
 
+    // Funding checkpoint configuration and per-invoice progress keys.
+    keys.push((
+        "funding_checkpoints_key",
+        hex_xdr(&env, funding_checkpoints_key()),
+    ));
+    keys.push(("last_checkpoint_key", hex_xdr(&env, last_checkpoint_key(1))));
+
     // Issue #334: compact XDR overlay keys (Symbol, u64)
     keys.push(("compact_status_key", hex_xdr(&env, compact_status_key(1))));
     keys.push((
@@ -264,6 +271,29 @@ fn storage_key_snapshot() {
         "template_version_key",
         hex_xdr(&env, template_version_key(&a, &s, 1)),
     ));
+
+    // Issue #474: invoice cancellation key (Symbol, u64)
+    keys.push(("invoice_cancelled_key", hex_xdr(&env, invoice_cancelled_key(1))));
+
+    // Issue #475: multi-sig admin set key (Symbol — instance storage)
+    keys.push(("admin_set_key", hex_xdr(&env, admin_set_key())));
+
+    // Issue #476: ID-based template factory keys
+    keys.push(("template_id_key", hex_xdr(&env, template_id_key(&a, 1))));
+    keys.push(("template_id_counter_key", hex_xdr(&env, template_id_counter_key(&a))));
+
+    // Issue #474: invoice cancellation key (Symbol, u64)
+    keys.push(("invoice_cancelled_key", hex_xdr(&env, invoice_cancelled_key(1))));
+
+    // Issue #475: multi-sig admin keys
+    keys.push(("admin_set_key", hex_xdr(&env, admin_set_key())));
+    // pending_admin_action_key uses BytesN<32> — skip snapshot (tested via integration)
+
+    // Issue #476: ID-based template factory keys
+    keys.push(("template_id_key", hex_xdr(&env, template_id_key(&a, 1))));
+    keys.push(("template_id_counter_key", hex_xdr(&env, template_id_counter_key(&a))));
+    // Issue #485: contributor allowlist key (Symbol, u64)
+    keys.push(("contributor_allowlist_key", hex_xdr(&env, contributor_allowlist_key(1))));
 
     // Sort by key name for deterministic output
     keys.sort_by(|a, b| a.0.cmp(b.0));
