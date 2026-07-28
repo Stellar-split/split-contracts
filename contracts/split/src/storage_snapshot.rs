@@ -245,6 +245,13 @@ fn storage_key_snapshot() {
     // Issue #333: milestone flags key (Symbol, u64) — instance storage
     keys.push(("milestone_flags_key", hex_xdr(&env, milestone_flags_key(1))));
 
+    // Funding checkpoint configuration and per-invoice progress keys.
+    keys.push((
+        "funding_checkpoints_key",
+        hex_xdr(&env, funding_checkpoints_key()),
+    ));
+    keys.push(("last_checkpoint_key", hex_xdr(&env, last_checkpoint_key(1))));
+
     // Issue #334: compact XDR overlay keys (Symbol, u64)
     keys.push(("compact_status_key", hex_xdr(&env, compact_status_key(1))));
     keys.push((
