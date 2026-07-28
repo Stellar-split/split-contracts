@@ -1,5 +1,8 @@
 use soroban_sdk::{contracttype, Address, Bytes, BytesN, Env, String, Symbol, Vec};
 
+/// Total basis points representing 100% — ratio vecs must sum to exactly this value.
+pub const BASIS_POINTS_TOTAL: u32 = 10_000;
+
 /// (base, quote) asset pair for oracle-priced invoices.
 #[contracttype]
 #[derive(Clone, Debug)]
@@ -16,6 +19,26 @@ pub enum OverflowBehavior {
     Donate,
 }
 
+/// Issue #420: creator-configurable behaviour when a payment would push an
+/// invoice's `funded` total past its target.
+///
+/// This is the authority for overfunding decisions in `_pay`. `Cap` — the
+/// default, and the value legacy invoices are migrated to — preserves the
+/// historical behaviour by delegating to the per-invoice [`OverflowBehavior`]
+/// setting, so invoices created before this field existed are unaffected.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum OverfundingPolicy {
+    /// Reject any payment that would take `funded` past the invoice total.
+    Cap,
+    /// Accept the payment in full; `funded` is allowed to exceed the total and
+    /// the surplus is distributed pro-rata to recipients at release time.
+    AcceptAll,
+    /// Accept only the portion that fits under the total and immediately
+    /// transfer the remainder back to the payer.
+    ReturnSurplus,
+}
+
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct CloneOverrides {
@@ -23,6 +46,8 @@ pub struct CloneOverrides {
     pub new_amounts: Option<Vec<i128>>,
     pub new_recipients: Option<Vec<Address>>,
     pub new_overflow_behavior: Option<Symbol>,
+    /// New off-chain metadata hash (IPFS CID / SHA-256) for the cloned invoice.
+    pub new_metadata_hash: Option<BytesN<32>>,
 }
 
 /// Issue: Split rule for a single recipient — evaluated at release time.
@@ -140,6 +165,20 @@ pub struct InvoiceAnalytics {
 pub enum AdminRole {
     SuperAdmin,
     Operator,
+}
+
+/// Issue RBAC: Fine-grained role assigned to an address.
+/// - Admin    : may perform any action (equivalent to SuperAdmin for RBAC gates).
+/// - Creator  : may call `create_invoice`.
+/// - Operator : may call `release` / `release_invoice`.
+/// - Auditor  : read-only; may call `get_invoice` and other query entry points.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum Role {
+    Admin,
+    Creator,
+    Operator,
+    Auditor,
 }
 
 #[contracttype]
@@ -330,6 +369,9 @@ pub struct InvoiceOptions {
     pub scheduled_release_at: Option<u64>,
     /// KYC verification requirement.
     pub require_kyc: bool,
+    /// Per-recipient split ratios in basis points (must sum to [`BASIS_POINTS_TOTAL`] = 10 000
+    /// when non-empty).  Empty vec means "no ratio constraint — use amounts directly."
+    pub ratios: Vec<u32>,
     /// Overflow fields that would otherwise push this struct past Soroban's
     /// 40-field `#[contracttype]` limit — see [`InvoiceOptions2`].
     pub ext: InvoiceOptions2,
@@ -380,6 +422,18 @@ pub struct InvoiceOptions2 {
     pub recipient_whitelist_enabled: bool,
     /// Issue #188: escrow hold period in ledgers.
     pub escrow_hold_period: Option<u32>,
+    /// Issue #420: how overfunding payments are handled. Use `Cap` for the
+    /// historical behaviour. (Not `Option`-wrapped: `#[contracttype]` cannot
+    /// derive the `ScVal` conversions for `Option<CustomEnum>`.)
+    pub overfunding_policy: OverfundingPolicy,
+    /// Issue #489: number of ledgers after creation during which contributions
+    /// qualify for the discounted `early_bird_fee_bps` platform fee. 0 disables
+    /// the early-bird discount entirely.
+    pub early_bird_window_ledgers: u32,
+    /// Issue #489: discounted platform fee (bps) applied to contributions made
+    /// within `early_bird_window_ledgers` of invoice creation. Must be ≤ the
+    /// standard platform fee in effect at creation time.
+    pub early_bird_fee_bps: u32,
 }
 
 /// Legacy invoice layout used by stored invoices created before the `version`
@@ -537,6 +591,19 @@ pub struct InvoiceExt2 {
     pub release_condition_hash: Option<BytesN<32>>,
     /// Issue #417: recipient whitelist enforcement flag.
     pub recipient_whitelist_enabled: bool,
+    /// Issue #420: creator-configurable overfunding behaviour.
+    pub overfunding_policy: OverfundingPolicy,
+    /// Issue #485: optional contributor allowlist; when Some only listed addresses may call pay/contribute.
+    pub contributor_allowlist: Option<Vec<Address>>,
+    /// Issue #489: ledgers after creation during which contributions qualify
+    /// for `early_bird_fee_bps`. 0 disables the discount.
+    pub early_bird_window_ledgers: u32,
+    /// Issue #489: discounted platform fee (bps) for contributions made within
+    /// the early-bird window.
+    pub early_bird_fee_bps: u32,
+    /// Issue #489: total platform-fee discount accrued from early-bird
+    /// contributions so far; deducted from the platform fee at release.
+    pub early_bird_fee_credit: i128,
 }
 
 /// Issue #211: A single escalating penalty tier (seconds_after_deadline, bps).
@@ -714,7 +781,20 @@ pub struct Invoice {
     pub release_condition_hash: Option<BytesN<32>>,
     /// Issue #417: recipient whitelist enforcement flag.
     pub recipient_whitelist_enabled: bool,
+    /// Issue #420: creator-configurable overfunding behaviour.
+    pub overfunding_policy: OverfundingPolicy,
     pub predecessor_id: Option<u64>,
+    /// Issue #485: optional contributor allowlist; when Some only listed addresses may call pay/contribute.
+    pub contributor_allowlist: Option<Vec<Address>>,
+    /// Issue #489: ledgers after creation during which contributions qualify
+    /// for `early_bird_fee_bps`. 0 disables the discount.
+    pub early_bird_window_ledgers: u32,
+    /// Issue #489: discounted platform fee (bps) for contributions made within
+    /// the early-bird window.
+    pub early_bird_fee_bps: u32,
+    /// Issue #489: total platform-fee discount accrued from early-bird
+    /// contributions so far; deducted from the platform fee at release.
+    pub early_bird_fee_credit: i128,
 }
 
 impl Invoice {
@@ -817,6 +897,11 @@ impl Invoice {
                 twafr_last_ledger: self.twafr_last_ledger,
                 release_condition_hash: self.release_condition_hash,
                 recipient_whitelist_enabled: self.recipient_whitelist_enabled,
+                overfunding_policy: self.overfunding_policy,
+                contributor_allowlist: self.contributor_allowlist,
+                early_bird_window_ledgers: self.early_bird_window_ledgers,
+                early_bird_fee_bps: self.early_bird_fee_bps,
+                early_bird_fee_credit: self.early_bird_fee_credit,
             },
         )
     }
@@ -915,6 +1000,11 @@ impl Invoice {
             twafr_last_ledger: ext2.twafr_last_ledger,
             release_condition_hash: ext2.release_condition_hash,
             recipient_whitelist_enabled: ext2.recipient_whitelist_enabled,
+            overfunding_policy: ext2.overfunding_policy,
+            contributor_allowlist: ext2.contributor_allowlist,
+            early_bird_window_ledgers: ext2.early_bird_window_ledgers,
+            early_bird_fee_bps: ext2.early_bird_fee_bps,
+            early_bird_fee_credit: ext2.early_bird_fee_credit,
         }
     }
 }
@@ -964,6 +1054,10 @@ pub struct InvoiceStats {
     pub payment_count: u32,
     pub unique_payers: u32,
     pub completion_bps: u32,
+    /// Cumulative total of all contributions ever made to this invoice,
+    /// including amounts that were later withdrawn or refunded.
+    /// Never decremented — monotonically increases with each payment.
+    pub cumulative_contributed: i128,
 }
 
 /// Compact storage representation of Invoice — serializes InvoiceCore fields using minimal byte encoding.
@@ -1058,11 +1152,7 @@ impl Invoice {
     /// Upgrade a legacy (pre-version) invoice to the current schema.
     /// New fields are filled with their default (empty / zero) values.
     pub fn from_legacy(old: LegacyInvoice, env: &Env) -> Self {
-        let funding_token = old
-            .tokens
-            .get(0)
-            .expect("no token")
-            .clone();
+        let funding_token = old.tokens.get(0).expect("no token").clone();
         Invoice {
             version: 2,
             creator: old.creator,
@@ -1155,7 +1245,15 @@ impl Invoice {
             twafr_last_ledger: 0,
             release_condition_hash: None,
             recipient_whitelist_enabled: false,
+            // Issue #420: legacy invoices predate the policy field; `Cap`
+            // delegates to `overflow_behavior` and so preserves their
+            // original overfunding semantics exactly.
+            overfunding_policy: OverfundingPolicy::Cap,
             predecessor_id: None,
+            contributor_allowlist: None,
+            early_bird_window_ledgers: 0,
+            early_bird_fee_bps: 0,
+            early_bird_fee_credit: 0,
         }
     }
 }
@@ -1395,3 +1493,18 @@ pub struct DelayedPayout {
     /// Ledger sequence at which this payout becomes claimable.
     pub claimable_at_ledger: u32,
 }
+
+/// Issue #470: Result of contribute containing amount applied and refund amount.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ContributionResult {
+    pub invoice_id: u64,
+    pub amount_applied: i128,
+    pub refund_amount: i128,
+}
+
+/// Issue #471: Storage key for recipient address rotation mapping.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct RecipientAddress(pub u64, pub Address);
+

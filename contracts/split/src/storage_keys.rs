@@ -282,6 +282,15 @@ pub fn required_memo_hash_key(invoice_id: u64) -> (Symbol, u64) { (symbol_short!
 pub fn invoice_tags_key(invoice_id: u64) -> (Symbol, u64) { (symbol_short!("inv_tags"), invoice_id) }
 
 // ---------------------------------------------------------------------------
+// RBAC: Role assignment storage
+// ---------------------------------------------------------------------------
+
+/// Per-address per-role assignment flag — persistent storage.
+/// Stored as a boolean `true`; absence means the role is not held.
+/// Key: ("role_asn", address, role_u32) where role_u32 is the Role discriminant.
+pub fn role_key(address: &Address, role_discriminant: u32) -> (Symbol, Address, u32) {
+    (symbol_short!("role_asn"), address.clone(), role_discriminant)
+}
 // Issue #474: Invoice cancellation
 // ---------------------------------------------------------------------------
 
@@ -318,3 +327,8 @@ pub fn template_id_key(creator: &Address, template_id: u64) -> (Symbol, Address,
 pub fn template_id_counter_key(creator: &Address) -> (Symbol, Address) {
     (symbol_short!("tmpl_ctr"), creator.clone())
 }
+/// Issue #485: per-invoice contributor allowlist — persistent storage.
+pub fn contributor_allowlist_key(invoice_id: u64) -> (Symbol, u64) { (symbol_short!("ctr_al"), invoice_id) }
+/// Issue #473: Allowed payment tokens list — persistent storage.
+pub fn allowed_tokens_key() -> Symbol { symbol_short!("alw_toks") }
+

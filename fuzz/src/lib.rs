@@ -82,6 +82,7 @@ pub fn default_options(env: &Env) -> InvoiceOptions {
         refund_grace_secs: None,
         scheduled_release_at: None,
         require_kyc: false,
+        ratios: Vec::new(env),
         ext: InvoiceOptions2 {
             target_usd_cents: None,
             payment_token: None,
