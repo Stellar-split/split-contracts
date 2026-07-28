@@ -46,6 +46,8 @@ pub struct CloneOverrides {
     pub new_amounts: Option<Vec<i128>>,
     pub new_recipients: Option<Vec<Address>>,
     pub new_overflow_behavior: Option<Symbol>,
+    /// New off-chain metadata hash (IPFS CID / SHA-256) for the cloned invoice.
+    pub new_metadata_hash: Option<BytesN<32>>,
 }
 
 /// Issue: Split rule for a single recipient — evaluated at release time.
@@ -1052,6 +1054,10 @@ pub struct InvoiceStats {
     pub payment_count: u32,
     pub unique_payers: u32,
     pub completion_bps: u32,
+    /// Cumulative total of all contributions ever made to this invoice,
+    /// including amounts that were later withdrawn or refunded.
+    /// Never decremented — monotonically increases with each payment.
+    pub cumulative_contributed: i128,
 }
 
 /// Compact storage representation of Invoice — serializes InvoiceCore fields using minimal byte encoding.

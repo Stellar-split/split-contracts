@@ -70,6 +70,8 @@ use types::{
     RepScore, ResolveAction, ResolveRule, SimulateReleaseResult, SplitRule, SubscriptionParams,
     TimelockAction, Tranche, TreasuryRecord, UpgradeProposal,
     FeeBracket, FeeTier, InstalmentPlan, Invoice, InvoiceCore, InvoiceExt, InvoiceExt2, InvoiceExt3,
+    InvoiceHot, InvoiceOptions, InvoiceOptions2, InvoicePayment, InvoiceStats,
+    InvoiceStatus, InvoiceTemplate,
     InvoiceHot, InvoiceOptions, InvoiceOptions2, InvoicePayment, InvoiceStatus, InvoiceTemplate,
     InvoiceTemplateRecord, LegacyInvoice, OverflowBehavior, Payment, PaymentCertificate,
     PaymentCommitment, PaymentProof, PendingAdminAction, ProtocolFeeConfig, QueuedAction,
@@ -1199,6 +1201,30 @@ fn invoice_group_id_key(invoice_id: u64) -> (Symbol, u64) {
 #[allow(dead_code)]
 fn group_counter_key() -> Symbol {
     symbol_short!("grp_ctr")
+}
+
+/// Cumulative contributed amount for an invoice — persistent storage.
+/// Monotonically increases with each payment; never decremented.
+fn cumulative_contributed_key(invoice_id: u64) -> (Symbol, u64) {
+    (symbol_short!("cum_ctb"), invoice_id)
+}
+
+/// Sweep timeout in ledgers — instance storage.
+/// Failed payouts can be swept after `last_failed_ledger + sweep_timeout_ledgers`.
+fn sweep_timeout_key() -> Symbol {
+    symbol_short!("swp_tout")
+}
+
+/// Per-invoice last failed payout ledger — persistent storage.
+/// Updated whenever a payout fails during release.
+fn last_failed_ledger_key(invoice_id: u64) -> (Symbol, u64) {
+    (symbol_short!("last_fail"), invoice_id)
+}
+
+/// Trusted callers whitelist — instance storage.
+/// Addresses in this list are exempt from platform fee deduction.
+fn trusted_callers_key() -> Symbol {
+    symbol_short!("trstd_cal")
 }
 
 // ---------------------------------------------------------------------------
@@ -3221,6 +3247,90 @@ impl SplitContract {
         waivers.iter().any(|a| a == address)
     }
 
+    /// Fee-exempt trusted caller whitelist (issue: Drips Wave governance fee exemption).
+    pub fn add_trusted_caller(env: Env, admin: Address, caller: Address) {
+        require_role(&env, &admin, AdminRole::SuperAdmin);
+        let mut trusted: Vec<Address> = env.storage().instance().get(&trusted_callers_key()).unwrap_or_else(|| Vec::new(&env));
+        if !trusted.contains(&caller) {
+            trusted.push_back(caller.clone());
+            env.storage().instance().set(&trusted_callers_key(), &trusted);
+        }
+        events::trusted_caller_added(&env, &caller);
+    }
+
+    pub fn remove_trusted_caller(env: Env, admin: Address, caller: Address) {
+        require_role(&env, &admin, AdminRole::SuperAdmin);
+        let trusted: Vec<Address> = env.storage().instance().get(&trusted_callers_key()).unwrap_or_else(|| Vec::new(&env));
+        let mut filtered: Vec<Address> = Vec::new(&env);
+        for a in trusted.iter() {
+            if a != caller { filtered.push_back(a); }
+        }
+        env.storage().instance().set(&trusted_callers_key(), &filtered);
+        events::trusted_caller_removed(&env, &caller);
+    }
+
+    pub fn set_sweep_timeout(env: Env, admin: Address, ledgers: u32) {
+        require_role(&env, &admin, AdminRole::SuperAdmin);
+        env.storage().instance().set(&sweep_timeout_key(), &ledgers);
+    }
+
+    /// Sweep an invoice's stranded failed-payout funds to treasury once SweepTimeoutLedgers
+    /// has elapsed since the last failed payout.
+    pub fn sweep_unclaimed_funds(env: Env, admin: Address, invoice_id: u64) -> i128 {
+        require_role(&env, &admin, AdminRole::SuperAdmin);
+        let last_failed: u32 = env.storage().persistent().get(&last_failed_ledger_key(invoice_id))
+            .expect("no failed payouts recorded for this invoice");
+        let timeout: u32 = env.storage().instance().get(&sweep_timeout_key()).unwrap_or(120_960);
+        assert!(
+            env.ledger().sequence() > last_failed.saturating_add(timeout),
+            "sweep timeout has not elapsed"
+        );
+
+        let invoice = load_invoice(&env, invoice_id);
+        let mut swept: i128 = 0;
+        for recipient in invoice.recipients.iter() {
+            let key = fallback_escrow_key(invoice_id, &recipient);
+            let balance: i128 = env.storage().persistent().get(&key).unwrap_or(0);
+            if balance > 0 {
+                env.storage().persistent().remove(&key);
+                swept += balance;
+            }
+        }
+        assert!(swept > 0, "nothing to sweep");
+
+        let treasury: Address = env.storage().instance().get(&treasury_key()).expect("treasury not set");
+        // Failed payouts are always re-escrowed in the invoice's funding token
+        // (see the `try_invoke_contract` fallback in `_release_full`/`_release_tranches`),
+        // regardless of any per-recipient payout token, so sweep in that same token.
+        let token_client = token::Client::new(&env, &funding_token_for(&invoice));
+        token_client.transfer(&env.current_contract_address(), &treasury, &swept);
+        env.storage().persistent().remove(&last_failed_ledger_key(invoice_id));
+        events::funds_swept(&env, invoice_id, swept, &treasury);
+        swept
+    }
+
+    /// Queryable snapshot of an invoice's funding stats, including cumulative_contributed
+    /// (never decremented by withdrawals/refunds).
+    pub fn get_invoice_stats(env: Env, invoice_id: u64) -> InvoiceStats {
+        let invoice = load_invoice(&env, invoice_id);
+        let total: i128 = invoice.amounts.iter().sum();
+        let cumulative_contributed: i128 = env.storage().persistent()
+            .get(&cumulative_contributed_key(invoice_id)).unwrap_or(0);
+        let completion_bps: u32 = if total > 0 { ((invoice.funded * 10_000) / total) as u32 } else { 0 };
+        let mut unique_payers: Vec<Address> = Vec::new(&env);
+        for payment in invoice.payments.iter() {
+            if !unique_payers.contains(&payment.payer) { unique_payers.push_back(payment.payer); }
+        }
+        InvoiceStats {
+            funded: invoice.funded,
+            total,
+            payment_count: invoice.payments.len(),
+            unique_payers: unique_payers.len(),
+            completion_bps,
+            cumulative_contributed,
+        }
+    }
+
     /// Get a consolidated invoice snapshot for off-chain audit.
     pub fn get_invoice_snapshot(env: Env, invoice_id: u64) -> types::InvoiceSnapshot {
         let core: types::InvoiceCore = env
@@ -3493,8 +3603,9 @@ impl SplitContract {
         assert!(amount > 0, "no fallback balance to claim");
 
         let invoice = load_invoice(&env, invoice_id);
-        let token_address = invoice.tokens.get(0).expect("no token");
-        let token_client = token::Client::new(&env, &token_address);
+        // Failed payouts are always re-escrowed in the invoice's funding token; see
+        // sweep_unclaimed_funds for the same reasoning.
+        let token_client = token::Client::new(&env, &funding_token_for(&invoice));
 
         env.storage().persistent().remove(&key);
 
@@ -5310,6 +5421,9 @@ impl SplitContract {
         };
 
         save_invoice(&env, id, &new_invoice);
+        if let Some(hash) = overrides.new_metadata_hash {
+            env.storage().persistent().set(&metadata_hash_key(id), &hash);
+        }
         events::invoice_cloned(&env, source_id, id);
 
         // Index each recipient -> invoice ID.
@@ -5484,6 +5598,11 @@ impl SplitContract {
                 .set(&pay_shard_key(invoice_id, shard_id), &shard_payments);
 
             invoice.funded += net_paid;
+            let cumulative_key = cumulative_contributed_key(invoice_id);
+            let cumulative: i128 = env.storage().persistent().get(&cumulative_key).unwrap_or(0);
+            env.storage()
+                .persistent()
+                .set(&cumulative_key, &(cumulative + net_paid));
 
             // In real app we might handle penalty/oracle, but for simplicity:
             events::payment_received(&env, invoice_id, &payer, net_paid);
@@ -6079,6 +6198,13 @@ impl SplitContract {
         let prev_funded = invoice.funded;
         invoice.funded += credited_amount;
 
+        // Track lifetime contributions separately; never decremented on withdrawal/refund.
+        let cumulative_key = cumulative_contributed_key(invoice_id);
+        let cumulative: i128 = env.storage().persistent().get(&cumulative_key).unwrap_or(0);
+        env.storage()
+            .persistent()
+            .set(&cumulative_key, &(cumulative + credited_amount));
+
         // Increment per-address reputation counter (issue #24, #349).
         let is_late =
             invoice.penalty_deadline > 0 && env.ledger().timestamp() > invoice.penalty_deadline;
@@ -6317,6 +6443,11 @@ impl SplitContract {
             .set(&pay_shard_key(invoice_id, shard_id), &shard_payments);
 
         invoice.funded += credited_amount;
+        let cumulative_key = cumulative_contributed_key(invoice_id);
+        let cumulative: i128 = env.storage().persistent().get(&cumulative_key).unwrap_or(0);
+        env.storage()
+            .persistent()
+            .set(&cumulative_key, &(cumulative + credited_amount));
 
         append_audit_entry(&env, invoice_id, symbol_short!("pay_tok"), &payer);
         events::payment_received(&env, invoice_id, &payer, credited_amount);
@@ -6416,6 +6547,11 @@ impl SplitContract {
             .set(&pay_shard_key(invoice_id, shard_id), &shard_payments);
 
         invoice.funded += converted;
+        let cumulative_key = cumulative_contributed_key(invoice_id);
+        let cumulative: i128 = env.storage().persistent().get(&cumulative_key).unwrap_or(0);
+        env.storage()
+            .persistent()
+            .set(&cumulative_key, &(cumulative + converted));
 
         append_audit_entry(&env, invoice_id, symbol_short!("brdg_pay"), &payer);
         events::payment_received(&env, invoice_id, &payer, converted);
@@ -6526,6 +6662,11 @@ impl SplitContract {
                 .set(&pay_shard_key(p.invoice_id, shard_id), &shard_payments);
 
             inv.funded += p.amount;
+            let cumulative_key = cumulative_contributed_key(p.invoice_id);
+            let cumulative: i128 = env.storage().persistent().get(&cumulative_key).unwrap_or(0);
+            env.storage()
+                .persistent()
+                .set(&cumulative_key, &(cumulative + p.amount));
 
             append_audit_entry(&env, p.invoice_id, symbol_short!("pool_pay"), &payer);
             events::payment_received(&env, p.invoice_id, &payer, p.amount);
@@ -7875,6 +8016,9 @@ impl SplitContract {
                     let key = fallback_escrow_key(invoice_id, &recipient);
                     let balance: i128 = env.storage().persistent().get(&key).unwrap_or(0);
                     env.storage().persistent().set(&key, &(balance + payout));
+                    env.storage()
+                        .persistent()
+                        .set(&last_failed_ledger_key(invoice_id), &env.ledger().sequence());
                     events::payout_failed(env, invoice_id, &recipient, payout);
                 }
                 let recipient_token_client =
@@ -8369,7 +8513,21 @@ impl SplitContract {
 
         let funded = invoice.funded;
 
-        let total_platform_fee: i128 = if creator_waived {
+        // First-party trusted callers (e.g. governance contracts) are exempt from the platform fee.
+        // Deliberately does NOT match on `env.current_contract_address()`: `release()` and
+        // `trigger_scheduled_release()` are permissionless entry points that pass the contract's
+        // own address as `actor`, so matching it here would let anyone waive the platform fee on
+        // every invoice by triggering a release through those paths.
+        let caller_trusted: bool = {
+            let trusted: Vec<Address> = env
+                .storage()
+                .instance()
+                .get(&trusted_callers_key())
+                .unwrap_or_else(|| Vec::new(env));
+            trusted.contains(actor)
+        };
+
+        let total_platform_fee: i128 = if creator_waived || caller_trusted {
             0
         } else {
             // Issue #489: early-bird contributions accrue a fee discount at
@@ -8698,6 +8856,9 @@ impl SplitContract {
                     let key = fallback_escrow_key(invoice_id, &recipient);
                     let balance: i128 = env.storage().persistent().get(&key).unwrap_or(0);
                     env.storage().persistent().set(&key, &(balance + payout));
+                    env.storage()
+                        .persistent()
+                        .set(&last_failed_ledger_key(invoice_id), &env.ledger().sequence());
                     events::payout_failed(env, invoice_id, &recipient, payout);
                 }
 
@@ -8884,6 +9045,11 @@ impl SplitContract {
                     .set(&pay_shard_key(target_id, shard_id), &shard_payments);
 
                 target.funded += leftover;
+                let cumulative_key = cumulative_contributed_key(target_id);
+                let cumulative: i128 = env.storage().persistent().get(&cumulative_key).unwrap_or(0);
+                env.storage()
+                    .persistent()
+                    .set(&cumulative_key, &(cumulative + leftover));
                 // If target becomes fully funded, trigger auto-release where applicable.
                 let target_total: i128 = target.amounts.iter().sum();
                 if target.funded >= target_total {
@@ -11463,6 +11629,11 @@ impl SplitContract {
             .set(&pay_shard_key(invoice_id, shard_id), &shard_payments);
 
         invoice.funded += amount;
+        let cumulative_key = cumulative_contributed_key(invoice_id);
+        let cumulative: i128 = env.storage().persistent().get(&cumulative_key).unwrap_or(0);
+        env.storage()
+            .persistent()
+            .set(&cumulative_key, &(cumulative + amount));
 
         append_audit_entry(&env, invoice_id, symbol_short!("del_pay"), &delegate);
         events::payment_received(&env, invoice_id, &beneficiary, amount);
@@ -12161,6 +12332,11 @@ impl SplitContract {
             .set(&pay_shard_key(invoice_id, shard_id), &shard_payments);
 
         invoice.funded += amount;
+        let cumulative_key = cumulative_contributed_key(invoice_id);
+        let cumulative: i128 = env.storage().persistent().get(&cumulative_key).unwrap_or(0);
+        env.storage()
+            .persistent()
+            .set(&cumulative_key, &(cumulative + amount));
 
         events::delegated_payment(&env, invoice_id, &on_behalf_of, &executor, amount);
         events::payment_received(&env, invoice_id, &on_behalf_of, amount);
