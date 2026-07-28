@@ -828,6 +828,21 @@ fn contributor_allowlist_key(invoice_id: u64) -> (Symbol, u64) {
     (symbol_short!("ctr_al"), invoice_id)
 }
 
+/// Issue #503: number of currently-open invoices per creator — persistent storage.
+fn open_invoice_count_key(creator: &Address) -> (Symbol, Address) {
+    (symbol_short!("op_inv_cn"), creator.clone())
+}
+
+/// Issue #503: admin-configured maximum open invoices per creator — instance storage.
+fn max_open_invoices_key() -> Symbol {
+    symbol_short!("mx_op_inv")
+}
+
+/// Issue #505: list of recipients whose payout failed (missing account) — persistent storage.
+fn failed_payouts_key(invoice_id: u64) -> (Symbol, u64) {
+    (symbol_short!("fail_pay"), invoice_id)
+}
+
 fn commitment_expiry_key() -> Symbol {
     symbol_short!("com_exp")
 }
@@ -2719,6 +2734,17 @@ impl SplitContract {
         require_role(&env, &admin, AdminRole::Operator);
         assert!(bytes > 0, "quota must be positive");
         env.storage().instance().set(&storage_quota_key(), &bytes);
+    }
+
+    /// Issue #503: Set the maximum number of open invoices a single creator may hold at once.
+    /// Admin-only. Emits InvoiceLimitUpdated(new_limit).
+    pub fn set_max_open_invoices(env: Env, admin: Address, new_limit: u32) {
+        require_role(&env, &admin, AdminRole::Operator);
+        assert!(new_limit > 0, "new_limit must be positive");
+        env.storage()
+            .instance()
+            .set(&max_open_invoices_key(), &new_limit);
+        events::invoice_limit_updated(&env, new_limit);
     }
 
     /// Returns the current global per-invoice storage quota in bytes (issue #425).
@@ -4630,6 +4656,25 @@ impl SplitContract {
         env.storage()
             .persistent()
             .set(&invoice_count_key(&creator), &(inv_cnt + 1));
+
+        // Issue #503: enforce per-creator open-invoice cap.
+        const DEFAULT_MAX_OPEN_INVOICES: u32 = 100;
+        let max_open: u32 = env
+            .storage()
+            .instance()
+            .get(&max_open_invoices_key())
+            .unwrap_or(DEFAULT_MAX_OPEN_INVOICES);
+        let open_count: u32 = env
+            .storage()
+            .persistent()
+            .get(&open_invoice_count_key(&creator))
+            .unwrap_or(0u32);
+        if open_count >= max_open {
+            env.panic_with_error(ContractError::CreatorInvoiceLimitReached);
+        }
+        env.storage()
+            .persistent()
+            .set(&open_invoice_count_key(&creator), &(open_count + 1));
 
         let total: i128 = amounts.iter().sum();
 
@@ -7861,6 +7906,109 @@ impl SplitContract {
 
     /// Claim a pending payout that was not transferred during release (issue #209).
     /// Recipient can claim their payout after the invoice is Released.
+    /// Issue #505: Retry a payout to a recipient whose account was missing at release time.
+    ///
+    /// Re-validates that the recipient account now exists on the ledger. If it does, executes
+    /// the transfer and removes them from FailedPayouts. If FailedPayouts is now empty, the
+    /// invoice is finalised (status → Released) and the open-invoice counter is decremented.
+    /// If the account is still missing, emits RecipientAccountMissing again and returns an error.
+    pub fn retry_failed_payout(env: Env, invoice_id: u64, recipient: Address) {
+        require_not_paused(&env);
+        let mut invoice = load_invoice(&env, invoice_id);
+
+        // Load and validate the failed-payouts list.
+        let mut failed: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&failed_payouts_key(invoice_id))
+            .expect("no failed payouts for this invoice");
+
+        assert!(
+            failed.iter().any(|a| a == recipient),
+            "recipient not in failed payouts"
+        );
+
+        let funding_token_client = token::Client::new(&env, &funding_token_for(&invoice));
+
+        // Re-check account existence.
+        let account_exists = env
+            .try_invoke_contract::<i128, soroban_sdk::Error>(
+                &funding_token_client.address,
+                &symbol_short!("balance"),
+                (recipient.clone(),).into_val(&env),
+            )
+            .is_ok();
+
+        if !account_exists {
+            events::recipient_account_missing(&env, invoice_id, &recipient);
+            env.panic_with_error(ContractError::RecipientAccountMissing);
+        }
+
+        // Find recipient index and compute their payout amount.
+        let n = invoice.recipients.len();
+        let total: i128 = invoice.amounts.iter().sum();
+        let funded = invoice.funded;
+        let idx = invoice
+            .recipients
+            .iter()
+            .position(|r| r == recipient.clone())
+            .expect("recipient not in invoice") as u32;
+        let amount = invoice.amounts.get(idx).unwrap();
+        let payout = if n == 1 {
+            funded
+        } else {
+            checked_proportion(amount as u128, funded as u128, total as u128)
+                .expect("ArithmeticOverflow")
+        };
+
+        // Execute transfer.
+        funding_token_client.transfer(
+            &env.current_contract_address(),
+            &recipient,
+            &payout,
+        );
+
+        // Remove from failed list.
+        let mut new_failed: Vec<Address> = Vec::new(&env);
+        for a in failed.iter() {
+            if a != recipient {
+                new_failed.push_back(a);
+            }
+        }
+        if new_failed.is_empty() {
+            env.storage().persistent().remove(&failed_payouts_key(invoice_id));
+        } else {
+            env.storage()
+                .persistent()
+                .set(&failed_payouts_key(invoice_id), &new_failed);
+        }
+
+        // If all payouts are now complete, finalise the invoice.
+        if new_failed.is_empty() {
+            invoice.status = InvoiceStatus::Released;
+            invoice.completion_time = Some(env.ledger().timestamp());
+            save_invoice(&env, invoice_id, &invoice);
+            // Decrement open-invoice counter now that invoice is fully done.
+            let cnt: u32 = env
+                .storage()
+                .persistent()
+                .get(&open_invoice_count_key(&invoice.creator))
+                .unwrap_or(0u32);
+            env.storage()
+                .persistent()
+                .set(&open_invoice_count_key(&invoice.creator), &cnt.saturating_sub(1));
+            events::invoice_state_changed(
+                &env,
+                invoice_id,
+                Some(&InvoiceStatus::Pending),
+                &InvoiceStatus::Released,
+                &recipient,
+            );
+        }
+
+        events::recipient_paid(&env, invoice_id, &recipient, payout);
+    }
+
     pub fn claim_pending_payout(env: Env, invoice_id: u64, recipient: Address) {
         recipient.require_auth();
 
@@ -8740,6 +8888,33 @@ impl SplitContract {
                     continue;
                 }
 
+                // Issue #505: verify recipient account existence before attempting payout.
+                // Use try_invoke_contract to call balance() on the funding token; if it fails
+                // the account has never been initialised on the ledger.
+                let account_exists = env
+                    .try_invoke_contract::<i128, soroban_sdk::Error>(
+                        &funding_token_client.address,
+                        &symbol_short!("balance"),
+                        (recipient.clone(),).into_val(env),
+                    )
+                    .is_ok();
+                if !account_exists {
+                    // Record the failure and emit event; skip transfer for this recipient.
+                    let mut failed: Vec<Address> = env
+                        .storage()
+                        .persistent()
+                        .get(&failed_payouts_key(invoice_id))
+                        .unwrap_or_else(|| Vec::new(env));
+                    if !failed.iter().any(|a| a == recipient) {
+                        failed.push_back(recipient.clone());
+                    }
+                    env.storage()
+                        .persistent()
+                        .set(&failed_payouts_key(invoice_id), &failed);
+                    events::recipient_account_missing(env, invoice_id, &recipient);
+                    continue;
+                }
+
                 // Issue #482: use checked arithmetic to prevent overflow.
                 let tax = checked_bps_of(proportional, invoice.tax_bps, 10_000u128)
                     .expect("ArithmeticOverflow");
@@ -9078,7 +9253,18 @@ impl SplitContract {
             }
         }
 
-        invoice.status = InvoiceStatus::Released;
+        // Issue #505: only transition to Released if all recipients were paid.
+        // If any ended up in failed_payouts, stay Pending so retry_failed_payout can finish the job.
+        let has_failed_payouts = env
+            .storage()
+            .persistent()
+            .get::<(Symbol, u64), Vec<Address>>(&failed_payouts_key(invoice_id))
+            .map(|v| !v.is_empty())
+            .unwrap_or(false);
+
+        if !has_failed_payouts {
+            invoice.status = InvoiceStatus::Released;
+        }
         invoice.completion_time = Some(env.ledger().timestamp());
         if invoice.insurance_fund > 0 {
             let token_client = token::Client::new(env, &invoice.tokens.get(0).expect("no token"));
@@ -9089,16 +9275,29 @@ impl SplitContract {
             );
             invoice.insurance_fund = 0;
         }
+        // Issue #503: decrement per-creator open-invoice counter on release (only when fully done).
+        if !has_failed_payouts {
+            let cnt: u32 = env
+                .storage()
+                .persistent()
+                .get(&open_invoice_count_key(&invoice.creator))
+                .unwrap_or(0u32);
+            env.storage()
+                .persistent()
+                .set(&open_invoice_count_key(&invoice.creator), &cnt.saturating_sub(1));
+        }
         save_invoice(env, invoice_id, invoice);
         append_audit_entry(env, invoice_id, symbol_short!("release"), actor);
         events::invoice_released(env, invoice_id, &invoice.recipients);
-        events::invoice_state_changed(
-            env,
-            invoice_id,
-            Some(&InvoiceStatus::Pending),
-            &InvoiceStatus::Released,
-            actor,
-        );
+        if !has_failed_payouts {
+            events::invoice_state_changed(
+                env,
+                invoice_id,
+                Some(&InvoiceStatus::Pending),
+                &InvoiceStatus::Released,
+                actor,
+            );
+        }
         notify_invoice(
             env,
             invoice_id,
@@ -10130,6 +10329,18 @@ impl SplitContract {
                 &InvoiceStatus::Cancelled,
                 &caller,
             );
+        }
+
+        // Issue #503: decrement per-creator open-invoice counter on cancel.
+        {
+            let cnt: u32 = env
+                .storage()
+                .persistent()
+                .get(&open_invoice_count_key(&invoice.creator))
+                .unwrap_or(0u32);
+            env.storage()
+                .persistent()
+                .set(&open_invoice_count_key(&invoice.creator), &cnt.saturating_sub(1));
         }
 
         save_invoice(&env, invoice_id, &invoice);

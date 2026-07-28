@@ -76,5 +76,9 @@ pub enum ContractError {
     CreatorCooldownActive = 34,
     /// Issue #473: Token is not in the allowed tokens list.
     UnauthorisedToken = 35,
+    /// Issue #503: Creator has reached the maximum number of open invoices.
+    CreatorInvoiceLimitReached = 36,
+    /// Issue #505: Payout recipient account does not exist on the ledger.
+    RecipientAccountMissing = 37,
 }
 

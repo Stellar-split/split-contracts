@@ -1,6 +1,121 @@
 use crate::types::{DisputeOutcome, InvoiceStatus, RepScore, TimelockAction};
 use soroban_sdk::{contracttype, symbol_short, Address, BytesN, Env, String, Vec};
 
+// ---------------------------------------------------------------------------
+// Issue #502: Event schema versioning
+//
+// Every event type carries a `u32` version constant as the FIRST topic element
+// so that off-chain consumers can detect schema changes without parsing data.
+//
+// Version history:
+//   v1 (initial) — all events below.  Bump the constant and add a note here
+//                  whenever the topic list or data payload shape changes.
+//
+// Usage in publish calls:
+//   (VERSION_CONST, symbol_short!("split"), symbol_short!("tag"), id)
+// ---------------------------------------------------------------------------
+
+pub const INVOICE_CREATED_V:          u32 = 1;
+pub const PAYMENT_RECEIVED_V:         u32 = 1;
+pub const PAYMENT_COMMITTED_V:        u32 = 1;
+pub const MILESTONE_RELEASED_V:       u32 = 1;
+pub const SURPLUS_CLAIMED_V:          u32 = 1;
+pub const INVOICE_RELEASED_V:         u32 = 1;
+pub const INVOICE_REFUNDED_V:         u32 = 1;
+pub const CONDITION_VERIFIED_V:       u32 = 1;
+pub const INVOICE_EXPIRED_V:          u32 = 1;
+pub const RECIPIENT_WHITELISTED_V:    u32 = 1;
+pub const RECIPIENT_REMOVED_WL_V:     u32 = 1;
+pub const REBATE_ACCRUED_V:           u32 = 1;
+pub const PAYER_REFUNDED_V:           u32 = 1;
+pub const RECIPIENT_ADDED_V:          u32 = 1;
+pub const SPLIT_ADJUSTED_V:           u32 = 1;
+pub const RECIPIENTS_REBALANCED_V:    u32 = 1;
+pub const INVOICE_ARCHIVED_V:         u32 = 1;
+pub const DELEGATE_SET_V:             u32 = 1;
+pub const DELEGATE_REVOKED_V:         u32 = 1;
+pub const INVOICE_PART_RELEASED_V:    u32 = 1;
+pub const PAYMENT_REMINDER_V:         u32 = 1;
+pub const PAYMENT_MATCHED_V:          u32 = 1;
+pub const INVOICE_CLONED_V:           u32 = 1;
+pub const INVOICE_PAUSED_V:           u32 = 1;
+pub const INVOICE_RESUMED_V:          u32 = 1;
+pub const INVOICE_FORCE_RESUMED_V:    u32 = 1;
+pub const PENDING_PAYOUT_CLAIMED_V:   u32 = 1;
+pub const INVOICE_RENEWED_V:          u32 = 1;
+pub const INVOICE_RATED_V:            u32 = 1;
+pub const RATE_LIMIT_HIT_V:           u32 = 1;
+pub const NFT_GATE_SET_V:             u32 = 1;
+pub const ACTION_QUEUED_V:            u32 = 1;
+pub const ACTION_EXECUTED_V:          u32 = 1;
+pub const ACTION_CANCELLED_V:         u32 = 1;
+pub const INVOICE_ADMIN_FROZEN_V:     u32 = 1;
+pub const INVOICE_ADMIN_UNFROZEN_V:   u32 = 1;
+pub const BATCH_ARCHIVED_V:           u32 = 1;
+pub const PARTIAL_REFUND_ISSUED_V:    u32 = 1;
+pub const PLATFORM_VOL_MILESTONE_V:   u32 = 1;
+pub const CREATOR_VOL_MILESTONE_V:    u32 = 1;
+pub const CIRCUIT_BREAKER_ACTIVATED_V:   u32 = 1;
+pub const CIRCUIT_BREAKER_DEACTIVATED_V: u32 = 1;
+pub const FEE_WAIVER_GRANTED_V:       u32 = 1;
+pub const FEE_WAIVER_REVOKED_V:       u32 = 1;
+pub const FEE_TIERS_UPDATED_V:        u32 = 1;
+pub const FEE_TIER_APPLIED_V:         u32 = 1;
+pub const CREATOR_STATS_UPDATED_V:    u32 = 1;
+pub const INVOICE_STATE_CHANGED_V:    u32 = 1;
+pub const ALLOWLIST_UPDATED_V:        u32 = 1;
+pub const REFUND_CLAIMED_V:           u32 = 1;
+pub const UPGRADE_PROPOSED_V:         u32 = 1;
+pub const UPGRADE_EXECUTED_V:         u32 = 1;
+pub const UPGRADE_CANCELLED_V:        u32 = 1;
+pub const CONTRACT_PAUSED_V:          u32 = 1;
+pub const CONTRACT_UNPAUSED_V:        u32 = 1;
+pub const FUNDS_UNLOCKED_V:           u32 = 1;
+pub const METADATA_UPDATED_V:         u32 = 1;
+pub const RECIPIENT_PAID_V:           u32 = 1;
+pub const MILESTONE_REACHED_V:        u32 = 1;
+pub const FUNDING_CHECKPOINT_V:       u32 = 1;
+pub const DELEGATED_PAYMENT_V:        u32 = 1;
+pub const DISPUTE_RAISED_V:           u32 = 1;
+pub const DISPUTE_RESOLVED_V:         u32 = 1;
+pub const DISPUTE_EXPIRED_V:          u32 = 1;
+pub const FEE_PAID_V:                 u32 = 1;
+pub const ORACLE_PRICE_FETCHED_V:     u32 = 1;
+pub const TRANCHE_RELEASED_V:         u32 = 1;
+pub const REP_UPDATED_V:              u32 = 1;
+pub const PAYOUT_FAILED_V:            u32 = 1;
+pub const INSTALMENT_TRANCHE_PAID_V:  u32 = 1;
+pub const ESCROW_HOLD_STARTED_V:      u32 = 1;
+pub const ESCROW_RESOLVED_V:          u32 = 1;
+pub const DELAYED_PAYOUT_SCHEDULED_V: u32 = 1;
+pub const DELAYED_PAYOUT_CLAIMED_V:   u32 = 1;
+pub const CONTRACT_FROZEN_V:          u32 = 1;
+pub const CONTRACT_THAWED_V:          u32 = 1;
+pub const DUPLICATE_PAYMENT_REJECTED_V: u32 = 1;
+pub const REFERRER_REWARDED_V:        u32 = 1;
+pub const GROUP_MEMBER_EXPIRED_V:     u32 = 1;
+pub const GROUP_ROLLBACK_TRIGGERED_V: u32 = 1;
+pub const EARLY_BIRD_PAYMENT_V:       u32 = 1;
+pub const CREATOR_COOLDOWN_SET_V:     u32 = 1;
+pub const FUNDS_SWEPT_V:              u32 = 1;
+pub const TRUSTED_CALLER_ADDED_V:     u32 = 1;
+pub const TRUSTED_CALLER_REMOVED_V:   u32 = 1;
+pub const ROLE_GRANTED_V:             u32 = 1;
+pub const ROLE_REVOKED_V:             u32 = 1;
+pub const INVOICE_CANCELLED_V:        u32 = 1;
+pub const ADMIN_ACTION_PROPOSED_V:    u32 = 1;
+pub const ADMIN_ACTION_APPROVED_V:    u32 = 1;
+pub const ADMIN_ACTION_EXECUTED_V:    u32 = 1;
+pub const TEMPLATE_CREATED_V:         u32 = 1;
+pub const TEMPLATE_DELETED_V:         u32 = 1;
+pub const INVOICE_FROM_TEMPLATE_V:    u32 = 1;
+pub const REFUND_ISSUED_V:            u32 = 1;
+pub const RECIPIENT_ADDRESS_ROTATED_V: u32 = 1;
+/// Issue #503: emitted when admin updates the per-creator open-invoice cap.  v1 initial.
+pub const INVOICE_LIMIT_UPDATED_V:    u32 = 1;
+/// Issue #505: emitted when a payout recipient account is missing on-ledger.  v1 initial.
+pub const RECIPIENT_ACCOUNT_MISSING_V: u32 = 1;
+
 /// Emitted when a new invoice is created.
 /// Topics: (split, created, invoice_id)
 /// Data: (creator, total)
@@ -1294,3 +1409,32 @@ pub fn invoice_from_template(env: &Env, invoice_id: u64, creator: &Address, temp
     );
 }
 
+
+/// Issue #503: Emitted when admin updates the per-creator open-invoice cap.
+/// Topics: (INVOICE_LIMIT_UPDATED_V, split, inv_lim)
+/// Data: new_limit
+pub fn invoice_limit_updated(env: &Env, new_limit: u32) {
+    env.events().publish(
+        (
+            INVOICE_LIMIT_UPDATED_V,
+            symbol_short!("split"),
+            symbol_short!("inv_lim"),
+        ),
+        new_limit,
+    );
+}
+
+/// Issue #505: Emitted when a payout recipient account does not exist on-ledger.
+/// Topics: (RECIPIENT_ACCOUNT_MISSING_V, split, rcp_mis, invoice_id)
+/// Data: recipient
+pub fn recipient_account_missing(env: &Env, invoice_id: u64, recipient: &Address) {
+    env.events().publish(
+        (
+            RECIPIENT_ACCOUNT_MISSING_V,
+            symbol_short!("split"),
+            symbol_short!("rcp_mis"),
+            invoice_id,
+        ),
+        recipient.clone(),
+    );
+}

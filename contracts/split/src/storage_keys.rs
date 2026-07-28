@@ -332,3 +332,50 @@ pub fn contributor_allowlist_key(invoice_id: u64) -> (Symbol, u64) { (symbol_sho
 /// Issue #473: Allowed payment tokens list — persistent storage.
 pub fn allowed_tokens_key() -> Symbol { symbol_short!("alw_toks") }
 
+// ---------------------------------------------------------------------------
+// Issue #503: Per-creator open invoice count cap
+// ---------------------------------------------------------------------------
+
+/// Number of currently-open invoices per creator — persistent storage.
+/// Incremented on create_invoice, decremented on cancel/release.
+pub fn open_invoice_count_key(creator: &Address) -> (Symbol, Address) {
+    (symbol_short!("op_inv_cn"), creator.clone())
+}
+
+/// Admin-configurable maximum open invoices per creator — instance storage.
+/// Default value when unset: DEFAULT_MAX_OPEN_INVOICES (100).
+pub fn max_open_invoices_key() -> Symbol { symbol_short!("mx_op_inv") }
+
+// ---------------------------------------------------------------------------
+// Issue #505: Failed payout tracking
+// ---------------------------------------------------------------------------
+
+/// Per-invoice list of recipient addresses whose payout failed (missing account) — persistent storage.
+/// Key: (Symbol, u64) → Vec<Address>
+pub fn failed_payouts_key(invoice_id: u64) -> (Symbol, u64) {
+    (symbol_short!("fail_pay"), invoice_id)
+}
+
+// ---------------------------------------------------------------------------
+// Issue #503: Per-creator open invoice count cap
+// ---------------------------------------------------------------------------
+
+/// Number of currently-open invoices per creator — persistent storage.
+/// Incremented on create_invoice, decremented on cancel/release.
+pub fn open_invoice_count_key(creator: &Address) -> (Symbol, Address) {
+    (symbol_short!("op_inv_cn"), creator.clone())
+}
+
+/// Admin-configurable maximum open invoices per creator — instance storage.
+pub fn max_open_invoices_key() -> Symbol { symbol_short!("mx_op_inv") }
+
+// ---------------------------------------------------------------------------
+// Issue #505: Failed payout tracking
+// ---------------------------------------------------------------------------
+
+/// List of recipient addresses whose payout failed due to missing account — persistent storage.
+/// Key: (Symbol, u64) → Vec<Address>
+pub fn failed_payouts_key(invoice_id: u64) -> (Symbol, u64) {
+    (symbol_short!("fail_pay"), invoice_id)
+}
+
