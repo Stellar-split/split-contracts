@@ -280,3 +280,6 @@ pub fn upgrade_checkpoint_key() -> Symbol { symbol_short!("upg_ckpt") }
 pub fn required_memo_hash_key(invoice_id: u64) -> (Symbol, u64) { (symbol_short!("req_memo"), invoice_id) }
 /// Issue #452: per-invoice tags — persistent storage.
 pub fn invoice_tags_key(invoice_id: u64) -> (Symbol, u64) { (symbol_short!("inv_tags"), invoice_id) }
+/// Issue #473: Allowed payment tokens list — persistent storage.
+pub fn allowed_tokens_key() -> Symbol { symbol_short!("alw_toks") }
+

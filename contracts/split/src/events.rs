@@ -1078,3 +1078,37 @@ pub fn creator_cooldown_set(
         (until_ledger, cooldown_ledgers),
     );
 }
+
+/// Issue #470: Emitted when an overpayment results in a partial refund.
+/// Topics: (split, RefundIssued, invoice_id)
+/// Data: (payer, refund_amount)
+pub fn refund_issued(env: &Env, invoice_id: u64, payer: &Address, refund_amount: i128) {
+    env.events().publish(
+        (
+            symbol_short!("split"),
+            soroban_sdk::Symbol::new(env, "RefundIssued"),
+            invoice_id,
+        ),
+        (payer.clone(), refund_amount),
+    );
+}
+
+/// Issue #471: Emitted when a recipient rotates their payout address.
+/// Topics: (split, RecipientAddressRotated, invoice_id)
+/// Data: (old_address, new_address)
+pub fn recipient_address_rotated(
+    env: &Env,
+    invoice_id: u64,
+    old_address: &Address,
+    new_address: &Address,
+) {
+    env.events().publish(
+        (
+            symbol_short!("split"),
+            soroban_sdk::Symbol::new(env, "RecipientAddressRotated"),
+            invoice_id,
+        ),
+        (old_address.clone(), new_address.clone()),
+    );
+}
+
