@@ -6,6 +6,16 @@
 const SHARD_COUNT: u64 = 8;
 const ARCHIVE_AFTER_LEDGERS: u64 = 100_000;
 
+/// Maximum number of co-creators allowed per invoice (bounded to prevent
+/// unbounded storage growth).
+const MAX_CO_CREATORS: usize = 10;
+
+/// Default dispute timeout in ledgers (30 days at ~5 s/ledger).
+const DEFAULT_DISPUTE_TIMEOUT_LEDGERS: u32 = 518_400;
+
+/// Default payer spend cap window in ledgers (~1 day at ~5 s/ledger).
+const DEFAULT_PAYER_SPEND_WINDOW_LEDGERS: u32 = 17_280;
+
 /// Issue #298: Soroban per-transaction instruction budget limit.
 const INSTRUCTION_BUDGET_LIMIT: u64 = 100_000_000;
 
@@ -234,6 +244,8 @@ fn role_discriminant(role: &Role) -> u32 {
         Role::Operator => 2,
         Role::Auditor  => 3,
     }
+}
+
 /// Contract-level funding progress checkpoints in basis points.
 fn funding_checkpoints_key() -> Symbol {
     symbol_short!("fnd_chk")
@@ -769,6 +781,18 @@ fn require_admin(env: &Env) -> Address {
     admin
 }
 
+/// Check that `caller` is either the invoice creator or a listed co-creator.
+/// Panics with "NotAuthorized" if neither.
+fn require_creator_or_cocreator(invoice: &Invoice, caller: &Address) {
+    if invoice.creator == *caller {
+        return;
+    }
+    if invoice.co_creators.iter().any(|c| c == *caller) {
+        return;
+    }
+    panic!("NotAuthorized: caller is not the creator or a co-creator");
+}
+
 fn creator_volume_cap_key(creator: &Address) -> (Symbol, Address) {
     (symbol_short!("cr_v_cap"), creator.clone())
 }
@@ -830,6 +854,26 @@ fn contributor_allowlist_key(invoice_id: u64) -> (Symbol, u64) {
 
 fn commitment_expiry_key() -> Symbol {
     symbol_short!("com_exp")
+}
+
+/// Payer spending cap (per-window maximum) — instance storage.
+fn payer_spend_cap_key() -> Symbol {
+    symbol_short!("pay_sp_cap")
+}
+
+/// Payer spending window size in ledgers — instance storage.
+fn payer_spend_window_ledgers_key() -> Symbol {
+    symbol_short!("pay_sp_win")
+}
+
+/// Per-payer spending accumulator: (window_start_ledger, total_spent) — temporary storage.
+fn payer_spend_accum_key(payer: &Address) -> (Symbol, Address) {
+    (symbol_short!("pay_sp_acc"), payer.clone())
+}
+
+/// Global dispute timeout ledgers — instance storage.
+fn dispute_timeout_key() -> Symbol {
+    symbol_short!("disp_tout")
 }
 
 // ---------------------------------------------------------------------------
@@ -2506,7 +2550,47 @@ impl SplitContract {
         check_not_paused(&env);
         payer.require_auth();
 
+        // --- Payer spending cap enforcement ---
+        let cap: i128 = env
+            .storage()
+            .instance()
+            .get(&payer_spend_cap_key())
+            .unwrap_or(0i128);
+        if cap > 0 {
+            let window_ledgers: u32 = env
+                .storage()
+                .instance()
+                .get(&payer_spend_window_ledgers_key())
+                .unwrap_or(DEFAULT_PAYER_SPEND_WINDOW_LEDGERS);
+            let current_ledger = env.ledger().sequence();
+            let current_window_start = current_ledger / (window_ledgers as u32) * (window_ledgers as u32);
+            let accum_key = payer_spend_accum_key(&payer);
+            let (stored_window, stored_total): (u32, i128) = env
+                .storage()
+                .temporary()
+                .get(&accum_key)
+                .unwrap_or((0u32, 0i128));
+            let (effective_window, effective_total) = if stored_window == current_window_start {
+                (stored_window, stored_total)
+            } else {
+                // New window — reset accumulator.
+                (current_window_start, 0i128)
+            };
+            let new_total = effective_total + amount;
+            if new_total > cap {
+                events::payer_spend_limit_reached(&env, &payer, new_total, cap);
+                panic!("{}", ContractError::PayerSpendLimitExceeded as u32);
+            }
+            env.storage()
+                .temporary()
+                .set(&accum_key, &(effective_window, new_total));
+        }
+        // --- End payer spending cap ---
+
         let mut invoice = load_invoice(&env, invoice_id);
+        if invoice.status == InvoiceStatus::Disputed {
+            panic!("{}", ContractError::InvoiceDisputed as u32);
+        }
         assert!(invoice.status == InvoiceStatus::Pending, "InvoiceNotPending");
 
         validate_allowed_token(&env, &invoice.funding_token);
@@ -2686,6 +2770,36 @@ impl SplitContract {
         env.storage()
             .persistent()
             .set(&global_payer_window_key(), &window_secs);
+    }
+
+    /// Configure the global per-payer spending cap (ledger-based window).
+    /// Each payer may contribute at most `cap` total across all invoices within
+    /// `window_ledgers` ledgers. The accumulator resets when a new window begins.
+    pub fn set_payer_spend_cap(
+        env: Env,
+        admin: Address,
+        cap: i128,
+        window_ledgers: u32,
+    ) {
+        require_role(&env, &admin, AdminRole::Operator);
+        assert!(cap >= 0, "cap must be non-negative");
+        assert!(window_ledgers > 0 || cap == 0, "window_ledgers must be positive when cap > 0");
+        env.storage()
+            .instance()
+            .set(&payer_spend_cap_key(), &cap);
+        env.storage()
+            .instance()
+            .set(&payer_spend_window_ledgers_key(), &window_ledgers);
+    }
+
+    /// Configure the global dispute timeout in ledgers.
+    /// After this many ledgers from dispute open, anyone may call auto_close_dispute.
+    pub fn set_dispute_timeout(env: Env, admin: Address, timeout_ledgers: u32) {
+        require_role(&env, &admin, AdminRole::Operator);
+        assert!(timeout_ledgers > 0, "timeout must be positive");
+        env.storage()
+            .instance()
+            .set(&dispute_timeout_key(), &timeout_ledgers);
     }
 
     /// Configure the per-invoice sliding-window payment limiter.
@@ -2929,6 +3043,150 @@ impl SplitContract {
         invoice.arbiter = Some(arbiter.clone());
         save_invoice(&env, invoice_id, &invoice);
         append_audit_entry(&env, invoice_id, symbol_short!("set_arb"), &arbiter);
+    }
+
+    /// Add a co-creator to an invoice. Only the primary creator may call this.
+    /// The co-creator list is bounded to [`MAX_CO_CREATORS`].
+    pub fn add_co_creator(env: Env, caller: Address, invoice_id: u64, co_creator: Address) {
+        require_not_paused(&env);
+        caller.require_auth();
+        let mut invoice = load_invoice(&env, invoice_id);
+        assert!(invoice.status == InvoiceStatus::Pending, "invoice is not pending");
+        assert!(invoice.creator == caller, "only the primary creator can add co-creators");
+        assert!(
+            invoice.co_creators.len() < MAX_CO_CREATORS,
+            "{}",
+            ContractError::CoCreatorLimitReached as u32
+        );
+        assert!(!invoice.co_creators.iter().any(|c| c == co_creator), "co-creator already exists");
+        assert!(co_creator != invoice.creator, "creator cannot be a co-creator");
+        invoice.co_creators.push_back(co_creator.clone());
+        save_invoice(&env, invoice_id, &invoice);
+        events::co_creator_added(&env, invoice_id, &caller, &co_creator);
+        append_audit_entry(&env, invoice_id, symbol_short!("add_co_cre"), &caller);
+    }
+
+    /// Remove a co-creator from an invoice. Only the primary creator may call this.
+    pub fn remove_co_creator(env: Env, caller: Address, invoice_id: u64, co_creator: Address) {
+        require_not_paused(&env);
+        caller.require_auth();
+        let mut invoice = load_invoice(&env, invoice_id);
+        assert!(invoice.status == InvoiceStatus::Pending, "invoice is not pending");
+        assert!(invoice.creator == caller, "only the primary creator can remove co-creators");
+        let idx = invoice.co_creators.iter().position(|c| c == co_creator).expect("co-creator not found");
+        invoice.co_creators.remove(idx as u32);
+        save_invoice(&env, invoice_id, &invoice);
+        events::co_creator_removed(&env, invoice_id, &caller, &co_creator);
+        append_audit_entry(&env, invoice_id, symbol_short!("rem_co_cre"), &caller);
+    }
+
+    /// Raise a dispute on an invoice as a contributor (payer).
+    /// Only one active dispute per invoice. Stores dispute record with timeout config.
+    pub fn raise_invoice_dispute(
+        env: Env, invoice_id: u64, disputer: Address, reason_hash: BytesN<32>,
+    ) {
+        require_not_paused(&env);
+        disputer.require_auth();
+        let mut invoice = load_invoice(&env, invoice_id);
+        assert!(invoice.status == InvoiceStatus::Pending, "invoice is not pending");
+        let is_contributor = invoice.payments.iter().any(|p| p.payer == disputer);
+        assert!(is_contributor, "caller is not a contributor");
+        assert!(invoice.status != InvoiceStatus::Disputed, "invoice is already disputed");
+        let current_ledger = env.ledger().sequence();
+        let timeout: u32 = env.storage().instance().get(&dispute_timeout_key())
+            .unwrap_or(DEFAULT_DISPUTE_TIMEOUT_LEDGERS);
+        let record = DisputeRecord {
+            reason_hash: reason_hash.clone(),
+            raised_at: current_ledger,
+            status: DisputeStatus::Active,
+            dispute_timeout_ledgers: timeout,
+            dispute_opened_ledger: current_ledger,
+        };
+        env.storage().persistent().set(&dispute_record_key(invoice_id), &record);
+        invoice.status = InvoiceStatus::Disputed;
+        invoice.disputed = true;
+        save_invoice(&env, invoice_id, &invoice);
+        events::invoice_dispute_raised(&env, invoice_id, &disputer, &reason_hash);
+        events::invoice_state_changed(&env, invoice_id, Some(&InvoiceStatus::Pending),
+            &InvoiceStatus::Disputed, &disputer);
+        append_audit_entry(&env, invoice_id, symbol_short!("inv_dispute"), &disputer);
+    }
+
+    /// Admin-only resolution of a dispute before timeout.
+    /// Release outcome resumes normal payout; Refund outcome returns all funds.
+    pub fn resolve_invoice_dispute(
+        env: Env, invoice_id: u64, admin: Address, outcome: DisputeOutcome,
+    ) {
+        require_not_paused(&env);
+        admin.require_auth();
+        let mut invoice = load_invoice(&env, invoice_id);
+        assert!(invoice.status == InvoiceStatus::Disputed, "invoice is not disputed");
+        let mut record: DisputeRecord = env.storage().persistent()
+            .get(&dispute_record_key(invoice_id)).expect("dispute record not found");
+        assert!(record.status == DisputeStatus::Active, "dispute is not active");
+        match outcome {
+            DisputeOutcome::Release | DisputeOutcome::Approved => {
+                record.status = DisputeStatus::Resolved;
+                env.storage().persistent().set(&dispute_record_key(invoice_id), &record);
+                invoice.status = InvoiceStatus::Pending;
+                invoice.disputed = false;
+                save_invoice(&env, invoice_id, &invoice);
+                events::dispute_resolved(&env, invoice_id, &admin, &outcome);
+                events::invoice_state_changed(&env, invoice_id, Some(&InvoiceStatus::Disputed),
+                    &InvoiceStatus::Pending, &admin);
+            }
+            DisputeOutcome::Refund | DisputeOutcome::Refunded => {
+                record.status = DisputeStatus::Resolved;
+                env.storage().persistent().set(&dispute_record_key(invoice_id), &record);
+                let token_client = token::Client::new(&env, &invoice.tokens.get(0).expect("no token"));
+                let mut totals: Map<Address, i128> = Map::new(&env);
+                for payment in invoice.payments.iter() {
+                    let prev = totals.get(payment.payer.clone()).unwrap_or(0);
+                    totals.set(payment.payer.clone(), prev + payment.amount);
+                }
+                for (payer, amount) in totals.iter() {
+                    if amount > 0 {
+                        token_client.transfer(&env.current_contract_address(), &payer, &amount);
+                        events::payer_refunded(&env, invoice_id, &payer, amount);
+                    }
+                }
+                if invoice.bonus_pool > 0 {
+                    token_client.transfer(&env.current_contract_address(), &invoice.creator, &invoice.bonus_pool);
+                }
+                invoice.status = InvoiceStatus::Refunded;
+                invoice.disputed = false;
+                invoice.completion_time = Some(env.ledger().timestamp());
+                save_invoice(&env, invoice_id, &invoice);
+                events::dispute_resolved(&env, invoice_id, &admin, &outcome);
+                events::invoice_refunded(&env, invoice_id);
+                events::invoice_state_changed(&env, invoice_id, Some(&InvoiceStatus::Disputed),
+                    &InvoiceStatus::Refunded, &admin);
+            }
+        }
+        append_audit_entry(&env, invoice_id, symbol_short!("disp_res"), &admin);
+    }
+
+    /// Permissionless close of a dispute after the timeout has elapsed.
+    /// Reverts if the timeout has not yet passed. Funds become releasable.
+    pub fn auto_close_dispute(env: Env, invoice_id: u64) {
+        require_not_paused(&env);
+        let mut invoice = load_invoice(&env, invoice_id);
+        assert!(invoice.status == InvoiceStatus::Disputed, "invoice is not disputed");
+        let mut record: DisputeRecord = env.storage().persistent()
+            .get(&dispute_record_key(invoice_id)).expect("dispute record not found");
+        assert!(record.status == DisputeStatus::Active, "dispute is not active");
+        let current_ledger = env.ledger().sequence();
+        let eligible_at = record.dispute_opened_ledger.saturating_add(record.dispute_timeout_ledgers);
+        assert!(current_ledger >= eligible_at, "dispute timeout has not elapsed");
+        record.status = DisputeStatus::Expired;
+        env.storage().persistent().set(&dispute_record_key(invoice_id), &record);
+        invoice.status = InvoiceStatus::Pending;
+        invoice.disputed = false;
+        save_invoice(&env, invoice_id, &invoice);
+        events::dispute_expired(&env, invoice_id);
+        events::invoice_state_changed(&env, invoice_id, Some(&InvoiceStatus::Disputed),
+            &InvoiceStatus::Pending, &env.current_contract_address());
+        append_audit_entry(&env, invoice_id, symbol_short!("disp_close"), &env.current_contract_address());
     }
 
     /// Raise a dispute on an invoice. Only the configured arbiter may call this.
@@ -6967,6 +7225,10 @@ impl SplitContract {
     }
 
     fn _release(env: &Env, invoice_id: u64, invoice: &mut Invoice, actor: &Address) {
+        // Block release when invoice is under active dispute.
+        if invoice.status == InvoiceStatus::Disputed {
+            panic!("{}", ContractError::InvoiceDisputed as u32);
+        }
         if invoice.tranches.is_empty() {
             Self::_release_full(env, invoice_id, invoice, actor);
         } else {
@@ -9995,7 +10257,8 @@ impl SplitContract {
             invoice.creator.require_auth();
             cos.require_auth();
         } else {
-            assert!(invoice.creator == caller, "only creator can cancel");
+            // Allow creator OR co-creator to cancel.
+            require_creator_or_cocreator(&invoice, &caller);
         }
 
         // Issue: check cancellation rate limit before allowing cancel.
@@ -10201,12 +10464,13 @@ impl SplitContract {
             invoice.creator.require_auth();
             cos.require_auth();
         } else {
-            // Accept caller = creator OR assigned delegate (issue #43).
+            // Accept caller = creator OR co-creator OR assigned delegate (issue #43).
             let delegate: Option<Address> =
                 env.storage().persistent().get(&delegate_key(invoice_id));
-            let is_creator = invoice.creator == caller;
+            let is_creator_or_co = invoice.creator == caller
+                || invoice.co_creators.iter().any(|c| c == caller);
             let is_delegate = delegate.map(|d| d == caller).unwrap_or(false);
-            assert!(is_creator || is_delegate, "not authorized");
+            assert!(is_creator_or_co || is_delegate, "not authorized");
         }
 
         invoice.deadline = new_deadline;

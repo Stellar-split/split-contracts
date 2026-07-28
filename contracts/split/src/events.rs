@@ -583,6 +583,7 @@ pub fn invoice_state_changed(
         Some(InvoiceStatus::Refunded) => symbol_short!("refunded"),
         Some(InvoiceStatus::Expired) => symbol_short!("expired"),
         Some(InvoiceStatus::Cancelled) => symbol_short!("cancld"),
+        Some(InvoiceStatus::Disputed) => symbol_short!("disputed"),
     };
     let to_sym = match to_status {
         InvoiceStatus::Pending => symbol_short!("pending"),
@@ -590,6 +591,7 @@ pub fn invoice_state_changed(
         InvoiceStatus::Refunded => symbol_short!("refunded"),
         InvoiceStatus::Expired => symbol_short!("expired"),
         InvoiceStatus::Cancelled => symbol_short!("cancld"),
+        InvoiceStatus::Disputed => symbol_short!("disputed"),
     };
     env.events().publish(
         (symbol_short!("split"), symbol_short!("st_chg"), invoice_id),
@@ -826,6 +828,8 @@ pub fn dispute_resolved(env: &Env, invoice_id: u64, admin: &Address, outcome: &D
     let outcome_sym = match outcome {
         DisputeOutcome::Approved => symbol_short!("approved"),
         DisputeOutcome::Refunded => symbol_short!("refunded"),
+        DisputeOutcome::Release => symbol_short!("release"),
+        DisputeOutcome::Refund => symbol_short!("refund"),
     };
     env.events().publish(
         (
@@ -1225,10 +1229,10 @@ pub fn recipient_address_rotated(
     env.events().publish(
         (
             symbol_short!("split"),
-            symbol_short!("adm_appr"),
-            action_hash.clone(),
+            soroban_sdk::Symbol::new(env, "RecipientAddressRotated"),
+            invoice_id,
         ),
-        (approver.clone(), approval_count, env.ledger().sequence()),
+        (old_address.clone(), new_address.clone()),
     );
 }
 
@@ -1287,10 +1291,70 @@ pub fn invoice_from_template(env: &Env, invoice_id: u64, creator: &Address, temp
         (creator.clone(), template_id, env.ledger().sequence()),
     );
 }
-            soroban_sdk::Symbol::new(env, "RecipientAddressRotated"),
+
+/// Emitted when a co-creator is added to an invoice.
+/// Topics: (split, co_creatr_add, invoice_id)
+/// Data: (creator, co_creator, ledger)
+pub fn co_creator_added(env: &Env, invoice_id: u64, creator: &Address, co_creator: &Address) {
+    env.events().publish(
+        (
+            symbol_short!("split"),
+            symbol_short!("co_c_add"),
             invoice_id,
         ),
-        (old_address.clone(), new_address.clone()),
+        (creator.clone(), co_creator.clone(), env.ledger().sequence()),
+    );
+}
+
+/// Emitted when a co-creator is removed from an invoice.
+/// Topics: (split, co_creatr_rem, invoice_id)
+/// Data: (creator, co_creator, ledger)
+pub fn co_creator_removed(env: &Env, invoice_id: u64, creator: &Address, co_creator: &Address) {
+    env.events().publish(
+        (
+            symbol_short!("split"),
+            symbol_short!("co_c_rem"),
+            invoice_id,
+        ),
+        (creator.clone(), co_creator.clone(), env.ledger().sequence()),
+    );
+}
+
+/// Emitted when a payer hits the global spending cap for the current ledger window.
+/// Topics: (split, pay_spend_lim, payer)
+/// Data: (window_total, cap, ledger)
+pub fn payer_spend_limit_reached(
+    env: &Env,
+    payer: &Address,
+    window_total: i128,
+    cap: i128,
+) {
+    env.events().publish(
+        (
+            symbol_short!("split"),
+            symbol_short!("pay_sp_lim"),
+            payer.clone(),
+        ),
+        (window_total, cap, env.ledger().sequence()),
+    );
+}
+
+/// Issue #XXX: Emitted when a contributor raises an invoice dispute.
+/// Topics: (split, inv_disp_rsd, invoice_id)
+/// Data: (disputer, reason_hash, ledger)
+pub fn invoice_dispute_raised(
+    env: &Env,
+    invoice_id: u64,
+    disputer: &Address,
+    reason_hash: &BytesN<32>,
+) {
+    env.events().publish(
+        (
+            symbol_short!("split"),
+            symbol_short!("inv_d_rsd"),
+            invoice_id,
+        ),
+        (disputer.clone(), reason_hash.clone(), env.ledger().sequence()),
     );
 }
 
