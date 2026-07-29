@@ -5,3 +5,22 @@ Cargo.lock
 .env.local
 .DS_Store
 Thumbs.db
+
+# Test snapshots
+**/__snapshots__/
+*.snap
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Stellar CLI artifacts
+.stellar/
+identity/
