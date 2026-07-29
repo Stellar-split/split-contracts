@@ -60,10 +60,11 @@ mod storage_snapshot;
 mod storage_keys;
 
 use error::ContractError;
+use soroban_sdk::crypto::bls12_381::{Fr, G1Affine};
 use soroban_sdk::xdr::ToXdr;
 use soroban_sdk::{
     contract, contractimpl, symbol_short, token, Address, Bytes, BytesN, Env, IntoVal, Map, String,
-    Symbol, TryFromVal, Val, Vec,
+    Symbol, TryFromVal, Val, Vec, U256,
 };
 
 use types::{
@@ -863,6 +864,62 @@ fn protocol_fee_key() -> Symbol {
 
 fn commitment_key(invoice_id: u64, payer: &Address) -> (Symbol, u64, Address) {
     (symbol_short!("commit"), invoice_id, payer.clone())
+}
+
+// ---------------------------------------------------------------------------
+// Confidential payment settlement — Pedersen commitments over BLS12-381 G1.
+//
+// Distinct from the pre-existing `pay_confidential` / `reveal_confidential_total`
+// placeholder (issue #295), which only checks that a proof blob is non-zero.
+// This scheme performs a real elliptic-curve commitment opening: a payer commits
+// to `C = value*G + blinding*H` during `pay`, then proves the opening at
+// `reveal_confidential_payment` time by supplying `(value, blinding)`, which the
+// contract recombines and checks against the stored commitment.
+// ---------------------------------------------------------------------------
+
+/// Instance storage: fixed Pedersen base generator `G` (BLS12-381 G1), derived
+/// once at `initialize` via hash-to-curve.
+fn pedersen_g_key() -> Symbol {
+    symbol_short!("pc_gen_g")
+}
+
+/// Instance storage: fixed Pedersen blinding generator `H` (BLS12-381 G1),
+/// independent of `G` — nobody knows the discrete log of one relative to the
+/// other, which is what makes the commitment hiding.
+fn pedersen_h_key() -> Symbol {
+    symbol_short!("pc_gen_h")
+}
+
+/// Persistent storage: pending Pedersen commitment digest for `(invoice_id, payer)`,
+/// awaiting `reveal_confidential_payment`.
+fn pedersen_commitment_key(invoice_id: u64, payer: &Address) -> (Symbol, u64, Address) {
+    (symbol_short!("pc_commit"), invoice_id, payer.clone())
+}
+
+/// Recompute the commitment digest for `(value, blinding)` against the
+/// contract's fixed generators, so it can be checked against a commitment
+/// digest previously supplied off-chain to `pay`.
+///
+/// The commitment point `C = value*G + blinding*H` is itself never stored:
+/// only a SHA-256 digest of its serialized form is kept on-chain, which is
+/// what fits `pay`'s `BytesN<32>` commitment slot and keeps storage compact.
+fn pedersen_commitment_digest(env: &Env, value: i128, blinding: &BytesN<32>) -> BytesN<32> {
+    guard_nonzero_amount(value).expect("ZeroAmountNotAllowed");
+    let g: G1Affine = env
+        .storage()
+        .instance()
+        .get(&pedersen_g_key())
+        .expect("not initialized");
+    let h: G1Affine = env
+        .storage()
+        .instance()
+        .get(&pedersen_h_key())
+        .expect("not initialized");
+    let value_scalar = Fr::from_u256(U256::from_u128(env, value as u128));
+    let blinding_scalar = Fr::from_bytes(blinding.clone());
+    let commitment_point: G1Affine = (g * value_scalar) + (h * blinding_scalar);
+    let commitment_bytes: Bytes = commitment_point.to_bytes().into();
+    env.crypto().sha256(&commitment_bytes).into()
 }
 
 fn surplus_key(invoice_id: u64) -> (Symbol, u64) {
@@ -2665,6 +2722,18 @@ impl SplitContract {
         env.storage()
             .instance()
             .set(&storage_quota_key(), &DEFAULT_INVOICE_STORAGE_QUOTA);
+        // Confidential payment settlement: derive two independent,
+        // nothing-up-my-sleeve BLS12-381 G1 generators via hash-to-curve so
+        // neither party can know the discrete log of one relative to the
+        // other, then pin them in instance storage so every commit/reveal
+        // uses the exact same basis.
+        let pedersen_dst = Bytes::from_slice(&env, b"StellarSplit-Pedersen-BLS12381G1-v1");
+        let bls = env.crypto().bls12_381();
+        let g = bls.hash_to_g1(&Bytes::from_slice(&env, b"pedersen-generator-G"), &pedersen_dst);
+        let h = bls.hash_to_g1(&Bytes::from_slice(&env, b"pedersen-generator-H"), &pedersen_dst);
+        env.storage().instance().set(&pedersen_g_key(), &g);
+        env.storage().instance().set(&pedersen_h_key(), &h);
+
         // Issue #477: set the initialisation flag atomically at the end so the
         // contract is marked fully initialised only after all state is written.
         env.storage().instance().set(&initialised_key(), &true);
@@ -6321,6 +6390,13 @@ impl SplitContract {
             .remove(&channel_key(invoice_id, &payer));
     }
 
+    /// # Confidential payments
+    /// When `commitment` is `Some`, the payment amount is hidden: `amount` is
+    /// ignored and no funds move yet. The contract only stores `commitment` —
+    /// a digest of the payer's Pedersen commitment `C = value*G + blinding*H` —
+    /// keyed by `(invoice_id, payer)`. The payer later calls
+    /// [`Self::reveal_confidential_payment`] with the opening `(value, blinding)`
+    /// to settle: only then does the real amount move and become visible on-chain.
     pub fn pay(
         env: Env,
         payer: Address,
@@ -6329,10 +6405,17 @@ impl SplitContract {
         nonce: u64,
         _auto_convert: bool,
         donate_on_failure: bool,
+        commitment: Option<BytesN<32>>,
     ) {
         require_fn_not_paused(&env, &symbol_short!("pay"));
         require_not_frozen(&env);
         payer.require_auth();
+
+        if let Some(commitment) = commitment {
+            Self::_commit_confidential_payment(&env, &payer, invoice_id, commitment);
+            return;
+        }
+
         Self::enforce_invoice_rate_limit(&env, invoice_id, &payer);
         Self::_pay(
             &env,
@@ -6345,6 +6428,149 @@ impl SplitContract {
             None,
             donate_on_failure,
         );
+    }
+
+    /// Store a Pedersen commitment in place of a raw payment amount (see
+    /// `pay`'s confidential-payments doc above). Runs only the invoice-state
+    /// checks that don't depend on knowing the amount; amount-dependent
+    /// features (KYC, oracle pricing, rate/velocity limits, instalment
+    /// schedules) are intentionally out of scope here since none of them can
+    /// evaluate against a hidden value — they still apply normally to
+    /// non-confidential `pay` calls.
+    fn _commit_confidential_payment(
+        env: &Env,
+        payer: &Address,
+        invoice_id: u64,
+        commitment: BytesN<32>,
+    ) {
+        let invoice = load_invoice(env, invoice_id);
+        assert!(
+            invoice.status == InvoiceStatus::Pending,
+            "invoice is not pending"
+        );
+        assert!(!invoice.disputed, "invoice is disputed");
+        assert!(!invoice.frozen, "invoice is frozen");
+        assert!(!invoice.admin_frozen, "invoice frozen by admin");
+        assert!(
+            env.ledger().timestamp() <= invoice.deadline,
+            "invoice deadline has passed"
+        );
+        if let Some(ref whitelist) = invoice.allowed_payers {
+            assert!(whitelist.contains(payer), "payer not allowed");
+        }
+        if let Some(ref allowlist) = invoice.contributor_allowlist {
+            assert!(allowlist.contains(payer), "ContributorNotAllowed");
+        }
+
+        let key = pedersen_commitment_key(invoice_id, payer);
+        assert!(
+            !env.storage().persistent().has(&key),
+            "ConfidentialCommitmentExists"
+        );
+        env.storage().persistent().set(&key, &commitment);
+    }
+
+    /// Settle a confidential payment by opening the Pedersen commitment stored
+    /// by a prior `pay(..., commitment: Some(_))` call: recomputes
+    /// `value*G + blinding*H` and checks its digest against the stored one. On
+    /// success the real `value` is pulled from the payer and credited to the
+    /// invoice — only now does the amount become visible on-chain, exactly as
+    /// the token transfer and `funded` total reveal it.
+    ///
+    /// Named `reveal_confidential_payment` (rather than `reveal_payment`) to
+    /// avoid colliding with the existing hash-based commit/reveal pair
+    /// (`commit_payment` / `reveal_payment`), an unrelated, previously shipped
+    /// feature this PR does not touch.
+    ///
+    /// # Errors (panics)
+    /// * `"NoConfidentialCommitment"` — no pending commitment for this payer/invoice
+    ///   (never committed, or already revealed).
+    /// * `"ConfidentialCommitmentMismatch"` — `(value, blinding)` does not open
+    ///   the stored commitment.
+    pub fn reveal_confidential_payment(
+        env: Env,
+        invoice_id: u64,
+        payer: Address,
+        value: i128,
+        blinding: BytesN<32>,
+    ) {
+        require_fn_not_paused(&env, &symbol_short!("pay"));
+        require_not_frozen(&env);
+        payer.require_auth();
+        guard_nonzero_amount(value).expect("ZeroAmountNotAllowed");
+
+        let key = pedersen_commitment_key(invoice_id, &payer);
+        let stored: BytesN<32> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .expect("NoConfidentialCommitment");
+
+        let digest = pedersen_commitment_digest(&env, value, &blinding);
+        assert!(digest == stored, "ConfidentialCommitmentMismatch");
+
+        // Remove before moving funds so a reentrant call can't reveal twice.
+        env.storage().persistent().remove(&key);
+
+        let mut invoice = load_invoice(&env, invoice_id);
+        assert!(
+            invoice.status == InvoiceStatus::Pending,
+            "invoice is not pending"
+        );
+        assert!(!invoice.disputed, "invoice is disputed");
+        assert!(!invoice.frozen, "invoice is frozen");
+        assert!(!invoice.admin_frozen, "invoice frozen by admin");
+        assert!(
+            env.ledger().timestamp() <= invoice.deadline,
+            "invoice deadline has passed"
+        );
+
+        let token_client = token::Client::new(&env, &funding_token_for(&invoice));
+        token_client.transfer(&payer, &env.current_contract_address(), &value);
+
+        invoice.funded = invoice.funded.checked_add(value).expect("funded overflow");
+
+        let cumulative_key = cumulative_contributed_key(invoice_id);
+        let cumulative: i128 = env.storage().persistent().get(&cumulative_key).unwrap_or(0);
+        env.storage()
+            .persistent()
+            .set(&cumulative_key, &(cumulative + value));
+
+        let contrib_key = contribution_key(invoice_id, &payer);
+        let prev_contrib: i128 = env.storage().persistent().get(&contrib_key).unwrap_or(0);
+        env.storage()
+            .persistent()
+            .set(&contrib_key, &(prev_contrib + value));
+
+        events::confidential_payment_revealed(&env, invoice_id, &payer);
+
+        let total: i128 = invoice.amounts.iter().sum();
+        check_and_emit_funding_checkpoints(&env, invoice_id, invoice.funded, total);
+
+        if invoice.funded >= total {
+            let in_group = env
+                .storage()
+                .persistent()
+                .has(&invoice_group_key(invoice_id));
+            let guarded = invoice.prerequisite_id.is_some()
+                || !invoice.tranches.is_empty()
+                || !invoice.release_stages.is_empty()
+                || in_group
+                || !invoice.co_signers.is_empty()
+                || env.storage().persistent().has(&cosigners_key(invoice_id))
+                || (invoice.oracle_address.is_some() && !invoice.condition_met)
+                || (invoice.min_funding_bps > 0
+                    && invoice.funded
+                        < (invoice.amounts.iter().sum::<i128>() * invoice.min_funding_bps as i128
+                            / 10_000));
+            if guarded {
+                save_invoice(&env, invoice_id, &invoice);
+            } else {
+                Self::_release(&env, invoice_id, &mut invoice, &payer);
+            }
+        } else {
+            save_invoice(&env, invoice_id, &invoice);
+        }
     }
 
     pub fn commit_payment(env: Env, payer: Address, invoice_id: u64, commitment_hash: BytesN<32>) {
