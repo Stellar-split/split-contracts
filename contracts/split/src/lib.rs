@@ -110,6 +110,13 @@ fn admin_key() -> Symbol {
 fn admins_key() -> Symbol {
     symbol_short!("admins")
 }
+
+/// Issue #477: One-shot initialiser guard — instance storage.
+/// Set to `true` at the end of `initialize()`; checked at the top to prevent
+/// re-initialisation (front-run protection).
+fn initialised_key() -> Symbol {
+    symbol_short!("init_flg")
+}
 fn paused_key() -> Symbol {
     symbol_short!("paused")
 }
@@ -2473,10 +2480,11 @@ impl SplitContract {
         rate_limit: u32,
         rate_window: u64,
     ) {
-        assert!(
-            !env.storage().instance().has(&admin_key()),
-            "already initialized"
-        );
+        // Issue #477: one-shot initialiser guard using a dedicated key so the
+        // guard cannot be bypassed by front-running the admin write.
+        if env.storage().instance().get::<_, bool>(&initialised_key()).unwrap_or(false) {
+            panic!("AlreadyInitialised");
+        }
         assert!(creation_fee >= 0, "creation_fee must be non-negative");
         assert!(
             platform_fee_bps <= 10_000,
@@ -2519,6 +2527,9 @@ impl SplitContract {
         env.storage()
             .instance()
             .set(&storage_quota_key(), &DEFAULT_INVOICE_STORAGE_QUOTA);
+        // Issue #477: set the initialisation flag atomically at the end so the
+        // contract is marked fully initialised only after all state is written.
+        env.storage().instance().set(&initialised_key(), &true);
     }
 
     /// Add a new admin with a given role. Requires SuperAdmin auth.

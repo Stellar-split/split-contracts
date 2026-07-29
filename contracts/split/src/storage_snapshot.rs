@@ -125,6 +125,8 @@ fn storage_key_snapshot() {
         "upgrade_proposal_key",
         hex_xdr(&env, upgrade_proposal_key()),
     ));
+    // Issue #477: one-shot initialiser guard — instance storage
+    keys.push(("initialised_key", hex_xdr(&env, initialised_key())));
 
     // -----------------------------------------------------------------------
     // Persistent-tier keys (per-entity)
