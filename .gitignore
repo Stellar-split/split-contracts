@@ -5,3 +5,14 @@ Cargo.lock
 .env.local
 .DS_Store
 Thumbs.db
+.vscode/
+.idea/
+*.log
+*.tmp
+*.bak
+test_snapshots/
+snapshots/
+**/snapshots/
+*.swp
+*.swo
+*~
