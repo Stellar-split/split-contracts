@@ -1521,3 +1521,13 @@ pub struct ContributionResult {
 #[derive(Clone, Debug, PartialEq)]
 pub struct RecipientAddress(pub u64, pub Address);
 
+/// Per-recipient share tracking with optional lock for disputed recipients.
+/// When `locked` is true, the recipient's share is skipped during release
+/// and accumulated under `UnreleasedFunds(invoice_id)` until unlocked.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct RecipientShare {
+    pub address: Address,
+    pub locked: bool,
+}
+

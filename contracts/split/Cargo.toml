@@ -15,3 +15,10 @@ proptest = "1"
 
 [features]
 testutils = ["soroban-sdk/testutils"]
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = "symbols"

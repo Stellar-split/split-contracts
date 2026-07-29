@@ -91,7 +91,7 @@ use types::{
     ProtocolFeeConfig, QueuedAction, Recipient, RebateTier, RepScore, ResolveAction, ResolveRule,
     Role, SimulateReleaseResult, SplitRule, SubscriptionParams, TimelockAction, Tranche,
     TreasuryRecord, UpgradeProposal,
-    ProtocolFeeConfig, QueuedAction, Recipient, RecipientAddress, RebateTier, RepScore, ResolveAction, ResolveRule,
+    ProtocolFeeConfig, QueuedAction, Recipient, RecipientAddress, RecipientShare, RebateTier, RepScore, ResolveAction, ResolveRule,
     SimulateReleaseResult, SplitRule, SubscriptionParams, TimelockAction, Tranche, TreasuryRecord,
     UpgradeProposal, BASIS_POINTS_TOTAL,
 };
@@ -1269,6 +1269,25 @@ fn last_failed_ledger_key(invoice_id: u64) -> (Symbol, u64) {
 /// Addresses in this list are exempt from platform fee deduction.
 fn trusted_callers_key() -> Symbol {
     symbol_short!("trstd_cal")
+}
+
+/// Unreleased funds accumulator for an invoice — persistent storage.
+/// When a recipient share is locked, funds that would have gone to that
+/// recipient are accumulated here until released via `release_locked_funds`.
+fn unreleased_funds_key(invoice_id: u64) -> (Symbol, u64) {
+    (symbol_short!("unrl_fnd"), invoice_id)
+}
+
+/// Per-invoice per-recipient share lock flag — persistent storage.
+/// Key: (invoice_id, recipient). Value: true if locked, absent = unlocked.
+fn recipient_lock_key(invoice_id: u64, recipient: &Address) -> (Symbol, u64, Address) {
+    (symbol_short!("rcp_lock"), invoice_id, recipient.clone())
+}
+
+/// Per-invoice per-contributor contribution record — persistent storage.
+/// Key: (invoice_id, payer). Value: i128 amount contributed.
+fn contribution_key(invoice_id: u64, payer: &Address) -> (Symbol, u64, Address) {
+    (symbol_short!("contrb"), invoice_id, payer.clone())
 }
 
 // ---------------------------------------------------------------------------
@@ -2631,6 +2650,47 @@ impl SplitContract {
             amount_applied,
             refund_amount,
         }
+    }
+
+    /// Withdraw a contribution before the invoice is fully funded.
+    /// Only permitted while the invoice is in Pending status (Open/PartiallyFunded).
+    /// The caller receives exactly the amount they contributed, the contribution
+    /// storage entry is deleted, and `invoice.funded` is decremented.
+    pub fn withdraw_contribution(env: Env, payer: Address, invoice_id: u64) -> Result<(), ContractError> {
+        payer.require_auth();
+
+        let mut invoice = load_invoice(&env, invoice_id);
+
+        // Only allow withdrawal while invoice is in Pending (Open) status.
+        if invoice.status != InvoiceStatus::Pending {
+            return Err(ContractError::InvalidStatus);
+        }
+
+        let contrib_key = contribution_key(invoice_id, &payer);
+        let amount: i128 = env
+            .storage()
+            .persistent()
+            .get(&contrib_key)
+            .unwrap_or(0i128);
+
+        if amount <= 0 {
+            return Err(ContractError::ZeroAmountNotAllowed);
+        }
+
+        // Delete the contribution record.
+        env.storage().persistent().remove(&contrib_key);
+
+        // Decrease funded amount.
+        invoice.funded = invoice.funded.saturating_sub(amount);
+        save_invoice(&env, invoice_id, &invoice);
+
+        // Transfer the contribution back to the payer.
+        let funding_token = funding_token_for(&invoice);
+        let token_client = token::Client::new(&env, &funding_token);
+        token_client.transfer(&env.current_contract_address(), &payer, &amount);
+
+        events::contribution_withdrawn(&env, invoice_id, &payer, amount);
+        Ok(())
     }
 
     /// Issue #471: Rotate a registered recipient's payout address before invoice finalisation.
@@ -6463,6 +6523,13 @@ impl SplitContract {
             .persistent()
             .set(&cumulative_key, &(cumulative + credited_amount));
 
+        // Record per-payer contribution for withdrawal support.
+        let contrib_key = contribution_key(invoice_id, payer);
+        let prev_contrib: i128 = env.storage().persistent().get(&contrib_key).unwrap_or(0);
+        env.storage()
+            .persistent()
+            .set(&contrib_key, &(prev_contrib + credited_amount));
+
         // Increment per-address reputation counter (issue #24, #349).
         let is_late =
             invoice.penalty_deadline > 0 && env.ledger().timestamp() > invoice.penalty_deadline;
@@ -7222,6 +7289,91 @@ impl SplitContract {
 
         let caller = env.current_contract_address();
         Self::_release(&env, invoice_id, &mut invoice, &caller);
+    }
+
+    /// Lock a recipient's share for an invoice (admin-only).
+    /// Locked recipients are skipped during release and their share is accumulated
+    /// in `UnreleasedFunds`. Returns `RecipientNotFound` if the recipient is not in
+    /// the invoice's recipient list.
+    pub fn lock_recipient_share(env: Env, invoice_id: u64, recipient: Address) -> Result<(), ContractError> {
+        let _admin = require_admin(&env);
+        let invoice = load_invoice(&env, invoice_id);
+
+        // Verify the recipient exists in this invoice.
+        let mut found = false;
+        for r in invoice.recipients.iter() {
+            if r == recipient {
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            return Err(ContractError::RecipientNotFound);
+        }
+
+        env.storage()
+            .persistent()
+            .set(&recipient_lock_key(invoice_id, &recipient), &true);
+
+        events::recipient_share_locked(&env, invoice_id, &recipient, &_admin);
+        Ok(())
+    }
+
+    /// Unlock a recipient's share for an invoice (admin-only).
+    /// After unlocking, the accumulated unreleased funds can be released via
+    /// `release_locked_funds`.
+    pub fn unlock_recipient_share(env: Env, invoice_id: u64, recipient: Address) -> Result<(), ContractError> {
+        let _admin = require_admin(&env);
+        let invoice = load_invoice(&env, invoice_id);
+
+        let mut found = false;
+        for r in invoice.recipients.iter() {
+            if r == recipient {
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            return Err(ContractError::RecipientNotFound);
+        }
+
+        env.storage()
+            .persistent()
+            .remove(&recipient_lock_key(invoice_id, &recipient));
+
+        events::recipient_share_unlocked(&env, invoice_id, &recipient, &_admin);
+        Ok(())
+    }
+
+    /// Release accumulated unreleased funds for an invoice after locked shares are
+    /// unlocked. Transfers the total accumulated amount to the invoice's token
+    /// contract for proportional distribution among now-unlocked recipients.
+    pub fn release_locked_funds(env: Env, invoice_id: u64) -> Result<(), ContractError> {
+        let _admin = require_admin(&env);
+        let mut invoice = load_invoice(&env, invoice_id);
+
+        let accumulated: i128 = env
+            .storage()
+            .persistent()
+            .get(&unreleased_funds_key(invoice_id))
+            .unwrap_or(0i128);
+
+        if accumulated <= 0 {
+            return Ok(());
+        }
+
+        // Clear the accumulator before distribution.
+        env.storage()
+            .persistent()
+            .set(&unreleased_funds_key(invoice_id), &0i128);
+
+        // Add the accumulated amount to funded so it gets distributed in
+        // the next release call. The caller must follow up with `release`
+        // to actually push funds to recipients.
+        invoice.funded = invoice.funded.saturating_add(accumulated);
+        save_invoice(&env, invoice_id, &invoice);
+
+        Ok(())
     }
 
     fn _release(env: &Env, invoice_id: u64, invoice: &mut Invoice, actor: &Address) {
@@ -8846,6 +8998,8 @@ impl SplitContract {
             .get(&platform_fee_waiver_list_key())
             .unwrap_or_else(|| Vec::new(env));
 
+        let mut unreleased_locked: i128 = 0;
+
         for i in 0..n {
             let recipient = invoice.recipients.get(i).unwrap();
             let amount = invoice.amounts.get(i).unwrap();
@@ -8894,6 +9048,20 @@ impl SplitContract {
             } else {
                 proportional
             };
+
+            // Skip locked recipients: accumulate their computed proportional
+            // share into UnreleasedFunds instead of transferring it.
+            let is_locked: bool = env
+                .storage()
+                .persistent()
+                .get(&recipient_lock_key(invoice_id, &recipient))
+                .unwrap_or(false);
+            if is_locked {
+                unreleased_locked = unreleased_locked.saturating_add(capped_proportional);
+                payouts.push_back(0i128);
+                continue;
+            }
+
             distributed += capped_proportional;
 
             // Issue #482: use checked arithmetic to prevent overflow.
@@ -8913,6 +9081,18 @@ impl SplitContract {
             total_fee += fee;
 
             payouts.push_back(capped_proportional);
+        }
+
+        // Accumulate locked recipients' share into UnreleasedFunds.
+        if unreleased_locked > 0 {
+            let stored: i128 = env
+                .storage()
+                .persistent()
+                .get(&unreleased_funds_key(invoice_id))
+                .unwrap_or(0);
+            env.storage()
+                .persistent()
+                .set(&unreleased_funds_key(invoice_id), &stored.saturating_add(unreleased_locked));
         }
 
         if surplus_total > 0 {
@@ -8993,6 +9173,16 @@ impl SplitContract {
             for i in 0..n {
                 let recipient = invoice.recipients.get(i).unwrap();
                 let proportional = payouts.get(i).unwrap();
+
+                // Skip locked recipients — their share is in UnreleasedFunds.
+                let is_locked: bool = env
+                    .storage()
+                    .persistent()
+                    .get(&recipient_lock_key(invoice_id, &recipient))
+                    .unwrap_or(false);
+                if is_locked {
+                    continue;
+                }
 
                 // Issue #330: skip recipients already paid via release_to_recipient.
                 if proportional == 0
