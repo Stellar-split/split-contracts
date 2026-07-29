@@ -1420,3 +1420,32 @@ pub fn cosigner_threshold_reached(env: &Env, invoice_id: u64) {
     );
 }
 
+
+/// Issue #503: Emitted when admin updates the per-creator open-invoice cap.
+/// Topics: (INVOICE_LIMIT_UPDATED_V, split, inv_lim)
+/// Data: new_limit
+pub fn invoice_limit_updated(env: &Env, new_limit: u32) {
+    env.events().publish(
+        (
+            INVOICE_LIMIT_UPDATED_V,
+            symbol_short!("split"),
+            symbol_short!("inv_lim"),
+        ),
+        new_limit,
+    );
+}
+
+/// Issue #505: Emitted when a payout recipient account does not exist on-ledger.
+/// Topics: (RECIPIENT_ACCOUNT_MISSING_V, split, rcp_mis, invoice_id)
+/// Data: recipient
+pub fn recipient_account_missing(env: &Env, invoice_id: u64, recipient: &Address) {
+    env.events().publish(
+        (
+            RECIPIENT_ACCOUNT_MISSING_V,
+            symbol_short!("split"),
+            symbol_short!("rcp_mis"),
+            invoice_id,
+        ),
+        recipient.clone(),
+    );
+}
