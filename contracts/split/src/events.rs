@@ -1,9 +1,26 @@
 use crate::types::{DisputeOutcome, InvoiceStatus, RepScore, TimelockAction};
 use soroban_sdk::{contracttype, symbol_short, Address, BytesN, Env, String, Vec};
 
+// ---------------------------------------------------------------------------
+// Event sequence helper (per-invoice, temporary-storage counter)
+// ---------------------------------------------------------------------------
+
+/// Fetch and increment the per-invoice event sequence counter.
+/// Lives in `storage::temporary` so it resets between transactions.
+fn next_seq(env: &Env, invoice_id: u64) -> u64 {
+    let key = (symbol_short!("ev_seq"), invoice_id);
+    let seq: u64 = env.storage().temporary().get(&key).unwrap_or(0) + 1;
+    env.storage().temporary().set(&key, &seq);
+    seq
+}
+
+// ---------------------------------------------------------------------------
+// Events
+// ---------------------------------------------------------------------------
+
 /// Emitted when a new invoice is created.
 /// Topics: (split, created, invoice_id)
-/// Data: (creator, total)
+/// Data: (creator, total, event_seq)
 pub fn invoice_created(
     env: &Env,
     invoice_id: u64,
@@ -11,72 +28,79 @@ pub fn invoice_created(
     total: i128,
     cross_chain_ref: &Option<String>,
 ) {
+    let event_seq = next_seq(env, invoice_id);
     env.events().publish(
         (symbol_short!("split"), symbol_short!("created"), invoice_id),
-        (creator.clone(), total, cross_chain_ref.clone()),
+        (creator.clone(), total, cross_chain_ref.clone(), event_seq),
     );
 }
 
 /// Emitted when a payment is received toward an invoice.
 /// Topics: (split, paid, invoice_id)
-/// Data: (payer, amount)
+/// Data: (payer, amount, event_seq)
 pub fn payment_received(env: &Env, invoice_id: u64, payer: &Address, amount: i128) {
+    let event_seq = next_seq(env, invoice_id);
     env.events().publish(
         (symbol_short!("split"), symbol_short!("paid"), invoice_id),
-        (payer.clone(), amount),
+        (payer.clone(), amount, event_seq),
     );
 }
 
 pub fn payment_committed(env: &Env, invoice_id: u64, payer: &Address, commit_ledger: u32) {
+    let event_seq = next_seq(env, invoice_id);
     env.events().publish(
         (symbol_short!("split"), symbol_short!("pay_cmt"), invoice_id),
-        (payer.clone(), commit_ledger),
+        (payer.clone(), commit_ledger, event_seq),
     );
 }
 
 pub fn milestone_released(env: &Env, invoice_id: u64, milestone_bps: u32, amount_released: i128) {
+    let event_seq = next_seq(env, invoice_id);
     env.events().publish(
         (
             symbol_short!("split"),
             symbol_short!("mile_rel"),
             invoice_id,
         ),
-        (milestone_bps, amount_released),
+        (milestone_bps, amount_released, event_seq),
     );
 }
 
 pub fn surplus_claimed(env: &Env, invoice_id: u64, payer: &Address, amount: i128) {
+    let event_seq = next_seq(env, invoice_id);
     env.events().publish(
         (symbol_short!("split"), symbol_short!("surplus"), invoice_id),
-        (payer.clone(), amount),
+        (payer.clone(), amount, event_seq),
     );
 }
 
 /// Emitted when an invoice is fully funded and funds are released.
 /// Topics: (split, released, invoice_id)
-/// Data: recipients
+/// Data: (recipients, event_seq)
 pub fn invoice_released(env: &Env, invoice_id: u64, recipients: &Vec<Address>) {
+    let event_seq = next_seq(env, invoice_id);
     env.events().publish(
         (
             symbol_short!("split"),
             symbol_short!("released"),
             invoice_id,
         ),
-        recipients.clone(),
+        (recipients.clone(), event_seq),
     );
 }
 
 /// Emitted when an invoice is refunded after deadline.
 /// Topics: (split, refunded, invoice_id)
-/// Data: ()
+/// Data: (event_seq)
 pub fn invoice_refunded(env: &Env, invoice_id: u64) {
+    let event_seq = next_seq(env, invoice_id);
     env.events().publish(
         (
             symbol_short!("split"),
             symbol_short!("refunded"),
             invoice_id,
         ),
-        (),
+        (event_seq,),
     );
 }
 
@@ -84,9 +108,10 @@ pub fn invoice_refunded(env: &Env, invoice_id: u64) {
 /// Topics: (split, cond_ok, invoice_id)
 /// Data: preimage_hash
 pub fn condition_verified(env: &Env, invoice_id: u64, preimage_hash: &BytesN<32>) {
+    let event_seq = next_seq(env, invoice_id);
     env.events().publish(
         (symbol_short!("split"), symbol_short!("cond_ok"), invoice_id),
-        preimage_hash.clone(),
+        (preimage_hash.clone(), event_seq),
     );
 }
 
@@ -94,9 +119,10 @@ pub fn condition_verified(env: &Env, invoice_id: u64, preimage_hash: &BytesN<32>
 /// Topics: (split, expired, invoice_id)
 /// Data: (deadline, funded)
 pub fn invoice_expired(env: &Env, invoice_id: u64, deadline: u64, funded: i128) {
+    let event_seq = next_seq(env, invoice_id);
     env.events().publish(
         (symbol_short!("split"), symbol_short!("expired"), invoice_id),
-        (deadline, funded),
+        (deadline, funded, event_seq),
     );
 }
 
@@ -104,9 +130,10 @@ pub fn invoice_expired(env: &Env, invoice_id: u64, deadline: u64, funded: i128) 
 /// Topics: (split, rcp_wl, invoice_id)
 /// Data: address
 pub fn recipient_whitelisted(env: &Env, invoice_id: u64, address: &Address) {
+    let event_seq = next_seq(env, invoice_id);
     env.events().publish(
         (symbol_short!("split"), symbol_short!("rcp_wl"), invoice_id),
-        address.clone(),
+        (address.clone(), event_seq),
     );
 }
 
@@ -114,9 +141,10 @@ pub fn recipient_whitelisted(env: &Env, invoice_id: u64, address: &Address) {
 /// Topics: (split, rcp_rl, invoice_id)
 /// Data: address
 pub fn recipient_removed_from_whitelist(env: &Env, invoice_id: u64, address: &Address) {
+    let event_seq = next_seq(env, invoice_id);
     env.events().publish(
         (symbol_short!("split"), symbol_short!("rcp_rl"), invoice_id),
-        address.clone(),
+        (address.clone(), event_seq),
     );
 }
 
@@ -138,9 +166,10 @@ pub fn rebate_accrued(env: &Env, creator: &Address, amount: i128, tier_bps: u32)
 /// Topics: (split, pay_ref, invoice_id)
 /// Data: (payer, amount)
 pub fn payer_refunded(env: &Env, invoice_id: u64, payer: &Address, amount: i128) {
+    let event_seq = next_seq(env, invoice_id);
     env.events().publish(
         (symbol_short!("split"), symbol_short!("pay_ref"), invoice_id),
-        (payer.clone(), amount),
+        (payer.clone(), amount, event_seq),
     );
 }
 
@@ -148,9 +177,10 @@ pub fn payer_refunded(env: &Env, invoice_id: u64, payer: &Address, amount: i128)
 /// Topics: (split, add_rec, invoice_id)
 /// Data: (recipient, amount)
 pub fn recipient_added(env: &Env, invoice_id: u64, recipient: &Address, amount: i128) {
+    let event_seq = next_seq(env, invoice_id);
     env.events().publish(
         (symbol_short!("split"), symbol_short!("add_rec"), invoice_id),
-        (recipient.clone(), amount),
+        (recipient.clone(), amount, event_seq),
     );
 }
 
@@ -158,9 +188,10 @@ pub fn recipient_added(env: &Env, invoice_id: u64, recipient: &Address, amount: 
 /// Topics: (split, adj_spl, invoice_id)
 /// Data: creator
 pub fn split_adjusted(env: &Env, invoice_id: u64, creator: &Address) {
+    let event_seq = next_seq(env, invoice_id);
     env.events().publish(
         (symbol_short!("split"), symbol_short!("adj_spl"), invoice_id),
-        creator.clone(),
+        (creator.clone(), event_seq),
     );
 }
 
@@ -174,13 +205,14 @@ pub fn recipients_rebalanced(
     removed_address: &Address,
     redistributed_amount: i128,
 ) {
+    let event_seq = next_seq(env, invoice_id);
     env.events().publish(
         (
             symbol_short!("split"),
             symbol_short!("rebalance"),
             invoice_id,
         ),
-        (removed_address.clone(), redistributed_amount),
+        (removed_address.clone(), redistributed_amount, event_seq),
     );
 }
 
@@ -188,13 +220,14 @@ pub fn recipients_rebalanced(
 /// Topics: (split, archived, invoice_id)
 /// Data: ()
 pub fn invoice_archived(env: &Env, invoice_id: u64) {
+    let event_seq = next_seq(env, invoice_id);
     env.events().publish(
         (
             symbol_short!("split"),
             symbol_short!("archived"),
             invoice_id,
         ),
-        (),
+        (event_seq,),
     );
 }
 

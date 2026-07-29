@@ -927,6 +927,25 @@ fn refunded_key(invoice_id: u64) -> (Symbol, u64) {
 }
 
 // ---------------------------------------------------------------------------
+// Event sequence number helper (per-invoice, temporary-storage counter)
+// ---------------------------------------------------------------------------
+
+/// Temporary-storage key for per-invoice event sequence counter.
+/// Lives in `storage::temporary` so it resets between transactions.
+fn event_seq_key(invoice_id: u64) -> (Symbol, u64) {
+    (symbol_short!("evt_seq"), invoice_id)
+}
+
+/// Fetch and increment the per-invoice event sequence counter.
+/// Returns the new (post-increment) sequence number, starting at 1.
+pub(crate) fn event_seq(env: &Env, invoice_id: u64) -> u64 {
+    let key = event_seq_key(invoice_id);
+    let seq: u64 = env.storage().temporary().get(&key).unwrap_or(0) + 1;
+    env.storage().temporary().set(&key, &seq);
+    seq
+}
+
+// ---------------------------------------------------------------------------
 // Reentrancy guard (issue #451-reentrancy)
 // ---------------------------------------------------------------------------
 
@@ -1661,6 +1680,12 @@ fn load_invoice(env: &Env, id: u64) -> Invoice {
         invoice.funded = hot.funded;
         invoice.recipients = hot.recipients;
     }
+
+    // Populate metadata_hash from its separate storage key.
+    invoice.metadata_hash = env
+        .storage()
+        .persistent()
+        .get(&metadata_hash_key(id));
 
     invoice
 }
@@ -7790,6 +7815,11 @@ impl SplitContract {
         assert!(
             invoice.creator == creator,
             "only creator can update metadata hash"
+        );
+        // Reject updates on finalised or cancelled invoices.
+        assert!(
+            invoice.status != InvoiceStatus::Released && invoice.status != InvoiceStatus::Cancelled,
+            "cannot update metadata hash on finalised or cancelled invoice"
         );
 
         let old_hash: Option<BytesN<32>> = env
