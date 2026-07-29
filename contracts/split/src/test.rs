@@ -112,6 +112,8 @@ fn default_options(env: &Env) -> InvoiceOptions {
         require_kyc: false,
         scheduled_release_at: None,
         ratios: Vec::new(env),
+        cosigners: None,
+        cosigner_threshold: None,
         ext: types::InvoiceOptions2 {
             target_usd_cents: None,
             payment_token: None,
@@ -208,6 +210,8 @@ fn invoice_options(
         require_kyc: false,
         scheduled_release_at: None,
         ratios: Vec::new(env),
+        cosigners: None,
+        cosigner_threshold: None,
         ext: types::InvoiceOptions2 {
             target_usd_cents: None,
             payment_token: None,
@@ -8632,6 +8636,122 @@ fn test_multisig_release_panics_below_threshold() {
     c.pay(&payer, &id, &100_i128, &0_u64, &false, &false);
     c.sign_release(&id, &signer1); // only 1 of 2
     c.release(&id); // should panic: not enough co-signer approvals
+}
+
+// ---------------------------------------------------------------------------
+// N-of-M cosigner release approval (`cosigners` / `cosigner_threshold` /
+// `approve_release`) — independent of the legacy `co_signers` / `sign_release`
+// gate exercised above.
+// ---------------------------------------------------------------------------
+
+fn cosigner_invoice(
+    env: &Env,
+    c: &SplitContractClient,
+    token_id: &Address,
+    payer: &Address,
+    amount: i128,
+    cosigners: &Vec<Address>,
+    threshold: u32,
+) -> u64 {
+    let creator = Address::generate(env);
+    let recipient = Address::generate(env);
+
+    StellarAssetClient::new(env, token_id).mint(payer, &amount);
+
+    let mut recipients = Vec::new(env);
+    recipients.push_back(recipient);
+    let mut amounts = Vec::new(env);
+    amounts.push_back(amount);
+
+    let mut opts = default_options(env);
+    opts.cosigners = Some(cosigners.clone());
+    opts.cosigner_threshold = Some(threshold);
+
+    let id = c.create_invoice(&creator, &recipients, &amounts, token_id, &9_999_u64, &opts);
+    c.pay(payer, &id, &amount, &0_u64, &false, &false);
+    id
+}
+
+#[test]
+fn test_approve_release_threshold_met_allows_release() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+    let payer = Address::generate(&env);
+    let cosigner1 = Address::generate(&env);
+    let cosigner2 = Address::generate(&env);
+    env.ledger().set_timestamp(1_000);
+
+    let mut cosigners = Vec::new(&env);
+    cosigners.push_back(cosigner1.clone());
+    cosigners.push_back(cosigner2.clone());
+
+    let id = cosigner_invoice(&env, &c, &token_id, &payer, 100, &cosigners, 2);
+    // Fully funded but gated — must still be Pending until threshold is met.
+    assert_eq!(c.get_invoice(&id).status, InvoiceStatus::Pending);
+
+    c.approve_release(&id, &cosigner1);
+    c.approve_release(&id, &cosigner2);
+    c.release(&id);
+
+    assert_eq!(c.get_invoice(&id).status, InvoiceStatus::Released);
+}
+
+#[test]
+#[should_panic(expected = "cosigner approval threshold not met")]
+fn test_approve_release_panics_below_threshold() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+    let payer = Address::generate(&env);
+    let cosigner1 = Address::generate(&env);
+    let cosigner2 = Address::generate(&env);
+    env.ledger().set_timestamp(1_000);
+
+    let mut cosigners = Vec::new(&env);
+    cosigners.push_back(cosigner1.clone());
+    cosigners.push_back(cosigner2.clone());
+
+    let id = cosigner_invoice(&env, &c, &token_id, &payer, 100, &cosigners, 2);
+
+    c.approve_release(&id, &cosigner1); // only 1 of 2
+    c.release(&id); // should panic: threshold not met
+}
+
+#[test]
+#[should_panic(expected = "not an authorized cosigner")]
+fn test_approve_release_rejects_non_cosigner() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+    let payer = Address::generate(&env);
+    let cosigner1 = Address::generate(&env);
+    let imposter = Address::generate(&env);
+    env.ledger().set_timestamp(1_000);
+
+    let mut cosigners = Vec::new(&env);
+    cosigners.push_back(cosigner1.clone());
+
+    let id = cosigner_invoice(&env, &c, &token_id, &payer, 100, &cosigners, 1);
+
+    c.approve_release(&id, &imposter); // not in cosigners — should panic
+}
+
+#[test]
+#[should_panic(expected = "cosigner already approved")]
+fn test_approve_release_rejects_duplicate_approval() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+    let payer = Address::generate(&env);
+    let cosigner1 = Address::generate(&env);
+    let cosigner2 = Address::generate(&env);
+    env.ledger().set_timestamp(1_000);
+
+    let mut cosigners = Vec::new(&env);
+    cosigners.push_back(cosigner1.clone());
+    cosigners.push_back(cosigner2.clone());
+
+    let id = cosigner_invoice(&env, &c, &token_id, &payer, 100, &cosigners, 2);
+
+    c.approve_release(&id, &cosigner1);
+    c.approve_release(&id, &cosigner1); // duplicate — should panic
 }
 
 // ---------------------------------------------------------------------------

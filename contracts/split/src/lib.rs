@@ -528,6 +528,22 @@ fn delegate_pay_key(beneficiary: &Address) -> (Symbol, Address) {
     (symbol_short!("dlgt_pay"), beneficiary.clone())
 }
 
+/// N-of-M release approval: configured cosigner addresses for an invoice.
+/// Set at creation time from `InvoiceOptions::cosigners`; absent means the
+/// gate is disabled for this invoice.
+fn cosigners_key(id: u64) -> (Symbol, u64) {
+    (symbol_short!("cosigrs"), id)
+}
+/// N-of-M release approval: required number of `cosigners_key` approvals.
+/// Set at creation time from `InvoiceOptions::cosigner_threshold`.
+fn cosigner_thresh_key(id: u64) -> (Symbol, u64) {
+    (symbol_short!("cosig_th"), id)
+}
+/// N-of-M release approval: recorded approvals collected via `approve_release`.
+fn cosign_key(id: u64) -> (Symbol, u64) {
+    (symbol_short!("cosign"), id)
+}
+
 /// Analytics counters (issue #28).
 fn total_invoices_key() -> Symbol {
     symbol_short!("tot_inv")
@@ -1819,6 +1835,41 @@ fn apply_overfunding_policy(env: &Env, id: u64, policy: OverfundingPolicy) {
         let mut invoice = load_invoice(env, id);
         invoice.overfunding_policy = policy;
         save_invoice(env, id, &invoice);
+    }
+}
+
+/// Persist a creator-configured N-of-M cosigner approval requirement on a
+/// freshly created invoice. `None` leaves the gate disabled, so invoices that
+/// never set `cosigners` pay no storage cost.
+fn apply_cosigner_config(env: &Env, id: u64, cosigners: Option<Vec<Address>>, threshold: Option<u32>) {
+    if let Some(list) = cosigners {
+        assert!(!list.is_empty(), "cosigners cannot be empty when set");
+        let required = threshold.unwrap_or(list.len());
+        assert!(
+            required > 0 && required <= list.len(),
+            "cosigner_threshold must be between 1 and cosigners.len()"
+        );
+        env.storage().persistent().set(&cosigners_key(id), &list);
+        env.storage()
+            .persistent()
+            .set(&cosigner_thresh_key(id), &required);
+    }
+}
+
+/// Blocks release until the invoice's configured N-of-M cosigner quorum has
+/// been met via `approve_release`. A no-op when the invoice has no
+/// `cosigners` configured (the common case).
+fn require_cosigner_threshold_met(env: &Env, id: u64) {
+    if let Some(threshold) = env.storage().persistent().get::<_, u32>(&cosigner_thresh_key(id)) {
+        let approvals: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&cosign_key(id))
+            .unwrap_or_else(|| Vec::new(env));
+        assert!(
+            approvals.len() >= threshold,
+            "cosigner approval threshold not met"
+        );
     }
 }
 
@@ -4426,6 +4477,10 @@ impl SplitContract {
         // Issue #420: captured before `options` is consumed below; applied to the
         // stored invoice once `_create_invoice_inner` has allocated its id.
         let overfunding_policy = options.ext.overfunding_policy.clone();
+        // Captured before `options` is consumed below; applied to the stored
+        // invoice once `_create_invoice_inner` has allocated its id.
+        let cosigners = options.cosigners.clone();
+        let cosigner_threshold = options.cosigner_threshold;
 
         let id = Self::_create_invoice_inner(
         // Validate split ratios (if provided) before any storage is touched.
@@ -4499,6 +4554,7 @@ impl SplitContract {
         );
 
         apply_overfunding_policy(&env, id, overfunding_policy);
+        apply_cosigner_config(&env, id, cosigners, cosigner_threshold);
         id
             options.ext.early_bird_window_ledgers,
             options.ext.early_bird_fee_bps,
@@ -4561,6 +4617,9 @@ impl SplitContract {
 
         // Issue #420: see `create_invoice` — captured before `options` is consumed.
         let overfunding_policy = options.ext.overfunding_policy.clone();
+        // See `create_invoice` — captured before `options` is consumed.
+        let cosigners = options.cosigners.clone();
+        let cosigner_threshold = options.cosigner_threshold;
 
         let id = Self::_create_invoice_inner(
             &env,
@@ -4626,6 +4685,7 @@ impl SplitContract {
         );
 
         apply_overfunding_policy(&env, id, overfunding_policy);
+        apply_cosigner_config(&env, id, cosigners, cosigner_threshold);
         id
             options.ext.early_bird_window_ledgers,
             options.ext.early_bird_fee_bps,
@@ -5974,6 +6034,7 @@ impl SplitContract {
                     || !invoice.release_stages.is_empty()
                     || in_group
                     || !invoice.co_signers.is_empty()
+                    || env.storage().persistent().has(&cosigners_key(invoice_id))
                     || (invoice.oracle_address.is_some() && !invoice.condition_met)
                     || (invoice.min_funding_bps > 0
                         && invoice.funded
@@ -6669,6 +6730,7 @@ impl SplitContract {
                 || !invoice.milestones.is_empty()
                 || in_group
                 || !invoice.co_signers.is_empty()
+                || env.storage().persistent().has(&cosigners_key(invoice_id))
                 || (invoice.oracle_address.is_some() && !invoice.condition_met)
                 || (invoice.min_funding_bps > 0
                     && invoice.funded
@@ -6831,6 +6893,7 @@ impl SplitContract {
                 || !invoice.release_stages.is_empty()
                 || in_group
                 || !invoice.co_signers.is_empty()
+                || env.storage().persistent().has(&cosigners_key(invoice_id))
                 || (invoice.min_funding_bps > 0
                     && invoice.funded
                         < (invoice.amounts.iter().sum::<i128>() * invoice.min_funding_bps as i128
@@ -6935,6 +6998,7 @@ impl SplitContract {
                 || !invoice.release_stages.is_empty()
                 || in_group
                 || !invoice.co_signers.is_empty()
+                || env.storage().persistent().has(&cosigners_key(invoice_id))
                 || (invoice.oracle_address.is_some() && !invoice.condition_met)
                 || (invoice.min_funding_bps > 0
                     && invoice.funded
@@ -7043,6 +7107,7 @@ impl SplitContract {
                     || !inv.release_stages.is_empty()
                     || in_group
                     || !inv.co_signers.is_empty()
+                    || env.storage().persistent().has(&cosigners_key(p.invoice_id))
                     || (inv.oracle_address.is_some() && !inv.condition_met)
                     || (inv.min_funding_bps > 0
                         && inv.funded
@@ -7091,6 +7156,60 @@ impl SplitContract {
         invoice.signatures.push_back(signer.clone());
         save_invoice(&env, invoice_id, &invoice);
         append_audit_entry(&env, invoice_id, symbol_short!("sign_rel"), &signer);
+    }
+
+    /// Record a cosigner's approval toward the N-of-M release-approval quorum
+    /// configured via `InvoiceOptions::cosigners` / `cosigner_threshold`.
+    ///
+    /// Independent of the legacy `co_signers` / `sign_release` gate above.
+    /// Only addresses in `cosigners` may call this; each may approve at most
+    /// once. Emits `CosignerApproved` on every call, and `CosignerThresholdReached`
+    /// the moment the configured threshold is met.
+    pub fn approve_release(env: Env, invoice_id: u64, cosigner: Address) {
+        require_not_paused(&env);
+        cosigner.require_auth();
+
+        let invoice = load_invoice(&env, invoice_id);
+        assert!(
+            invoice.status == InvoiceStatus::Pending,
+            "invoice is not pending"
+        );
+
+        let cosigners: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&cosigners_key(invoice_id))
+            .expect("no cosigners configured for this invoice");
+        assert!(
+            cosigners.iter().any(|c| c == cosigner),
+            "not an authorized cosigner"
+        );
+
+        let mut approvals: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&cosign_key(invoice_id))
+            .unwrap_or_else(|| Vec::new(&env));
+        assert!(
+            !approvals.iter().any(|a| a == cosigner),
+            "cosigner already approved"
+        );
+
+        approvals.push_back(cosigner.clone());
+        env.storage()
+            .persistent()
+            .set(&cosign_key(invoice_id), &approvals);
+        events::cosigner_approved(&env, invoice_id, &cosigner);
+        append_audit_entry(&env, invoice_id, symbol_short!("cosign"), &cosigner);
+
+        let threshold: u32 = env
+            .storage()
+            .persistent()
+            .get(&cosigner_thresh_key(invoice_id))
+            .unwrap_or(0);
+        if threshold > 0 && approvals.len() >= threshold {
+            events::cosigner_threshold_reached(&env, invoice_id);
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -7259,6 +7378,9 @@ impl SplitContract {
             );
         }
 
+        // N-of-M cosigner approval check (independent of the legacy co_signers gate).
+        require_cosigner_threshold_met(&env, invoice_id);
+
         Self::_release(&env, invoice_id, &mut invoice, &caller);
         // Clear reentrancy lock on normal exit.
         env.storage().temporary().remove(&reentrancy_lock_key());
@@ -7322,6 +7444,9 @@ impl SplitContract {
                 "not enough co-signer approvals"
             );
         }
+
+        // N-of-M cosigner approval check (independent of the legacy co_signers gate).
+        require_cosigner_threshold_met(&env, invoice_id);
 
         let caller = env.current_contract_address();
         Self::_release(&env, invoice_id, &mut invoice, &caller);
@@ -9554,7 +9679,8 @@ impl SplitContract {
                         || !target.tranches.is_empty()
                         || !target.release_stages.is_empty()
                         || in_group
-                        || !target.co_signers.is_empty();
+                        || !target.co_signers.is_empty()
+                        || env.storage().persistent().has(&cosigners_key(target_id));
                     if guarded {
                         save_invoice(env, target_id, &target);
                     } else {
@@ -12149,7 +12275,8 @@ impl SplitContract {
             || !invoice.tranches.is_empty()
             || !invoice.release_stages.is_empty()
             || in_group
-            || !invoice.co_signers.is_empty();
+            || !invoice.co_signers.is_empty()
+            || env.storage().persistent().has(&cosigners_key(invoice_id));
         if invoice.funded >= total {
             if guarded {
                 save_invoice(&env, invoice_id, &invoice);
@@ -12850,6 +12977,7 @@ impl SplitContract {
                 || !invoice.release_stages.is_empty()
                 || in_group
                 || !invoice.co_signers.is_empty()
+                || env.storage().persistent().has(&cosigners_key(invoice_id))
                 || (invoice.oracle_address.is_some() && !invoice.condition_met);
             if guarded {
                 save_invoice(&env, invoice_id, &invoice);
