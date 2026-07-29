@@ -1,6 +1,6 @@
 //! Type definitions for the invoice-escrow contract.
 
-use soroban_sdk::{contracttype, Address};
+use soroban_sdk::{contracttype, Address, BytesN};
 
 /// Lifecycle state of an escrow invoice.
 #[contracttype]
@@ -77,4 +77,31 @@ pub struct AdminTransferCancelledEvent {
     pub cancelled_pending: Address,
     /// Ledger sequence at which cancellation occurred.
     pub ledger: u32,
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Payer Blacklist types
+// ──────────────────────────────────────────────────────────────────────
+
+/// Entry in the payer blacklist.
+///
+/// When a payer is blacklisted by the admin, an entry is created with
+/// `finalised: false`. The payer can submit an appeal during the
+/// `APPEAL_WINDOW_LEDGERS` window. After the window closes (or the payer
+/// submits an appeal), the admin calls `finalise_blacklist` with either
+/// `uphold: true` (ban stays) or `uphold: false` (payer reinstated).
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct BlacklistEntry {
+    /// Unix timestamp when the blacklist entry was created.
+    pub banned_at: u64,
+    /// Optional appeal hash submitted by the payer (32-byte hash).
+    pub appeal_hash: Option<BytesN<32>>,
+    /// Whether the blacklist entry has been finalised by the admin.
+    pub finalised: bool,
+    /// Whether the ban was upheld after finalisation. Only meaningful
+    /// when `finalised` is `true`.
+    pub upheld: bool,
+    /// Hash of the reason for blacklisting (provided by admin).
+    pub reason_hash: BytesN<32>,
 }

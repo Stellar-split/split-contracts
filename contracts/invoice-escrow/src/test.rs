@@ -479,3 +479,230 @@ fn test_cancel_invoice_by_admin() {
     let invoice = client.get_invoice(&id);
     assert_eq!(invoice.status, EscrowStatus::Cancelled);
 }
+
+// ---------------------------------------------------------------------------
+// Payer blacklist tests
+// ---------------------------------------------------------------------------
+
+use soroban_sdk::BytesN;
+
+fn bytesn32(env: &Env, data: &[u8; 32]) -> BytesN<32> {
+    BytesN::from_array(env, data)
+}
+
+#[test]
+fn test_blacklist_payer_success() {
+    let (env, contract_id) = setup();
+    let client = InvoiceEscrowContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let payer = Address::generate(&env);
+
+    client.initialize(&admin);
+
+    let reason = bytesn32(&env, &[1u8; 32]);
+    client.blacklist_payer(&admin, &payer, &reason);
+
+    let entry = client.get_blacklist_entry(&payer).expect("blacklist entry not found");
+    assert!(!entry.finalised);
+    assert!(entry.appeal_hash.is_none());
+}
+
+#[test]
+fn test_blacklist_blocks_finalised_payer_deposit() {
+    let (env, contract_id) = setup();
+    let client = InvoiceEscrowContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let creator = Address::generate(&env);
+    let payer = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = create_token(&env, &token_admin);
+
+    mint(&env, &token, &token_admin, &payer, 2_000_000);
+    client.initialize(&admin);
+
+    // Blacklist and finalise with uphold.
+    let reason = bytesn32(&env, &[1u8; 32]);
+    client.blacklist_payer(&admin, &payer, &reason);
+    client.finalise_blacklist(&admin, &payer, &true);
+
+    // Create invoice and try to deposit — must fail.
+    let deadline = env.ledger().timestamp() + 10_000;
+    let id = client.create_invoice(&creator, &token, &1_000_000, &deadline);
+    let result = client.try_deposit(&payer, &id, &500_000);
+    assert_eq!(result, Err(Ok(Error::PayerBlacklisted)));
+}
+
+#[test]
+fn test_blacklist_blocks_finalised_payer_pay_invoice() {
+    let (env, contract_id) = setup();
+    let client = InvoiceEscrowContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let creator = Address::generate(&env);
+    let payer = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = create_token(&env, &token_admin);
+
+    mint(&env, &token, &token_admin, &payer, 2_000_000);
+    client.initialize(&admin);
+
+    // Blacklist and finalise with uphold.
+    let reason = bytesn32(&env, &[1u8; 32]);
+    client.blacklist_payer(&admin, &payer, &reason);
+    client.finalise_blacklist(&admin, &payer, &true);
+
+    let deadline = env.ledger().timestamp() + 10_000;
+    let id = client.create_invoice(&creator, &token, &1_000_000, &deadline);
+    let result = client.try_pay_invoice(&payer, &id, &500_000);
+    assert_eq!(result, Err(Ok(Error::PayerBlacklisted)));
+}
+
+#[test]
+fn test_appeal_then_reinstate_allows_deposit() {
+    let (env, contract_id) = setup();
+    let client = InvoiceEscrowContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let creator = Address::generate(&env);
+    let payer = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = create_token(&env, &token_admin);
+
+    mint(&env, &token, &token_admin, &payer, 2_000_000);
+    client.initialize(&admin);
+
+    // Blacklist the payer.
+    let reason = bytesn32(&env, &[2u8; 32]);
+    client.blacklist_payer(&admin, &payer, &reason);
+
+    // Payer submits appeal.
+    let appeal = bytesn32(&env, &[3u8; 32]);
+    client.submit_appeal(&payer, &0u64, &appeal);
+
+    let entry = client.get_blacklist_entry(&payer).expect("entry must exist");
+    assert!(entry.appeal_hash.is_some());
+
+    // Admin reinstates (uphold: false).
+    client.finalise_blacklist(&admin, &payer, &false);
+
+    // Payer should now be able to deposit.
+    let deadline = env.ledger().timestamp() + 10_000;
+    let id = client.create_invoice(&creator, &token, &1_000_000, &deadline);
+    client.deposit(&payer, &id, &500_000);
+
+    let invoice = client.get_invoice(&id);
+    assert_eq!(invoice.funded_amount, 500_000);
+}
+
+#[test]
+fn test_finalise_uphold_keeps_ban() {
+    let (env, contract_id) = setup();
+    let client = InvoiceEscrowContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let payer = Address::generate(&env);
+
+    client.initialize(&admin);
+
+    let reason = bytesn32(&env, &[4u8; 32]);
+    client.blacklist_payer(&admin, &payer, &reason);
+    client.finalise_blacklist(&admin, &payer, &true);
+
+    let entry = client.get_blacklist_entry(&payer).expect("entry must exist");
+    assert!(entry.finalised);
+    assert!(entry.upheld);
+    assert!(client.is_payer_blacklisted(&payer));
+}
+
+#[test]
+fn test_non_admin_cannot_blacklist() {
+    let (env, contract_id) = setup();
+    let client = InvoiceEscrowContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let attacker = Address::generate(&env);
+    let payer = Address::generate(&env);
+
+    client.initialize(&admin);
+
+    let reason = bytesn32(&env, &[5u8; 32]);
+    // Attacker tries to blacklist — stored admin is the real admin,
+    // but attacker.require_auth() will be called so it will work in
+    // mock environment, but the address check fails. Wait — in mock,
+    // mock_all_auths bypasses require_auth. But we check admin != stored_admin.
+    let result = client.try_blacklist_payer(&attacker, &payer, &reason);
+    assert_eq!(result, Err(Ok(Error::NotAdmin)));
+}
+
+#[test]
+fn test_blacklist_entry_emits_event() {
+    let (env, contract_id) = setup();
+    let client = InvoiceEscrowContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let payer = Address::generate(&env);
+
+    client.initialize(&admin);
+
+    let reason = bytesn32(&env, &[6u8; 32]);
+    client.blacklist_payer(&admin, &payer, &reason);
+
+    let events = env.events().all();
+    let found = events.iter().any(|(_, topics, _)| {
+        topics
+            == (
+                symbol_short!("blacklist"),
+                symbol_short!("bl_add"),
+            )
+                .into_val(&env)
+    });
+    assert!(found, "bl_add event not emitted");
+}
+
+#[test]
+fn test_finalise_blacklist_emits_event() {
+    let (env, contract_id) = setup();
+    let client = InvoiceEscrowContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let payer = Address::generate(&env);
+
+    client.initialize(&admin);
+
+    let reason = bytesn32(&env, &[7u8; 32]);
+    client.blacklist_payer(&admin, &payer, &reason);
+    client.finalise_blacklist(&admin, &payer, &true);
+
+    let events = env.events().all();
+    let found = events.iter().any(|(_, topics, _)| {
+        topics
+            == (
+                symbol_short!("blacklist"),
+                symbol_short!("bl_fin"),
+            )
+                .into_val(&env)
+    });
+    assert!(found, "bl_fin event not emitted");
+}
+
+#[test]
+fn test_is_payer_blacklisted_returns_false_for_non_blacklisted() {
+    let (env, contract_id) = setup();
+    let client = InvoiceEscrowContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let payer = Address::generate(&env);
+
+    client.initialize(&admin);
+    assert!(!client.is_payer_blacklisted(&payer));
+}
+
+#[test]
+fn test_cannot_finalise_twice() {
+    let (env, contract_id) = setup();
+    let client = InvoiceEscrowContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let payer = Address::generate(&env);
+
+    client.initialize(&admin);
+
+    let reason = bytesn32(&env, &[8u8; 32]);
+    client.blacklist_payer(&admin, &payer, &reason);
+    client.finalise_blacklist(&admin, &payer, &true);
+
+    let result = client.try_finalise_blacklist(&admin, &payer, &true);
+    assert_eq!(result, Err(Ok(Error::AlreadyFinalised)));
+}
