@@ -628,7 +628,7 @@ pub struct PenaltyTier {
 /// Issue #475: Multi-signature admin set — replaces the single-admin model.
 /// Sensitive operations require `threshold`-of-N signers to approve.
 #[contracttype]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct AdminSet {
     /// All recognised admin signers.
     pub signers: Vec<Address>,

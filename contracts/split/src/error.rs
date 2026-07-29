@@ -81,4 +81,3 @@ pub enum ContractError {
     /// Issue #453: Source contract has exceeded its call rate limit within the current window.
     SourceContractRateLimited = 46,
 }
-

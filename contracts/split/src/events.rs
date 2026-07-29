@@ -598,7 +598,7 @@ pub fn creator_stats_updated(
 ///   - `ledger`: the ledger sequence number at transition time
 ///
 /// To build a per-invoice state machine, collect all "st_chg" events for a given
-/// `invoice_id` ordered by ledger, then replay `from → to` pairs.
+/// `invoice_id` ordered by ledger, then replay `from -> to` pairs.
 ///
 /// Topics: (split, st_chg, invoice_id)
 /// Data: (from_status, to_status, actor, ledger)
@@ -940,14 +940,17 @@ pub fn rep_updated(env: &Env, address: &Address, score: &RepScore) {
     );
 }
 
-pub fn payout_failed(env: &Env, invoice_id: u64, recipient: &Address, amount: i128) {
+/// Issue #504: Emitted when a payout transfer fails for a recipient during batch release.
+/// Topics: (split, PayoutFailed, invoice_id)
+/// Data: (recipient, amount, reason)
+pub fn payout_failed(env: &Env, invoice_id: u64, recipient: &Address, amount: i128, reason: &String) {
     env.events().publish(
         (
             symbol_short!("split"),
             soroban_sdk::Symbol::new(env, "PayoutFailed"),
             invoice_id,
         ),
-        (recipient.clone(), amount),
+        (recipient.clone(), amount, reason.clone()),
     );
 }
 
@@ -1173,6 +1176,7 @@ pub fn trusted_caller_removed(env: &Env, caller: &Address) {
         (),
     );
 }
+
 /// RBAC: Emitted when an admin grants a role to an address.
 /// Topics: (split, role_grt, grantee)
 /// Data: (role_discriminant, admin)
@@ -1200,6 +1204,7 @@ pub fn role_revoked(env: &Env, grantee: &Address, role_discriminant: u32, admin:
         (role_discriminant, admin.clone()),
     );
 }
+
 /// Issue #474: Emitted when a creator cancels an open invoice and all contributors are refunded.
 /// Topics: (split, inv_cncl, invoice_id)
 /// Data: (creator, total_refunded, ledger)
@@ -1236,6 +1241,17 @@ pub fn admin_action_approved(
     action_hash: &BytesN<32>,
     approver: &Address,
     approval_count: u32,
+) {
+    env.events().publish(
+        (
+            symbol_short!("split"),
+            symbol_short!("adm_appr"),
+            action_hash.clone(),
+        ),
+        (approver.clone(), approval_count, env.ledger().sequence()),
+    );
+}
+
 /// Issue #470: Emitted when an overpayment results in a partial refund.
 /// Topics: (split, RefundIssued, invoice_id)
 /// Data: (payer, refund_amount)
