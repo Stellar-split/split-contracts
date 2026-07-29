@@ -1,8 +1,7 @@
 name: Deploy to Testnet
 
 on:
-  push:
-    branches: [main]
+  workflow_dispatch:
 
 jobs:
   deploy:
@@ -24,17 +23,24 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Build contract (release)
-        run: cargo build --target wasm32-unknown-unknown --release --workspace
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev libudev-dev pkg-config
 
       - name: Install stellar-cli
-        run: cargo install --locked stellar-cli --features opt
+        run: cargo install --locked stellar-cli
+
+      - name: Build contract (release)
+        run: cargo build --target wasm32-unknown-unknown --release --package split
 
       - name: Configure testnet identity
+        run: stellar keys generate deployer --network testnet
+
+      - name: Fund deployer account via Friendbot
         run: |
-          stellar keys generate deployer --network testnet
-        env:
-          STELLAR_SECRET_KEY: ${{ secrets.TESTNET_SECRET_KEY }}
+          ADDR=$(stellar keys address deployer)
+          echo "Funding $ADDR via Friendbot..."
+          curl -s -f "https://friendbot.stellar.org?addr=$ADDR" > /dev/null
+          echo "Account funded."
 
       - name: Deploy contract
         run: |
@@ -44,5 +50,3 @@ jobs:
             --network testnet \
             --rpc-url https://soroban-testnet.stellar.org \
             --network-passphrase "Test SDF Network ; September 2015"
-        env:
-          STELLAR_SECRET_KEY: ${{ secrets.TESTNET_SECRET_KEY }}
