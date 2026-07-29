@@ -137,6 +137,7 @@ pub enum InvoiceStatus {
     Refunded,
     Expired,
     Cancelled,
+    Disputed,
 }
 
 /// Issue #449: Multi-phase invoice state machine.
@@ -1089,6 +1090,7 @@ impl Invoice {
             InvoiceStatus::Refunded => 2,
             InvoiceStatus::Cancelled => 3,
             InvoiceStatus::Expired => 4,
+            InvoiceStatus::Disputed => 5,
         };
         bytes.push_back(status_byte);
 
@@ -1124,6 +1126,7 @@ impl Invoice {
             2 => InvoiceStatus::Refunded,
             3 => InvoiceStatus::Cancelled,
             4 => InvoiceStatus::Expired,
+            5 => InvoiceStatus::Disputed,
             _ => InvoiceStatus::Pending,
         };
 
@@ -1301,6 +1304,10 @@ pub enum DisputeStatus {
 pub enum DisputeOutcome {
     Approved,
     Refunded,
+    /// Admin resolves the dispute and releases funds normally.
+    Release,
+    /// Admin resolves the dispute and refunds all contributors.
+    Refund,
 }
 
 /// Issue #325: On-chain record of a payer-initiated dispute.
@@ -1310,6 +1317,10 @@ pub struct DisputeRecord {
     pub reason_hash: BytesN<32>,
     pub raised_at: u32,
     pub status: DisputeStatus,
+    /// Admin-configurable timeout in ledgers for auto-resolution.
+    pub dispute_timeout_ledgers: u32,
+    /// Ledger sequence when the dispute was opened (for timeout calculation).
+    pub dispute_opened_ledger: u32,
 }
 
 /// Issue #326: Protocol fee configuration set by admin.
@@ -1399,6 +1410,7 @@ impl InvoiceStatus {
             InvoiceStatus::Refunded => 2,
             InvoiceStatus::Cancelled => 3,
             InvoiceStatus::Expired => 4,
+            InvoiceStatus::Disputed => 5,
         }
     }
 
@@ -1409,6 +1421,7 @@ impl InvoiceStatus {
             2 => InvoiceStatus::Refunded,
             3 => InvoiceStatus::Cancelled,
             4 => InvoiceStatus::Expired,
+            5 => InvoiceStatus::Disputed,
             _ => InvoiceStatus::Pending,
         }
     }

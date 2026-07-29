@@ -56,27 +56,29 @@ pub enum ContractError {
     /// Issue #420: Payment rejected because the invoice's `Cap` overfunding
     /// policy does not allow `funded` to exceed the invoice total.
     InvoiceFullyFunded = 35,
-    CreatorCooldownActive = 31,
     /// The provided ratios do not sum to exactly BASIS_POINTS_TOTAL (10 000).
-    InvalidRatioSum = 33,
+    InvalidRatioSum = 36,
     /// The recipient/ratio list is empty; at least one entry is required.
-    EmptyRecipientList = 34,
+    EmptyRecipientList = 37,
     /// Reentrant call detected: a fund-moving function was invoked recursively
     /// within the same transaction. Cleared automatically at transaction boundary
     /// because the lock lives in temporary storage.
-    ReentrantCall = 33,
+    ReentrantCall = 38,
     /// RBAC: Caller does not hold the required role for this entry point.
-    RoleNotHeld = 33,
+    RoleNotHeld = 39,
     /// Issue #482: Intermediate multiplication or division overflowed i128 bounds.
-    ArithmeticOverflow = 33,
+    ArithmeticOverflow = 40,
     /// Issue #483: A zero-value or negative amount was passed where a positive amount is required.
-    ZeroAmountNotAllowed = 34,
+    ZeroAmountNotAllowed = 41,
     /// Issue #485: Caller is not on the invoice contributor allowlist.
-    ContributorNotAllowed = 35,
-    CreatorCooldownActive = 34,
+    ContributorNotAllowed = 42,
     /// Issue #473: Token is not in the allowed tokens list.
-    UnauthorisedToken = 35,
-    /// Recipient address not found in invoice's recipient list.
-    RecipientNotFound = 36,
+    UnauthorisedToken = 43,
+    /// Issue #456: Invoice dependency chain - predecessor invoice is not yet Released.
+    DependencyNotMet = 44,
+    /// Issue #456: Circular dependency detected in invoice dependency chain.
+    CircularDependency = 45,
+    /// Issue #453: Source contract has exceeded its call rate limit within the current window.
+    SourceContractRateLimited = 46,
 }
 
