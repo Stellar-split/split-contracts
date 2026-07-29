@@ -83,6 +83,8 @@ pub fn default_options(env: &Env) -> InvoiceOptions {
         scheduled_release_at: None,
         require_kyc: false,
         ratios: Vec::new(env),
+        cosigners: None,
+        cosigner_threshold: None,
         ext: InvoiceOptions2 {
             target_usd_cents: None,
             payment_token: None,

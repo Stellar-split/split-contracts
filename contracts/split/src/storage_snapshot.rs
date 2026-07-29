@@ -125,6 +125,8 @@ fn storage_key_snapshot() {
         "upgrade_proposal_key",
         hex_xdr(&env, upgrade_proposal_key()),
     ));
+    // Issue #477: one-shot initialiser guard — instance storage
+    keys.push(("initialised_key", hex_xdr(&env, initialised_key())));
 
     // -----------------------------------------------------------------------
     // Persistent-tier keys (per-entity)
@@ -295,12 +297,10 @@ fn storage_key_snapshot() {
     // Issue #485: contributor allowlist key (Symbol, u64)
     keys.push(("contributor_allowlist_key", hex_xdr(&env, contributor_allowlist_key(1))));
 
-    // Issue #503: per-creator open invoice count and cap keys
-    keys.push(("open_invoice_count_key", hex_xdr(&env, open_invoice_count_key(&a))));
-    keys.push(("max_open_invoices_key", hex_xdr(&env, max_open_invoices_key())));
-
-    // Issue #505: failed payouts key (Symbol, u64)
-    keys.push(("failed_payouts_key", hex_xdr(&env, failed_payouts_key(1))));
+    // N-of-M cosigner release-approval keys (Symbol, u64)
+    keys.push(("cosigners_key", hex_xdr(&env, cosigners_key(1))));
+    keys.push(("cosigner_thresh_key", hex_xdr(&env, cosigner_thresh_key(1))));
+    keys.push(("cosign_key", hex_xdr(&env, cosign_key(1))));
 
     // Sort by key name for deterministic output
     keys.sort_by(|a, b| a.0.cmp(b.0));

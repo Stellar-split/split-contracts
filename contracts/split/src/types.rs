@@ -137,6 +137,7 @@ pub enum InvoiceStatus {
     Refunded,
     Expired,
     Cancelled,
+    Disputed,
 }
 
 /// Issue #449: Multi-phase invoice state machine.
@@ -372,6 +373,14 @@ pub struct InvoiceOptions {
     /// Per-recipient split ratios in basis points (must sum to [`BASIS_POINTS_TOTAL`] = 10 000
     /// when non-empty).  Empty vec means "no ratio constraint — use amounts directly."
     pub ratios: Vec<u32>,
+    /// Co-signer addresses whose approval (via `approve_release`) is required
+    /// before this invoice can be released. Independent of the legacy
+    /// `co_signers` / `sign_release` gate above. `None` disables the gate.
+    pub cosigners: Option<Vec<Address>>,
+    /// Number of distinct `cosigners` approvals required before release is
+    /// permitted. Only meaningful when `cosigners` is `Some`; must be in
+    /// `1..=cosigners.len()`.
+    pub cosigner_threshold: Option<u32>,
     /// Overflow fields that would otherwise push this struct past Soroban's
     /// 40-field `#[contracttype]` limit — see [`InvoiceOptions2`].
     pub ext: InvoiceOptions2,
@@ -498,6 +507,8 @@ pub struct InvoiceCore {
     pub released_bps: u32,
     pub clone_depth: u32,
     pub predecessor_id: Option<u64>,
+    /// Issue #329: optional IPFS CID / SHA-256 hash of off-chain invoice metadata.
+    pub metadata_hash: Option<BytesN<32>>,
 }
 
 #[contracttype]
@@ -784,6 +795,8 @@ pub struct Invoice {
     /// Issue #420: creator-configurable overfunding behaviour.
     pub overfunding_policy: OverfundingPolicy,
     pub predecessor_id: Option<u64>,
+    /// Issue #329: optional IPFS CID / SHA-256 hash of off-chain invoice metadata.
+    pub metadata_hash: Option<BytesN<32>>,
     /// Issue #485: optional contributor allowlist; when Some only listed addresses may call pay/contribute.
     pub contributor_allowlist: Option<Vec<Address>>,
     /// Issue #489: ledgers after creation during which contributions qualify
@@ -825,6 +838,7 @@ impl Invoice {
                 released_bps: self.released_bps,
                 clone_depth: self.clone_depth,
                 predecessor_id: self.predecessor_id,
+                metadata_hash: self.metadata_hash,
             },
             InvoiceExt {
                 co_signers: self.co_signers,
@@ -932,6 +946,7 @@ impl Invoice {
             released_bps: core.released_bps,
             clone_depth: core.clone_depth,
             predecessor_id: core.predecessor_id,
+            metadata_hash: core.metadata_hash,
             co_signers: ext.co_signers,
             required_signatures: ext.required_signatures,
             signatures: ext.signatures,
@@ -1089,6 +1104,7 @@ impl Invoice {
             InvoiceStatus::Refunded => 2,
             InvoiceStatus::Cancelled => 3,
             InvoiceStatus::Expired => 4,
+            InvoiceStatus::Disputed => 5,
         };
         bytes.push_back(status_byte);
 
@@ -1124,6 +1140,7 @@ impl Invoice {
             2 => InvoiceStatus::Refunded,
             3 => InvoiceStatus::Cancelled,
             4 => InvoiceStatus::Expired,
+            5 => InvoiceStatus::Disputed,
             _ => InvoiceStatus::Pending,
         };
 
@@ -1250,6 +1267,7 @@ impl Invoice {
             // original overfunding semantics exactly.
             overfunding_policy: OverfundingPolicy::Cap,
             predecessor_id: None,
+            metadata_hash: None,
             contributor_allowlist: None,
             early_bird_window_ledgers: 0,
             early_bird_fee_bps: 0,
@@ -1301,6 +1319,10 @@ pub enum DisputeStatus {
 pub enum DisputeOutcome {
     Approved,
     Refunded,
+    /// Admin resolves the dispute and releases funds normally.
+    Release,
+    /// Admin resolves the dispute and refunds all contributors.
+    Refund,
 }
 
 /// Issue #325: On-chain record of a payer-initiated dispute.
@@ -1310,6 +1332,10 @@ pub struct DisputeRecord {
     pub reason_hash: BytesN<32>,
     pub raised_at: u32,
     pub status: DisputeStatus,
+    /// Admin-configurable timeout in ledgers for auto-resolution.
+    pub dispute_timeout_ledgers: u32,
+    /// Ledger sequence when the dispute was opened (for timeout calculation).
+    pub dispute_opened_ledger: u32,
 }
 
 /// Issue #326: Protocol fee configuration set by admin.
@@ -1399,6 +1425,7 @@ impl InvoiceStatus {
             InvoiceStatus::Refunded => 2,
             InvoiceStatus::Cancelled => 3,
             InvoiceStatus::Expired => 4,
+            InvoiceStatus::Disputed => 5,
         }
     }
 
@@ -1409,6 +1436,7 @@ impl InvoiceStatus {
             2 => InvoiceStatus::Refunded,
             3 => InvoiceStatus::Cancelled,
             4 => InvoiceStatus::Expired,
+            5 => InvoiceStatus::Disputed,
             _ => InvoiceStatus::Pending,
         }
     }
@@ -1507,4 +1535,14 @@ pub struct ContributionResult {
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub struct RecipientAddress(pub u64, pub Address);
+
+/// Per-recipient share tracking with optional lock for disputed recipients.
+/// When `locked` is true, the recipient's share is skipped during release
+/// and accumulated under `UnreleasedFunds(invoice_id)` until unlocked.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct RecipientShare {
+    pub address: Address,
+    pub locked: bool,
+}
 
