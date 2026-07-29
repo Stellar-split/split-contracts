@@ -31,3 +31,52 @@ jobs:
 
       - name: Run tests
         run: cargo test --workspace
+
+      - name: Build WASM and check size
+        run: |
+          cargo build --target wasm32-unknown-unknown --release --package split
+          WASM_SIZE=$(stat -c%s target/wasm32-unknown-unknown/release/split.wasm)
+          echo "WASM size: $WASM_SIZE bytes"
+          if [ $WASM_SIZE -gt 65536 ]; then
+            echo "ERROR: WASM size ($WASM_SIZE bytes) exceeds 64 KB threshold"
+            exit 1
+          fi
+          echo "WASM size check passed ($WASM_SIZE bytes <= 65536 bytes)"
+
+      - name: Storage key snapshot test
+        run: cargo test -p split storage_snapshot
+
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install nightly Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            fuzz/target
+          key: ${{ runner.os }}-cargo-fuzz-${{ hashFiles('fuzz/Cargo.toml') }}
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz
+
+      - name: Fuzz create_invoice (60s)
+        run: cargo fuzz run fuzz_create_invoice -- -max_total_time=60
+
+      - name: Fuzz pay (60s)
+        run: cargo fuzz run fuzz_pay -- -max_total_time=60
+
+      - name: Fuzz release (60s)
+        run: cargo fuzz run fuzz_release -- -max_total_time=60
+
+      - name: Fuzz refund (60s)
+        run: cargo fuzz run fuzz_refund -- -max_total_time=60
+
+      - name: Fuzz sequence (60s)
+        run: cargo fuzz run fuzz_sequence -- -max_total_time=60

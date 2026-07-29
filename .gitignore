@@ -1,8 +1,13 @@
+# Build output
 target/
-Cargo.lock
 *.wasm
+
+# Environment files
 .env
 .env.local
+.env.*.local
+
+# OS files
 .DS_Store
 Thumbs.db
 .vscode/
@@ -16,3 +21,47 @@ snapshots/
 *.swp
 *.swo
 *~
+
+# Editor/IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Test snapshots
+**/__snapshots__/
+*.snap
+**/test_snapshots/
+*.snapshot
+
+# Stellar CLI
+.stellar/
+identity/
+.stellar-cli/
+
+# Logs
+*.log
+*.log.*
+
+# Coverage reports
+lcov.info
+tarpaulin-report.html
+coverage/
+.nyc_output/
+
+# Temporary files
+*.tmp
+*.bak
+*.orig
+
+# Node / JS tooling (if any frontend tooling is added)
+node_modules/
+dist/
+.pnp
+.pnp.js
+.yarn/
+
+# Rust / Cargo artefacts not caught by target/
+**/*.rs.bk
+Cargo.lock.bak
