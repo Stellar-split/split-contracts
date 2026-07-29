@@ -565,7 +565,7 @@ pub fn creator_stats_updated(
 ///   - `ledger`: the ledger sequence number at transition time
 ///
 /// To build a per-invoice state machine, collect all "st_chg" events for a given
-/// `invoice_id` ordered by ledger, then replay `from → to` pairs.
+/// `invoice_id` ordered by ledger, then replay `from -> to` pairs.
 ///
 /// Topics: (split, st_chg, invoice_id)
 /// Data: (from_status, to_status, actor, ledger)
@@ -583,6 +583,7 @@ pub fn invoice_state_changed(
         Some(InvoiceStatus::Refunded) => symbol_short!("refunded"),
         Some(InvoiceStatus::Expired) => symbol_short!("expired"),
         Some(InvoiceStatus::Cancelled) => symbol_short!("cancld"),
+        Some(InvoiceStatus::PartiallyReleased) => symbol_short!("pt_rel"),
     };
     let to_sym = match to_status {
         InvoiceStatus::Pending => symbol_short!("pending"),
@@ -590,6 +591,7 @@ pub fn invoice_state_changed(
         InvoiceStatus::Refunded => symbol_short!("refunded"),
         InvoiceStatus::Expired => symbol_short!("expired"),
         InvoiceStatus::Cancelled => symbol_short!("cancld"),
+        InvoiceStatus::PartiallyReleased => symbol_short!("pt_rel"),
     };
     env.events().publish(
         (symbol_short!("split"), symbol_short!("st_chg"), invoice_id),
@@ -903,14 +905,17 @@ pub fn rep_updated(env: &Env, address: &Address, score: &RepScore) {
     );
 }
 
-pub fn payout_failed(env: &Env, invoice_id: u64, recipient: &Address, amount: i128) {
+/// Issue #504: Emitted when a payout transfer fails for a recipient during batch release.
+/// Topics: (split, PayoutFailed, invoice_id)
+/// Data: (recipient, amount, reason)
+pub fn payout_failed(env: &Env, invoice_id: u64, recipient: &Address, amount: i128, reason: &String) {
     env.events().publish(
         (
             symbol_short!("split"),
             soroban_sdk::Symbol::new(env, "PayoutFailed"),
             invoice_id,
         ),
-        (recipient.clone(), amount),
+        (recipient.clone(), amount, reason.clone()),
     );
 }
 
@@ -1136,6 +1141,7 @@ pub fn trusted_caller_removed(env: &Env, caller: &Address) {
         (),
     );
 }
+
 /// RBAC: Emitted when an admin grants a role to an address.
 /// Topics: (split, role_grt, grantee)
 /// Data: (role_discriminant, admin)
@@ -1163,6 +1169,7 @@ pub fn role_revoked(env: &Env, grantee: &Address, role_discriminant: u32, admin:
         (role_discriminant, admin.clone()),
     );
 }
+
 /// Issue #474: Emitted when a creator cancels an open invoice and all contributors are refunded.
 /// Topics: (split, inv_cncl, invoice_id)
 /// Data: (creator, total_refunded, ledger)
@@ -1199,6 +1206,17 @@ pub fn admin_action_approved(
     action_hash: &BytesN<32>,
     approver: &Address,
     approval_count: u32,
+) {
+    env.events().publish(
+        (
+            symbol_short!("split"),
+            symbol_short!("adm_appr"),
+            action_hash.clone(),
+        ),
+        (approver.clone(), approval_count, env.ledger().sequence()),
+    );
+}
+
 /// Issue #470: Emitted when an overpayment results in a partial refund.
 /// Topics: (split, RefundIssued, invoice_id)
 /// Data: (payer, refund_amount)
@@ -1225,10 +1243,10 @@ pub fn recipient_address_rotated(
     env.events().publish(
         (
             symbol_short!("split"),
-            symbol_short!("adm_appr"),
-            action_hash.clone(),
+            soroban_sdk::Symbol::new(env, "RecipientAddressRotated"),
+            invoice_id,
         ),
-        (approver.clone(), approval_count, env.ledger().sequence()),
+        (old_address.clone(), new_address.clone()),
     );
 }
 
@@ -1287,10 +1305,3 @@ pub fn invoice_from_template(env: &Env, invoice_id: u64, creator: &Address, temp
         (creator.clone(), template_id, env.ledger().sequence()),
     );
 }
-            soroban_sdk::Symbol::new(env, "RecipientAddressRotated"),
-            invoice_id,
-        ),
-        (old_address.clone(), new_address.clone()),
-    );
-}
-

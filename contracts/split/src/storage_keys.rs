@@ -181,13 +181,13 @@ pub fn creator_volume_cap_key(creator: &Address) -> (Symbol, Address) { (symbol_
 /// Creator volume used — persistent storage.
 pub fn creator_volume_used_key(creator: &Address) -> (Symbol, Address) { (symbol_short!("cr_v_use"), creator.clone()) }
 /// Creator self-imposed spending limit — persistent storage.
-pub fn creator_self_limit_key(creator: &Address) -> (Symbol, Address) { (symbol_short!("cr_slf_lim"), creator.clone()) }
+pub fn creator_self_limit_key(creator: &Address) -> (Symbol, Address) { (symbol_short!("cr_slf_li"), creator.clone()) }
 /// Creator self-limit daily usage — persistent storage.
-pub fn creator_self_used_key(creator: &Address) -> (Symbol, Address) { (symbol_short!("cr_slf_use"), creator.clone()) }
+pub fn creator_self_used_key(creator: &Address) -> (Symbol, Address) { (symbol_short!("cr_slf_us"), creator.clone()) }
 /// Creator self-limit last reset day — persistent storage.
-pub fn creator_self_limit_day_key(creator: &Address) -> (Symbol, Address) { (symbol_short!("cr_slf_day"), creator.clone()) }
+pub fn creator_self_limit_day_key(creator: &Address) -> (Symbol, Address) { (symbol_short!("cr_slf_dy"), creator.clone()) }
 /// Creator self-limit pending raise request — persistent storage.
-pub fn creator_self_limit_raise_key(creator: &Address) -> (Symbol, Address) { (symbol_short!("cr_slf_rse"), creator.clone()) }
+pub fn creator_self_limit_raise_key(creator: &Address) -> (Symbol, Address) { (symbol_short!("cr_slf_rs"), creator.clone()) }
 
 // ---------------------------------------------------------------------------
 // Issue #332: Recipient payout optimization

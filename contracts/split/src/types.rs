@@ -137,6 +137,8 @@ pub enum InvoiceStatus {
     Refunded,
     Expired,
     Cancelled,
+    /// Issue #504: Some payouts succeeded but others failed during batch release.
+    PartiallyReleased,
 }
 
 /// Issue #449: Multi-phase invoice state machine.
@@ -617,7 +619,7 @@ pub struct PenaltyTier {
 /// Issue #475: Multi-signature admin set — replaces the single-admin model.
 /// Sensitive operations require `threshold`-of-N signers to approve.
 #[contracttype]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct AdminSet {
     /// All recognised admin signers.
     pub signers: Vec<Address>,
@@ -1089,6 +1091,7 @@ impl Invoice {
             InvoiceStatus::Refunded => 2,
             InvoiceStatus::Cancelled => 3,
             InvoiceStatus::Expired => 4,
+            InvoiceStatus::PartiallyReleased => 5,
         };
         bytes.push_back(status_byte);
 
@@ -1124,6 +1127,7 @@ impl Invoice {
             2 => InvoiceStatus::Refunded,
             3 => InvoiceStatus::Cancelled,
             4 => InvoiceStatus::Expired,
+            5 => InvoiceStatus::PartiallyReleased,
             _ => InvoiceStatus::Pending,
         };
 
@@ -1399,6 +1403,7 @@ impl InvoiceStatus {
             InvoiceStatus::Refunded => 2,
             InvoiceStatus::Cancelled => 3,
             InvoiceStatus::Expired => 4,
+            InvoiceStatus::PartiallyReleased => 5,
         }
     }
 
@@ -1409,6 +1414,7 @@ impl InvoiceStatus {
             2 => InvoiceStatus::Refunded,
             3 => InvoiceStatus::Cancelled,
             4 => InvoiceStatus::Expired,
+            5 => InvoiceStatus::PartiallyReleased,
             _ => InvoiceStatus::Pending,
         }
     }
