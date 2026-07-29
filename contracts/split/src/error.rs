@@ -74,6 +74,10 @@ pub enum ContractError {
     ContributorNotAllowed = 42,
     /// Issue #473: Token is not in the allowed tokens list.
     UnauthorisedToken = 43,
-    /// Issue #504: Payout transfer failed for a recipient (frozen account, etc.).
-    PayoutTransferFailed = 44,
+    /// Issue #456: Invoice dependency chain - predecessor invoice is not yet Released.
+    DependencyNotMet = 44,
+    /// Issue #456: Circular dependency detected in invoice dependency chain.
+    CircularDependency = 45,
+    /// Issue #453: Source contract has exceeded its call rate limit within the current window.
+    SourceContractRateLimited = 46,
 }
