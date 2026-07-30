@@ -92,6 +92,57 @@ pub fn distribute_with_remainder(
 }
 
 // ---------------------------------------------------------------------------
+// Issue #561: Canonical payout ordering
+// ---------------------------------------------------------------------------
+
+/// Sort recipients by their Stellar address byte representation (lexicographic
+/// order over `Address`'s inner `BytesN<32>`).
+///
+/// This guarantees deterministic, canonical payout ordering regardless of the
+/// order in which recipients were supplied at invoice creation.
+///
+/// # Arguments
+/// * `env`        – Soroban environment
+/// * `recipients` – mutable list of recipient addresses to sort in-place
+pub fn sort_recipients(env: &Env, recipients: &mut Vec<Address>) {
+    let n = recipients.len() as usize;
+    if n <= 1 {
+        return;
+    }
+
+    // Build byte representations for comparison.
+    let mut bytes_vec: Vec<(BytesN<32>, usize)> = Vec::new(env);
+    for i in 0..n {
+        let addr = recipients.get(i as u32).unwrap();
+        let bytes = addr.to_bytes();
+        bytes_vec.push_back((bytes, i));
+    }
+
+    // Insertion sort by byte representation (lexicographic).
+    for i in 1..n {
+        let key = bytes_vec.get(i).unwrap();
+        let mut j = i;
+        while j > 0 {
+            let prev = bytes_vec.get(j - 1).unwrap();
+            if prev.0 <= key.0 {
+                break;
+            }
+            bytes_vec.set(j, bytes_vec.get(j - 1).unwrap());
+            j -= 1;
+        }
+        bytes_vec.set(j, key.clone());
+    }
+
+    // Reorder recipients according to sorted indices.
+    let mut sorted = Vec::new(env);
+    for i in 0..n {
+        let (_, original_idx) = bytes_vec.get(i).unwrap();
+        sorted.push_back(recipients.get(original_idx as u32).unwrap());
+    }
+    *recipients = sorted;
+}
+
+// ---------------------------------------------------------------------------
 // Unit tests
 // ---------------------------------------------------------------------------
 

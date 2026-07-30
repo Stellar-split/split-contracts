@@ -80,4 +80,12 @@ pub enum ContractError {
     CircularDependency = 45,
     /// Issue #453: Source contract has exceeded its call rate limit within the current window.
     SourceContractRateLimited = 46,
+    /// Issue #559: creator fee bps + platform fee bps exceeds cap of 10000.
+    FeeSumExceedsCap = 47,
+    /// Issue #562: operation not allowed on a soft-deleted invoice.
+    InvoiceDeleted = 48,
+    /// Issue #562: invoice has unclaimed funds and cannot be soft-deleted.
+    FundsUnclaimed = 49,
+    /// Issue #562: attempted to read tombstone for an invoice that is not deleted.
+    NotDeleted = 50,
 }

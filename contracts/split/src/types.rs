@@ -140,9 +140,15 @@ pub enum InvoiceStatus {
     Pending,
     Released,
     Refunded,
+    Expired,
+    Cancelled,
+    Disputed,
+    PartiallyReleased,
     /// Alias for Released used as the parent-finalisation gate (#522).
     /// An invoice is considered Finalised once it has been Released.
     Finalised,
+    /// Soft-deleted invoice — tombstone record preserved for audit trail.
+    Deleted,
 }
 
 // ---------------------------------------------------------------------------
@@ -150,9 +156,14 @@ pub enum InvoiceStatus {
 // ---------------------------------------------------------------------------
 
 /// A single payment made toward an invoice.
-    Expired,
-    Cancelled,
-    Disputed,
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct Payment {
+    pub payer: Address,
+    pub amount: i128,
+    pub tip: i128,
+    pub attestation_hash: Option<BytesN<32>>,
+    pub donate_on_failure: bool,
 }
 
 /// Issue #449: Multi-phase invoice state machine.
@@ -305,7 +316,6 @@ pub struct InvoiceTemplate {
     pub status: InvoiceStatus,
     /// All payments made toward this invoice.
     pub payments: Vec<Payment>,
-}
     /// Optional whitelist of addresses allowed to pay this invoice.
     /// When None, any address may pay.
     pub allowed_payers: Option<Vec<Address>>,
@@ -497,6 +507,9 @@ pub struct InvoiceOptions2 {
     /// within `early_bird_window_ledgers` of invoice creation. Must be ≤ the
     /// standard platform fee in effect at creation time.
     pub early_bird_fee_bps: u32,
+    /// Issue #559: creator-declared fee in basis points (0–10 000).
+    /// Deducted from gross collected funds before recipient payouts.
+    pub creator_fee_bps: u32,
 }
 
 /// Legacy invoice layout used by stored invoices created before the `version`
@@ -862,6 +875,9 @@ pub struct Invoice {
     /// Issue #489: total platform-fee discount accrued from early-bird
     /// contributions so far; deducted from the platform fee at release.
     pub early_bird_fee_credit: i128,
+    /// Issue #559: creator-declared fee in basis points (0–10 000).
+    /// Deducted from gross collected funds before recipient payouts.
+    pub creator_fee_bps: u32,
 }
 
 impl Invoice {
@@ -970,6 +986,7 @@ impl Invoice {
                 early_bird_window_ledgers: self.early_bird_window_ledgers,
                 early_bird_fee_bps: self.early_bird_fee_bps,
                 early_bird_fee_credit: self.early_bird_fee_credit,
+                creator_fee_bps: self.creator_fee_bps,
             },
         )
     }
@@ -1074,6 +1091,7 @@ impl Invoice {
             early_bird_window_ledgers: ext2.early_bird_window_ledgers,
             early_bird_fee_bps: ext2.early_bird_fee_bps,
             early_bird_fee_credit: ext2.early_bird_fee_credit,
+            creator_fee_bps: ext2.creator_fee_bps,
         }
     }
 }
@@ -1159,6 +1177,9 @@ impl Invoice {
             InvoiceStatus::Cancelled => 3,
             InvoiceStatus::Expired => 4,
             InvoiceStatus::Disputed => 5,
+            InvoiceStatus::PartiallyReleased => 6,
+            InvoiceStatus::Finalised => 7,
+            InvoiceStatus::Deleted => 8,
         };
         bytes.push_back(status_byte);
 
@@ -1195,6 +1216,9 @@ impl Invoice {
             3 => InvoiceStatus::Cancelled,
             4 => InvoiceStatus::Expired,
             5 => InvoiceStatus::Disputed,
+            6 => InvoiceStatus::PartiallyReleased,
+            7 => InvoiceStatus::Finalised,
+            8 => InvoiceStatus::Deleted,
             _ => InvoiceStatus::Pending,
         };
 
@@ -1326,6 +1350,7 @@ impl Invoice {
             early_bird_window_ledgers: 0,
             early_bird_fee_bps: 0,
             early_bird_fee_credit: 0,
+            creator_fee_bps: 0,
         }
     }
 }
@@ -1347,6 +1372,15 @@ pub struct InvoiceExt3 {
     pub metadata_hash: Option<BytesN<32>>,
     /// Issue #330: recipients whose share has already been transferred.
     pub paid_recipients: Vec<Address>,
+}
+
+/// Issue #562: Tombstone record for soft-deleted invoices.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct Tombstone {
+    pub invoice_id: u64,
+    pub deleted_at_ledger: u32,
+    pub deleted_by: Address,
 }
 
 /// Issue #298: Result type returned by simulate_release().

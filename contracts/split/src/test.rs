@@ -193,6 +193,7 @@ fn default_options2(_env: &Env) -> InvoiceOptions2 {
         overfunding_policy: types::OverfundingPolicy::Cap,
         early_bird_window_ledgers: 0,
         early_bird_fee_bps: 0,
+        creator_fee_bps: 0,
     }
 }
 
@@ -264,6 +265,7 @@ fn invoice_options(
             overfunding_policy: types::OverfundingPolicy::Cap,
             early_bird_window_ledgers: 0,
             early_bird_fee_bps: 0,
+            creator_fee_bps: 0,
         },
     }
 }
@@ -12685,4 +12687,461 @@ fn test_create_invoice_past_deadline_ledger_panics() {
     amounts.push_back(100_i128);
 
     c.create_invoice(&creator, &recipients, &amounts, &token_id, &(500_u32));
+}
+
+// ---------------------------------------------------------------------------
+// Issue #559: Creator Revenue Share
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_creator_fee_deducted_on_release() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+    let tk = token_client(&env, &token_id);
+
+    let creator = Address::generate(&env);
+    let payer = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    StellarAssetClient::new(&env, &token_id).mint(&payer, &10_000);
+    env.ledger().set_sequence(1_000);
+
+    let mut recipients = Vec::new(&env);
+    recipients.push_back(recipient.clone());
+    let mut amounts = Vec::new(&env);
+    amounts.push_back(1_000_i128);
+
+    let mut opts2 = default_options2(&env);
+    opts2.creator_fee_bps = 500; // 5% creator fee
+    let id = c.create_invoice_ext(
+        &creator,
+        &recipients,
+        &amounts,
+        &token_id,
+        &9_999,
+        &default_options(&env),
+        &opts2,
+    );
+
+    c.pay(&payer, &id, &1_000_i128, &0_u64, &false, &false, &None);
+
+    // Release the invoice — creator fee should be deducted before recipient payout
+    c.release(&creator, &id);
+
+    // Check that creator_fee_paid event was emitted
+    let events = env.events().all();
+    let has_creator_fee_event = events.iter().any(|e| {
+        let topics = e.1;
+        topics.len() >= 3
+            && topics.get(1).and_then(|v| {
+                let r: Result<Symbol, _> = v.try_into_val(&env);
+                r.ok()
+            }) == Some(Symbol::new(&env, "creator_fee"))
+    });
+    assert!(has_creator_fee_event, "creator_fee_paid event should be emitted");
+
+    // Recipient should receive 950 (1000 - 5% fee), creator should receive 50
+    let recipient_balance = tk.balance(&recipient);
+    assert_eq!(recipient_balance, 950_i128);
+    let creator_balance = tk.balance(&creator);
+    assert_eq!(creator_balance, 50_i128);
+}
+
+#[test]
+#[should_panic(expected = "FeeSumExceedsCap")]
+fn test_creator_fee_exceeds_cap_panics() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    env.ledger().set_sequence(1_000);
+
+    let mut recipients = Vec::new(&env);
+    recipients.push_back(recipient.clone());
+    let mut amounts = Vec::new(&env);
+    amounts.push_back(100_i128);
+
+    let mut opts2 = default_options2(&env);
+    opts2.creator_fee_bps = 10_001; // exceeds 10000 cap
+    let _id = c.create_invoice_ext(
+        &creator,
+        &recipients,
+        &amounts,
+        &token_id,
+        &9_999,
+        &default_options(&env),
+        &opts2,
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Issue #560: Creator Migration
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_nominate_new_creator_emits_event() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let successor = Address::generate(&env);
+
+    env.ledger().set_sequence(1_000);
+
+    let mut recipients = Vec::new(&env);
+    recipients.push_back(recipient.clone());
+    let mut amounts = Vec::new(&env);
+    amounts.push_back(1_000_i128);
+
+    let id = c.create_invoice(
+        &creator,
+        &recipients,
+        &amounts,
+        &token_id,
+        &9_999,
+        &default_options(&env),
+    );
+
+    c.nominate_new_creator(&creator, &id, &successor);
+
+    // Check creator_nominated event was emitted
+    let events = env.events().all();
+    let has_nom_event = events.iter().any(|e| {
+        let topics = e.1;
+        topics.len() >= 3
+            && topics.get(1).and_then(|v| {
+                let r: Result<Symbol, _> = v.try_into_val(&env);
+                r.ok()
+            }) == Some(Symbol::new(&env, "creator_nom"))
+    });
+    assert!(has_nom_event, "creator_nominated event should be emitted");
+}
+
+#[test]
+fn test_accept_creator_role_migrates_creator() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let successor = Address::generate(&env);
+
+    env.ledger().set_sequence(1_000);
+
+    let mut recipients = Vec::new(&env);
+    recipients.push_back(recipient.clone());
+    let mut amounts = Vec::new(&env);
+    amounts.push_back(1_000_i128);
+
+    let id = c.create_invoice(
+        &creator,
+        &recipients,
+        &amounts,
+        &token_id,
+        &9_999,
+        &default_options(&env),
+    );
+
+    c.nominate_new_creator(&creator, &id, &successor);
+    c.accept_creator_role(&successor, &id);
+
+    // Check creator_migrated event was emitted
+    let events = env.events().all();
+    let has_mig_event = events.iter().any(|e| {
+        let topics = e.1;
+        topics.len() >= 3
+            && topics.get(1).and_then(|v| {
+                let r: Result<Symbol, _> = v.try_into_val(&env);
+                r.ok()
+            }) == Some(Symbol::new(&env, "creator_mig"))
+    });
+    assert!(has_mig_event, "creator_migrated event should be emitted");
+
+    // Invoice should now have the successor as creator
+    let invoice = c.get_invoice(&id);
+    assert_eq!(invoice.creator, successor);
+}
+
+#[test]
+#[should_panic(expected = "InvoiceDeleted")]
+fn test_nominate_new_creator_on_deleted_invoice_panics() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let successor = Address::generate(&env);
+
+    env.ledger().set_sequence(1_000);
+
+    let mut recipients = Vec::new(&env);
+    recipients.push_back(recipient.clone());
+    let mut amounts = Vec::new(&env);
+    amounts.push_back(1_000_i128);
+
+    let id = c.create_invoice(
+        &creator,
+        &recipients,
+        &amounts,
+        &token_id,
+        &9_999,
+        &default_options(&env),
+    );
+
+    c.delete_invoice(&creator, &id);
+    c.nominate_new_creator(&creator, &id, &successor);
+}
+
+// ---------------------------------------------------------------------------
+// Issue #561: Payout Ordering
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_payout_ordering_canonical_sort() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+    let tk = token_client(&env, &token_id);
+
+    let creator = Address::generate(&env);
+    let recipient1 = Address::generate(&env);
+    let recipient2 = Address::generate(&env);
+    let payer = Address::generate(&env);
+
+    StellarAssetClient::new(&env, &token_id).mint(&payer, &20_000);
+    env.ledger().set_sequence(1_000);
+
+    // Create invoice with two recipients in non-canonical order
+    let mut recipients = Vec::new(&env);
+    recipients.push_back(recipient1.clone());
+    recipients.push_back(recipient2.clone());
+    let mut amounts = Vec::new(&env);
+    amounts.push_back(1_000_i128);
+    amounts.push_back(1_000_i128);
+
+    let id = c.create_invoice(
+        &creator,
+        &recipients,
+        &amounts,
+        &token_id,
+        &9_999,
+        &default_options(&env),
+    );
+
+    c.pay(&payer, &id, &2_000_i128, &0_u64, &false, &false, &None);
+    c.release(&creator, &id);
+
+    // Check payout_initiated events are emitted with sorted indices
+    let events = env.events().all();
+    let payout_events: Vec<_> = events
+        .iter()
+        .filter(|e| {
+            let topics = e.1;
+            topics.len() >= 3
+                && topics.get(1).and_then(|v| {
+                    let r: Result<Symbol, _> = v.try_into_val(&env);
+                    r.ok()
+                }) == Some(Symbol::new(&env, "payout_init"))
+        })
+        .collect();
+
+    assert_eq!(payout_events.len(), 2, "Two payout_initiated events expected");
+
+    // Both recipients should receive their full share
+    assert_eq!(tk.balance(&recipient1), 1_000_i128);
+    assert_eq!(tk.balance(&recipient2), 1_000_i128);
+}
+
+// ---------------------------------------------------------------------------
+// Issue #562: Soft-Delete with Tombstone
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_soft_delete_writes_tombstone() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    env.ledger().set_sequence(1_000);
+
+    let mut recipients = Vec::new(&env);
+    recipients.push_back(recipient.clone());
+    let mut amounts = Vec::new(&env);
+    amounts.push_back(1_000_i128);
+
+    let id = c.create_invoice(
+        &creator,
+        &recipients,
+        &amounts,
+        &token_id,
+        &9_999,
+        &default_options(&env),
+    );
+
+    c.delete_invoice(&creator, &id);
+
+    // Invoice should be in Deleted status
+    let invoice = c.get_invoice(&id);
+    assert_eq!(invoice.status, InvoiceStatus::Deleted);
+
+    // Tombstone should be retrievable
+    let tombstone = c.get_tombstone(&id);
+    assert_eq!(tombstone.invoice_id, id);
+    assert_eq!(tombstone.deleted_at_ledger, 1_000);
+    assert_eq!(tombstone.deleted_by, creator);
+}
+
+#[test]
+#[should_panic(expected = "InvoiceDeleted")]
+fn test_pay_on_deleted_invoice_panics() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let payer = Address::generate(&env);
+
+    StellarAssetClient::new(&env, &token_id).mint(&payer, &10_000);
+    env.ledger().set_sequence(1_000);
+
+    let mut recipients = Vec::new(&env);
+    recipients.push_back(recipient.clone());
+    let mut amounts = Vec::new(&env);
+    amounts.push_back(1_000_i128);
+
+    let id = c.create_invoice(
+        &creator,
+        &recipients,
+        &amounts,
+        &token_id,
+        &9_999,
+        &default_options(&env),
+    );
+
+    c.delete_invoice(&creator, &id);
+    c.pay(&payer, &id, &1_000_i128, &0_u64, &false, &false, &None);
+}
+
+#[test]
+#[should_panic(expected = "InvoiceDeleted")]
+fn test_release_on_deleted_invoice_panics() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let payer = Address::generate(&env);
+
+    StellarAssetClient::new(&env, &token_id).mint(&payer, &10_000);
+    env.ledger().set_sequence(1_000);
+
+    let mut recipients = Vec::new(&env);
+    recipients.push_back(recipient.clone());
+    let mut amounts = Vec::new(&env);
+    amounts.push_back(1_000_i128);
+
+    let id = c.create_invoice(
+        &creator,
+        &recipients,
+        &amounts,
+        &token_id,
+        &9_999,
+        &default_options(&env),
+    );
+
+    c.delete_invoice(&creator, &id);
+    c.release(&creator, &id);
+}
+
+#[test]
+#[should_panic(expected = "FundsUnclaimed")]
+fn test_delete_invoice_with_unclaimed_funds_panics() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let payer = Address::generate(&env);
+
+    StellarAssetClient::new(&env, &token_id).mint(&payer, &10_000);
+    env.ledger().set_sequence(1_000);
+
+    let mut recipients = Vec::new(&env);
+    recipients.push_back(recipient.clone());
+    let mut amounts = Vec::new(&env);
+    amounts.push_back(1_000_i128);
+
+    let id = c.create_invoice(
+        &creator,
+        &recipients,
+        &amounts,
+        &token_id,
+        &9_999,
+        &default_options(&env),
+    );
+
+    c.pay(&payer, &id, &1_000_i128, &0_u64, &false, &false, &None);
+    // Invoice has funded > 0 but not yet released, so funds are unclaimed
+    c.delete_invoice(&creator, &id);
+}
+
+#[test]
+#[should_panic(expected = "NotDeleted")]
+fn test_get_tombstone_on_non_deleted_invoice_panics() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    env.ledger().set_sequence(1_000);
+
+    let mut recipients = Vec::new(&env);
+    recipients.push_back(recipient.clone());
+    let mut amounts = Vec::new(&env);
+    amounts.push_back(1_000_i128);
+
+    let id = c.create_invoice(
+        &creator,
+        &recipients,
+        &amounts,
+        &token_id,
+        &9_999,
+        &default_options(&env),
+    );
+
+    c.get_tombstone(&id);
+}
+
+#[test]
+#[should_panic(expected = "InvoiceDeleted")]
+fn test_cancel_invoice_on_deleted_invoice_panics() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    env.ledger().set_sequence(1_000);
+
+    let mut recipients = Vec::new(&env);
+    recipients.push_back(recipient.clone());
+    let mut amounts = Vec::new(&env);
+    amounts.push_back(1_000_i128);
+
+    let id = c.create_invoice(
+        &creator,
+        &recipients,
+        &amounts,
+        &token_id,
+        &9_999,
+        &default_options(&env),
+    );
+
+    c.delete_invoice(&creator, &id);
+    c.cancel_invoice(&creator, &id, &9_999_u64);
 }

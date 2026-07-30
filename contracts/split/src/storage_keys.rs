@@ -379,3 +379,33 @@ pub fn failed_payouts_key(invoice_id: u64) -> (Symbol, u64) {
     (symbol_short!("fail_pay"), invoice_id)
 }
 
+// ---------------------------------------------------------------------------
+// Issue #559: Creator Revenue Share
+// ---------------------------------------------------------------------------
+
+/// Creator fee in basis points stored at invoice creation — persistent storage.
+/// Key: (Symbol, u64) → u32
+pub fn creator_fee_bps_key(invoice_id: u64) -> (Symbol, u64) {
+    (symbol_short!("cr_fee_bps"), invoice_id)
+}
+
+// ---------------------------------------------------------------------------
+// Issue #560: Creator Migration
+// ---------------------------------------------------------------------------
+
+/// Pending successor creator address — persistent storage.
+/// Key: (Symbol, u64) → Address
+pub fn pending_creator_key(invoice_id: u64) -> (Symbol, u64) {
+    (symbol_short!("pend_cr"), invoice_id)
+}
+
+// ---------------------------------------------------------------------------
+// Issue #562: Soft-Delete with Tombstone
+// ---------------------------------------------------------------------------
+
+/// Tombstone record for soft-deleted invoices — persistent storage.
+/// Key: (Symbol, u64) → Tombstone
+pub fn tombstone_key(invoice_id: u64) -> (Symbol, u64) {
+    (symbol_short!("tombstone"), invoice_id)
+}
+
