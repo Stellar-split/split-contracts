@@ -1547,39 +1547,63 @@ pub fn batch_invoice_created(env: &Env, ids: &Vec<u64>) {
 }
 
 // ---------------------------------------------------------------------------
-// #557 — Pre-Funding Split Ratio Lock
+// Issue #559: Creator Revenue Share
 // ---------------------------------------------------------------------------
 
-/// Emitted exactly once — on the first `pay()` call that records a
-/// contribution — signalling that the invoice's split ratios are now frozen
-/// and may no longer be mutated.
+/// Emitted when the creator fee is deducted during invoice release.
 ///
-/// Topics: `("spl_lk", invoice_id)`
-/// Data:   `(locked_at_ledger, total_contributed)`
-pub fn split_ratio_locked(env: &Env, invoice_id: u64, locked_at_ledger: u32, total_contributed: i128) {
+/// Topics: `("creator_fee", invoice_id)`
+/// Data:   `(creator, fee_amount)`
+pub fn creator_fee_paid(env: &Env, invoice_id: u64, creator: &Address, fee_amount: i128) {
     env.events().publish(
-        (symbol_short!("spl_lk"), invoice_id),
-        (locked_at_ledger, total_contributed),
+        (symbol_short!("creator_fee"), invoice_id),
+        (creator.clone(), fee_amount),
     );
 }
 
 // ---------------------------------------------------------------------------
-// #558 — Trustline Pre-Validation
+// Issue #560: Creator Migration
 // ---------------------------------------------------------------------------
 
-/// Emitted when a recipient is found to be missing a trustline for the
-/// payment token during invoice activation.
+/// Emitted when a new creator is nominated for an invoice.
 ///
-/// Topics: `("no_trust", invoice_id)`
-/// Data:   `(recipient, token)`
-pub fn recipient_missing_trustline(
+/// Topics: `("creator_nom", invoice_id)`
+/// Data:   `(successor)`
+pub fn creator_nominated(env: &Env, invoice_id: u64, successor: &Address) {
+    env.events().publish(
+        (symbol_short!("creator_nom"), invoice_id),
+        successor.clone(),
+    );
+}
+
+/// Emitted when a creator role is accepted and the creator is migrated.
+///
+/// Topics: `("creator_mig", invoice_id)`
+/// Data:   `(new_creator)`
+pub fn creator_migrated(env: &Env, invoice_id: u64, new_creator: &Address) {
+    env.events().publish(
+        (symbol_short!("creator_mig"), invoice_id),
+        new_creator.clone(),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Issue #561: Payout Ordering
+// ---------------------------------------------------------------------------
+
+/// Emitted when a payout is initiated for a recipient.
+///
+/// Topics: `("payout_init", invoice_id, recipient_index)`
+/// Data:   `(recipient, amount)`
+pub fn payout_initiated(
     env: &Env,
     invoice_id: u64,
+    recipient_index: u32,
     recipient: &Address,
-    token: &Address,
+    amount: i128,
 ) {
     env.events().publish(
-        (symbol_short!("no_trust"), invoice_id),
-        (recipient.clone(), token.clone()),
+        (symbol_short!("payout_init"), invoice_id, recipient_index),
+        (recipient.clone(), amount),
     );
 }

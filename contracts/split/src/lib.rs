@@ -158,6 +158,15 @@ fn creation_fee_key() -> Symbol {
 fn platform_fee_bps_key() -> Symbol {
     symbol_short!("plat_fee")
 }
+fn creator_fee_bps_key(invoice_id: u64) -> (Symbol, u64) {
+    (symbol_short!("cr_fee_bps"), invoice_id)
+}
+fn pending_creator_key(invoice_id: u64) -> (Symbol, u64) {
+    (symbol_short!("pend_cr"), invoice_id)
+}
+fn tombstone_key(invoice_id: u64) -> (Symbol, u64) {
+    (symbol_short!("tombstone"), invoice_id)
+}
 fn fallback_escrow_key(invoice_id: u64, recipient: &Address) -> (Symbol, u64, Address) {
     (symbol_short!("fb_esc"), invoice_id, recipient.clone())
 }
@@ -5069,6 +5078,7 @@ impl SplitContract {
             options.ext.release_condition_hash,
             options.ext.early_bird_window_ledgers,
             options.ext.early_bird_fee_bps,
+            options.ext.creator_fee_bps,
             options.ratios.clone(),
             options.ext.ratio_denominator,
         );
@@ -5201,6 +5211,7 @@ impl SplitContract {
             options.ext.release_condition_hash,
             options.ext.early_bird_window_ledgers,
             options.ext.early_bird_fee_bps,
+            options.ext.creator_fee_bps,
             options.ratios.clone(),
             options.ext.ratio_denominator,
         );
@@ -5274,6 +5285,7 @@ impl SplitContract {
         release_condition_hash: Option<BytesN<32>>,
         early_bird_window_ledgers: u32,
         early_bird_fee_bps: u32,
+        creator_fee_bps: u32,
         ratios: Vec<u32>,
         ratio_denominator: u64,
     ) -> u64 {
@@ -5327,6 +5339,20 @@ impl SplitContract {
                 "early_bird_fee_bps must not exceed the standard platform fee"
             );
         }
+        // Issue #559: creator fee must be within bounds and not exceed cap with platform fee.
+        assert!(
+            creator_fee_bps <= 10_000,
+            "creator_fee_bps must be ≤ 10000"
+        );
+        let platform_fee_bps = env
+            .storage()
+            .instance()
+            .get(&platform_fee_bps_key())
+            .unwrap_or(0);
+        assert!(
+            (creator_fee_bps as u64 + platform_fee_bps as u64) <= 10_000,
+            "FeeSumExceedsCap"
+        );
         if tax_bps > 0 {
             assert!(
                 tax_authority.is_some(),
@@ -5772,6 +5798,7 @@ impl SplitContract {
             early_bird_window_ledgers,
             early_bird_fee_bps,
             early_bird_fee_credit: 0,
+            creator_fee_bps,
             ratio_denominator,
             ratios,
         };
@@ -5940,6 +5967,10 @@ impl SplitContract {
                 None,           // recipient_max_payouts
                 false,          // recipient_whitelist_enabled
                 None,           // release_condition_hash
+                0,              // early_bird_window_ledgers
+                0,              // early_bird_fee_bps
+                0,              // creator_fee_bps
+            );
                  0,              // early_bird_window_ledgers
                  0,              // early_bird_fee_bps
                  Vec::new(&env), // ratios
@@ -6051,6 +6082,10 @@ impl SplitContract {
                 None,             // recipient_max_payouts
                 false,            // recipient_whitelist_enabled
                 None,             // release_condition_hash
+                0,                // early_bird_window_ledgers
+                0,                // early_bird_fee_bps
+                0,                // creator_fee_bps
+            );
                  0,                // early_bird_window_ledgers
                  0,                // early_bird_fee_bps
                  Vec::new(&env), // ratios
@@ -6148,6 +6183,10 @@ impl SplitContract {
             None,           // recipient_max_payouts
             false,          // recipient_whitelist_enabled
             None,           // release_condition_hash
+            0,              // early_bird_window_ledgers
+            0,              // early_bird_fee_bps
+            0,              // creator_fee_bps
+        );
              0,              // early_bird_window_ledgers
              0,              // early_bird_fee_bps
              Vec::new(&env), // ratios
@@ -10643,6 +10682,10 @@ impl SplitContract {
                 None,          // recipient_max_payouts
                 false,         // recipient_whitelist_enabled
                 None,          // release_condition_hash
+                0,             // early_bird_window_ledgers
+                0,             // early_bird_fee_bps
+                0,             // creator_fee_bps
+            );
                  0,             // early_bird_window_ledgers
                  0,             // early_bird_fee_bps
                  Vec::new(env), // ratios
@@ -11740,6 +11783,7 @@ impl SplitContract {
             None,  // release_condition_hash
             old_invoice.early_bird_window_ledgers,
             old_invoice.early_bird_fee_bps,
+            old_invoice.creator_fee_bps,
             old_invoice.ratios.clone(),
             old_invoice.ratio_denominator,
         );
@@ -12114,6 +12158,10 @@ impl SplitContract {
             None,           // recipient_max_payouts
             false,          // recipient_whitelist_enabled
             None,           // release_condition_hash
+            0,              // early_bird_window_ledgers
+            0,              // early_bird_fee_bps
+            0,              // creator_fee_bps
+        )
              0,              // early_bird_window_ledgers
              0,              // early_bird_fee_bps
              Vec::new(&env),
@@ -14384,8 +14432,6 @@ impl SplitContract {
         events::contract_thawed(&env, &admin);
     }
 
-use soroban_sdk::{contract, contractimpl, symbol_short, token, Address, Env, Symbol, Vec};
-use types::{Invoice, InvoiceStatus, Payment, TransferKind, TransferRecord};
     /// Get the upgrade checkpoint hash if frozen.
     pub fn get_upgrade_checkpoint(env: Env) -> Option<BytesN<32>> {
         env.storage().instance().get(&upgrade_checkpoint_key())
@@ -14458,6 +14504,23 @@ fn load_invoice(env: &Env, id: u64) -> Invoice {
             .persistent()
             .get(&delayed_payout_key(invoice_id, &recipient))
             .expect("no delayed payout found");
+        assert!(
+            env.ledger().sequence() >= delayed_payout.claimable_at_ledger,
+            "payout not yet claimable"
+        );
+        let invoice = load_invoice(&env, invoice_id);
+        let token = invoice.tokens.get(0).expect("invoice has no tokens");
+        let token_client = token::Client::new(&env, &token);
+        token_client.transfer(
+            &env.current_contract_address(),
+            &recipient,
+            &delayed_payout.amount,
+        );
+        env.storage()
+            .persistent()
+            .remove(&delayed_payout_key(invoice_id, &recipient));
+        events::delayed_payout_claimed(&env, invoice_id, &recipient, delayed_payout.amount);
+    }
 
         assert!(
             env.ledger().sequence() >= delayed_payout.claimable_at_ledger,
@@ -14597,6 +14660,8 @@ fn update_leaderboard(env: &Env, invoice_id: u64, payer: &Address, amount: i128)
     save_top_contributors(env, invoice_id, &leaders);
 }
 
+}
+
 // ---------------------------------------------------------------------------
 // Contract
 // ---------------------------------------------------------------------------
@@ -14715,6 +14780,141 @@ impl SplitContract {
     }
 
     // -----------------------------------------------------------------------
+    // Issue #474: Invoice Cancellation with Full Contributor Refunds
+    // -----------------------------------------------------------------------
+
+    /// Cancel an open (Pending) invoice and atomically refund every contributor.
+    ///
+    /// Only the invoice creator may call this function. The invoice must be in
+    /// `Pending` status — it cannot be cancelled once released, refunded, or
+    /// already cancelled. All contributions stored across every payment shard
+    /// are summed per payer and transferred back in a single pass. The invoice
+    /// status is then set to `Cancelled` and the `InvoiceCancelled` event is
+    /// emitted.
+    ///
+    /// A cancellation cooldown is applied to the creator after a successful
+    /// cancellation to prevent abuse (configurable via
+    /// `set_cancellation_cooldown_ledgers`; defaults to ~1 day).
+    pub fn cancel_invoice(env: Env, invoice_id: u64) {
+        require_not_frozen(&env);
+        require_fn_not_paused(&env, &symbol_short!("cancel"));
+
+        let mut invoice = load_invoice(&env, invoice_id);
+
+        // Only the creator is authorised to cancel.
+        invoice.creator.require_auth();
+
+        assert!(
+            deadline_ledger > env.ledger().sequence(),
+            "deadline must be in the future"
+            invoice.status == InvoiceStatus::Pending,
+            "InvalidStatus: invoice must be Pending to cancel"
+        );
+
+        let token_client = token::Client::new(&env, &invoice.tokens.get(0).expect("no token"));
+
+        // Aggregate all contributions per payer across every shard.
+        let mut totals: Map<Address, i128> = Map::new(&env);
+        for shard_id in 0..SHARD_COUNT {
+            if let Some(shard_payments) = env
+                .storage()
+                .persistent()
+                .get::<(Symbol, u64, u64), Vec<Payment>>(&pay_shard_key(invoice_id, shard_id))
+            {
+                for payment in shard_payments.iter() {
+                    let prev = totals.get(payment.payer.clone()).unwrap_or(0);
+                    totals.set(payment.payer.clone(), prev + payment.amount);
+                }
+            }
+        }
+
+        // #522 — validate parent reference before creating the invoice.
+        if let Some(parent_id) = parent_invoice_id {
+            Self::_validate_parent(&env, parent_id, 0);
+        }
+
+        Self::_create_invoice_inner(
+            &env,
+            creator,
+            recipients,
+            amounts,
+            token,
+            deadline,
+            parent_invoice_id,
+            late_penalty_bps,
+            0, // creator_fee_bps
+        );
+        // Refund every contributor. All transfers happen before state is mutated
+        // so the operation is effectively atomic: if any transfer panics the
+        // entire transaction is rolled back (Soroban's standard behaviour).
+        let mut total_refunded: i128 = 0;
+        for (payer, amount) in totals.iter() {
+            if amount > 0 {
+                token_client.transfer(&env.current_contract_address(), &payer, &amount);
+                total_refunded += amount;
+                events::payer_refunded(&env, invoice_id, &payer, amount);
+            }
+        }
+
+        // Transition status to Cancelled.
+        let prev_status = invoice.status.clone();
+        invoice.status = InvoiceStatus::Cancelled;
+        invoice.completion_time = Some(env.ledger().timestamp());
+        save_invoice(&env, invoice_id, &invoice);
+
+        append_audit_entry(&env, invoice_id, symbol_short!("cancel"), &invoice.creator);
+
+        events::invoice_cancelled(&env, invoice_id, &invoice.creator, total_refunded);
+        events::invoice_state_changed(
+            &env,
+            invoice_id,
+            Some(&prev_status),
+            &InvoiceStatus::Cancelled,
+            &invoice.creator,
+        );
+
+        // Increment per-creator cancellation counter.
+        let cancel_cnt: u32 = env
+            .storage()
+            .persistent()
+            .get(&cancel_count_key(&invoice.creator))
+            .unwrap_or(0u32);
+        env.storage()
+            .persistent()
+            .set(&cancel_count_key(&invoice.creator), &(cancel_cnt + 1));
+
+        // Apply cooldown so the creator cannot immediately spam new invoices.
+        let cooldown_ledgers: u64 = env
+            .storage()
+            .instance()
+            .get(&cancellation_cooldown_ledgers_key())
+            .unwrap_or(DEFAULT_CANCELLATION_COOLDOWN_LEDGERS);
+        let current_ledger = env.ledger().sequence() as u64;
+        let until_ledger = current_ledger.saturating_add(cooldown_ledgers);
+        env.storage()
+            .persistent()
+            .set(&creator_cooldown_key(&invoice.creator), &until_ledger);
+        events::creator_cooldown_set(&env, &invoice.creator, until_ledger, cooldown_ledgers);
+
+        let invoice = Invoice {
+            creator: creator.clone(),
+            recipients: recipients.clone(),
+            amounts,
+            token,
+            deadline_ledger,
+            funded: 0,
+            status: InvoiceStatus::Pending,
+            payments: Vec::new(&env),
+        };
+        notify_invoice(
+            &env,
+            invoice_id,
+            symbol_short!("cancel"),
+            &invoice.notification_contract,
+        );
+    }
+
+    // -----------------------------------------------------------------------
     // Issue #475: Multi-Signature Admin Control
     // -----------------------------------------------------------------------
 
@@ -14740,12 +14940,143 @@ impl SplitContract {
         env.storage().instance().get(&admin_set_key())
     }
 
+    // -----------------------------------------------------------------------
+    // Issue #560: Creator Migration
+    // -----------------------------------------------------------------------
+
+    /// Nominate a new creator for an invoice. Only the current creator can nominate.
+    ///
+    /// # Arguments
+    /// * `caller` - must be the current creator of the invoice
+    /// * `invoice_id` - target invoice
+    /// * `successor` - address of the new creator
+    pub fn nominate_new_creator(env: Env, caller: Address, invoice_id: u64, successor: Address) {
+        caller.require_auth();
+        let mut invoice = load_invoice(&env, invoice_id);
+        assert!(
+            invoice.status != InvoiceStatus::Deleted,
+            "InvoiceDeleted"
+        );
+        assert!(invoice.creator == caller, "OnlyCreator");
+        env.storage()
+            .persistent()
+            .set(&pending_creator_key(invoice_id), &successor);
+        events::creator_nominated(&env, invoice_id, &successor);
+    }
+
+    /// Accept the creator role for a nominated invoice.
+    ///
+    /// # Arguments
+    /// * `successor` - must be the nominated successor
+    /// * `invoice_id` - target invoice
+    pub fn accept_creator_role(env: Env, successor: Address, invoice_id: u64) {
+        successor.require_auth();
+        let pending: Address = env
+            .storage()
+            .persistent()
+            .get(&pending_creator_key(invoice_id))
+            .expect("no pending creator nomination");
+        assert!(pending == successor, "NotNominated");
+        let mut invoice = load_invoice(&env, invoice_id);
+        assert!(
+            invoice.status != InvoiceStatus::Deleted,
+            "InvoiceDeleted"
+        );
+        invoice.creator = successor.clone();
+        save_invoice(&env, invoice_id, &invoice);
+        env.storage()
+            .persistent()
+            .remove(&pending_creator_key(invoice_id));
+        events::creator_migrated(&env, invoice_id, &successor);
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #562: Soft-Delete with Tombstone
+    // -----------------------------------------------------------------------
+
+    /// Soft-delete an invoice, writing a tombstone record for audit trail.
+    /// Only the creator can delete a Pending invoice with no unclaimed funds.
+    ///
+    /// # Arguments
+    /// * `caller` - must be the current creator of the invoice
+    /// * `invoice_id` - target invoice
+    pub fn delete_invoice(env: Env, caller: Address, invoice_id: u64) {
+        caller.require_auth();
+        let invoice = load_invoice(&env, invoice_id);
+        assert!(
+            invoice.status != InvoiceStatus::Deleted,
+            "InvoiceDeleted"
+        );
+        assert!(invoice.creator == caller, "OnlyCreator");
+        assert!(invoice.status == InvoiceStatus::Pending, "InvalidStatus");
+        assert!(invoice.funded == 0, "FundsUnclaimed");
+        let tombstone = Tombstone {
+            invoice_id,
+            deleted_at_ledger: env.ledger().sequence(),
+            deleted_by: caller,
+        };
+        env.storage()
+            .persistent()
+            .set(&tombstone_key(invoice_id), &tombstone);
+        let mut updated = invoice.clone();
+        updated.status = InvoiceStatus::Deleted;
+        save_invoice(&env, invoice_id, &updated);
+        events::invoice_state_changed(&env, invoice_id, Some(&InvoiceStatus::Pending), &InvoiceStatus::Deleted, &caller);
+    }
+
+    /// Retrieve the tombstone record for a soft-deleted invoice.
+    ///
+    /// # Arguments
+    /// * `invoice_id` - target invoice
+    ///
+    /// # Returns
+    /// The Tombstone record for the deleted invoice
+    pub fn get_tombstone(env: Env, invoice_id: u64) -> Tombstone {
+        let invoice = load_invoice(&env, invoice_id);
+        assert!(
+            invoice.status == InvoiceStatus::Deleted,
+            "NotDeleted"
+        );
+        env.storage()
+            .persistent()
+            .get(&tombstone_key(invoice_id))
+            .expect("tombstone not found")
+    }
+
     /// Propose a new admin action under the multi-sig scheme.
     ///
     /// The caller must be one of the registered signers. The action is stored
     /// on-chain keyed by the SHA-256 hash of its XDR serialisation. The
     /// proposer's approval is counted automatically.
     ///
+    /// # Arguments
+    /// * `payer`      - address making the payment (must authorise)
+    /// * `invoice_id` - target invoice
+    /// * `amount`     - amount to pay in stroops
+    pub fn pay(env: Env, payer: Address, invoice_id: u64, amount: i128) {
+        payer.require_auth();
+        let mut invoice = load_invoice(&env, invoice_id);
+        assert!(
+            invoice.status == InvoiceStatus::Pending,
+            "invoice is not pending"
+        );
+        assert!(!invoice.disputed, "invoice is disputed");
+        let funding_token = funding_token_for(invoice.clone());
+        let token_client = token::Client::new(&env, &funding_token);
+        token_client.transfer(&payer, &env.current_contract_address(), &amount);
+        invoice.funded += amount;
+        invoice
+            .payments
+            .push_back(Payment {
+                payer: payer.clone(),
+                amount,
+                ledger: env.ledger().sequence(),
+                timestamp: env.ledger().timestamp(),
+            });
+        save_invoice(&env, invoice_id, &invoice);
+        events::payment_received(&env, invoice_id, &payer, amount);
+    }
+
     /// Returns the 32-byte action hash that identifies this proposal.
     pub fn propose_admin_action(
         env: Env,
@@ -15165,6 +15496,7 @@ impl SplitContract {
             None,                 // release_condition_hash
             0,                    // early_bird_window_ledgers
             0,                    // early_bird_fee_bps
+            0,                    // creator_fee_bps
             template.ratios.clone(),
             10_000u64,
         );
