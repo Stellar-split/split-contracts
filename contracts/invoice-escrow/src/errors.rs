@@ -36,4 +36,14 @@ pub enum Error {
     DeadlineNotPassed = 13,
     /// Recipient and amount vectors must be the same length and non-empty.
     InvalidRecipients = 14,
+    /// Payer is blacklisted and cannot interact with invoices.
+    PayerBlacklisted = 15,
+    /// The blacklist appeal window has expired.
+    AppealWindowExpired = 16,
+    /// The payer is not blacklisted; cannot submit appeal or finalise.
+    NotBlacklisted = 17,
+    /// The blacklist entry has already been finalised.
+    AlreadyFinalised = 18,
+    /// Caller is not the blacklisted payer.
+    NotBlacklistedPayer = 19,
 }
