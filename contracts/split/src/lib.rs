@@ -14522,7 +14522,23 @@ fn load_invoice(env: &Env, id: u64) -> Invoice {
         events::delayed_payout_claimed(&env, invoice_id, &recipient, delayed_payout.amount);
     }
 
-fn remove_invoice(env: &Env, id: u64) {
+        assert!(
+            env.ledger().sequence() >= delayed_payout.claimable_at_ledger,
+            "payout not yet claimable"
+        );
+
+        let invoice = load_invoice(&env, invoice_id);
+        let token = invoice.tokens.get(0).expect("invoice has no tokens");
+        let token_client = token::Client::new(&env, &token);
+        token_client.transfer(
+            &env.current_contract_address(),
+            &recipient,
+            &delayed_payout.amount,
+        );
+        events::delayed_payout_claimed(&env, invoice_id, &recipient, delayed_payout.amount);
+    }
+
+    fn remove_invoice(env: &Env, id: u64) {
     env.storage().persistent().remove(&invoice_key(id));
 }
 
@@ -14651,34 +14667,6 @@ fn update_leaderboard(env: &Env, invoice_id: u64, payer: &Address, amount: i128)
 // ---------------------------------------------------------------------------
 #[contractimpl]
 impl SplitContract {
-    /// Create a new invoice.
-    ///
-    /// # Arguments
-    /// * `creator`       - address that owns the invoice (must authorise)
-    /// * `recipients`    - ordered list of recipient addresses
-    /// * `amounts`       - amount owed to each recipient (parallel to `recipients`)
-    /// * `token`         - USDC token contract address
-    /// * `deadline_ledger` - ledger sequence after which unfunded invoices can be refunded
-    ///
-    /// # Returns
-    /// The new invoice ID (monotonically increasing u64).
-    pub fn create_invoice(
-        env: Env,
-        creator: Address,
-        recipients: Vec<Address>,
-        amounts: Vec<i128>,
-        token: Address,
-        deadline_ledger: u32,
-    ) -> u64 {
-        creator.require_auth();
-        // Remove the delayed payout record
-        env.storage()
-            .persistent()
-            .remove(&delayed_payout_key(invoice_id, &recipient));
-
-        events::delayed_payout_claimed(&env, invoice_id, &recipient, delayed_payout.amount);
-    }
-
     // -----------------------------------------------------------------------
     // Issue #438: Invoice anonymity mode
     // -----------------------------------------------------------------------
@@ -15115,8 +15103,6 @@ impl SplitContract {
 
         // Ensure no duplicate proposal for the same action.
         assert!(
-            env.ledger().sequence() <= invoice.deadline_ledger,
-            "invoice deadline has passed"
             !env.storage()
                 .persistent()
                 .has(&pending_admin_action_key(&action_hash)),
@@ -15134,27 +15120,6 @@ impl SplitContract {
             executed: false,
         };
 
-        append_audit_record(
-            &env,
-            invoice_id,
-            &TransferRecord {
-                from: payer.clone(),
-                to: env.current_contract_address(),
-                amount,
-                kind: TransferKind::Contribution,
-                ledger: env.ledger().sequence(),
-            },
-        );
-
-        invoice.payments.push_back(Payment {
-            payer: payer.clone(),
-            amount,
-        });
-        invoice.funded += amount;
-
-        update_leaderboard(&env, invoice_id, &payer, amount);
-
-        events::payment_received(&env, invoice_id, &payer, amount);
         env.storage()
             .persistent()
             .set(&pending_admin_action_key(&action_hash), &pending);
