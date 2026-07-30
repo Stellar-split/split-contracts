@@ -171,6 +171,9 @@ fn fee_brackets_key() -> Symbol {
 fn platform_fee_waiver_list_key() -> Symbol {
     symbol_short!("fee_wvrs")
 }
+fn fee_recipients_key() -> Symbol {
+    symbol_short!("fee_rcp")
+}
 
 /// Issue #296: Per-creator fee waiver list key (distinct from the recipient-level waiver list).
 fn creator_fee_waiver_key() -> Symbol {
@@ -1192,20 +1195,76 @@ fn validate_milestones(env: &Env, milestones: &Vec<u32>) {
     let _ = env;
 }
 
-/// Validate that `ratios` is non-empty and sums to exactly [`BASIS_POINTS_TOTAL`] (10 000).
+/// Validate that `ratios` is non-empty, each element is strictly less than
+/// `denominator`, and their sum equals exactly `denominator`.
 ///
 /// Returns `Ok(())` on success, or:
 /// - [`ContractError::EmptyRecipientList`] when the slice is empty.
-/// - [`ContractError::InvalidRatioSum`] when the sum differs from 10 000.
-pub(crate) fn validate_ratios(ratios: &Vec<u32>) -> Result<(), ContractError> {
+/// - [`ContractError::InvalidRatio`] when any ratio >= denominator or the sum differs.
+pub(crate) fn validate_ratios(ratios: &Vec<u32>, denominator: u64) -> Result<(), ContractError> {
     if ratios.is_empty() {
         return Err(ContractError::EmptyRecipientList);
     }
-    let sum: u32 = ratios.iter().fold(0u32, |acc, r| acc.saturating_add(r));
-    if sum != BASIS_POINTS_TOTAL {
-        return Err(ContractError::InvalidRatioSum);
+    let denom = denominator as u32;
+    for r in ratios.iter() {
+        if *r >= denom {
+            return Err(ContractError::InvalidRatio);
+        }
+    }
+    let sum: u32 = ratios.iter().fold(0u32, |acc, r| acc.saturating_add(*r));
+    if sum != denom {
+        return Err(ContractError::InvalidRatio);
     }
     Ok(())
+}
+
+/// Issue #519: enforce the allowed invoice status transitions.
+///
+/// # State machine
+/// * Terminal states (`Released`, `Refunded`, `Expired`, `Cancelled`) cannot be left.
+/// * `Pending` may move to `PartiallyReleased`, `Released`, `Disputed`, `Cancelled`, `Expired`, or `Refunded`.
+/// * `PartiallyReleased` may move to `Released` or back to `Pending` (dispute resolution).
+/// * `Disputed` may move to `Pending` or `Refunded`.
+/// * Same-state transitions are permitted (idempotent).
+pub(crate) fn valid_transition(from: InvoiceStatus, to: InvoiceStatus) -> bool {
+    if from == to {
+        return true;
+    }
+    match from {
+        InvoiceStatus::Released => false,
+        InvoiceStatus::Refunded => false,
+        InvoiceStatus::Expired => false,
+        InvoiceStatus::Cancelled => false,
+        InvoiceStatus::Pending => matches!(
+            to,
+            InvoiceStatus::PartiallyReleased
+                | InvoiceStatus::Released
+                | InvoiceStatus::Disputed
+                | InvoiceStatus::Cancelled
+                | InvoiceStatus::Expired
+                | InvoiceStatus::Refunded
+        ),
+        InvoiceStatus::PartiallyReleased => {
+            to == InvoiceStatus::Released || to == InvoiceStatus::Pending
+        }
+        InvoiceStatus::Disputed => to == InvoiceStatus::Pending || to == InvoiceStatus::Refunded,
+    }
+}
+
+/// Issue #519: transition an invoice to a new status after validating the move.
+pub(crate) fn transition_status(
+    env: &Env,
+    invoice_id: u64,
+    invoice: &mut Invoice,
+    to: InvoiceStatus,
+    actor: &Address,
+) {
+    let from = invoice.status.clone();
+    if !valid_transition(from.clone(), to.clone()) {
+        env.panic_with_error(ContractError::InvalidStateTransition);
+    }
+    invoice.status = to;
+    events::invoice_state_changed(env, invoice_id, Some(&from), &invoice.status, actor);
 }
 
 /// Issue #299: Update creator stats on invoice creation.
@@ -4267,6 +4326,28 @@ impl SplitContract {
             .unwrap_or(0u32)
     }
 
+    /// Issue #521: Set the proportional fee recipients. Requires admin auth.
+    /// Validates that `fee_recipients` is non-empty and basis points sum to exactly 10_000.
+    pub fn set_fee_recipients(env: Env, admin: Address, fee_recipients: Vec<FeeSplit>) {
+        require_admin(&env);
+        admin.require_auth();
+
+        assert!(!fee_recipients.is_empty(), "fee_recipients must not be empty");
+        let sum: u32 = fee_recipients.iter().map(|r| r.basis_points).sum();
+        assert!(sum == 10_000, "fee_recipients basis points must sum to 10000");
+
+        env.storage()
+            .instance()
+            .set(&fee_recipients_key(), &fee_recipients);
+
+        events::fee_recipients_updated(&env, &fee_recipients);
+    }
+
+    /// Return the registered fee recipients, if any.
+    pub fn get_fee_recipients(env: Env) -> Option<Vec<FeeSplit>> {
+        env.storage().instance().get(&fee_recipients_key())
+    }
+
     /// Preview the next invoice id that will be assigned by create_invoice.
     pub fn peek_next_invoice_id(env: Env) -> u64 {
         env.storage()
@@ -4507,6 +4588,42 @@ impl SplitContract {
             }
         }
         fee
+    }
+
+    /// Issue #521: distribute `total_fee` across configured fee recipients.
+    /// If fee recipients are configured, each gets their proportional share; otherwise
+    /// the legacy single-treasury behaviour sends the entire fee to `treasury`.
+    fn distribute_fee(env: &Env, total_fee: i128, token_address: &Address, treasury: &Address) {
+        if total_fee <= 0 {
+            return;
+        }
+        let fee_recipients: Vec<FeeSplit> = env
+            .storage()
+            .instance()
+            .get(&fee_recipients_key())
+            .unwrap_or_else(|| {
+                let mut vec = Vec::new(env);
+                vec.push_back(FeeSplit {
+                    address: treasury.clone(),
+                    basis_points: 10_000,
+                });
+                vec
+            });
+        let token_client = token::Client::new(env, token_address);
+        let mut distributed: i128 = 0;
+        let n = fee_recipients.len();
+        for i in 0..n {
+            let recipient = fee_recipients.get(i).unwrap();
+            let share = if i == n - 1 {
+                total_fee - distributed
+            } else {
+                (total_fee as u128 * recipient.basis_points as u128 / 10_000u128) as i128
+            };
+            distributed += share;
+            if share > 0 {
+                token_client.transfer(&env.current_contract_address(), &recipient.address, &share);
+            }
+        }
     }
 
     /// Admin function to set up to 5 rebate tiers sorted by minimum volume.
@@ -4883,7 +5000,8 @@ impl SplitContract {
 
         // Validate split ratios (if provided) before any storage is touched.
         if !options.ratios.is_empty() {
-            if let Err(e) = validate_ratios(&options.ratios) {
+            let denominator = options.ext.ratio_denominator.max(1);
+            if let Err(e) = validate_ratios(&options.ratios, denominator) {
                 env.panic_with_error(e);
             }
         }
@@ -4951,6 +5069,8 @@ impl SplitContract {
             options.ext.release_condition_hash,
             options.ext.early_bird_window_ledgers,
             options.ext.early_bird_fee_bps,
+            options.ratios.clone(),
+            options.ext.ratio_denominator,
         );
 
         apply_overfunding_policy(&env, id, overfunding_policy);
@@ -5081,6 +5201,8 @@ impl SplitContract {
             options.ext.release_condition_hash,
             options.ext.early_bird_window_ledgers,
             options.ext.early_bird_fee_bps,
+            options.ratios.clone(),
+            options.ext.ratio_denominator,
         );
 
         apply_overfunding_policy(&env, id, overfunding_policy);
@@ -5152,6 +5274,8 @@ impl SplitContract {
         release_condition_hash: Option<BytesN<32>>,
         early_bird_window_ledgers: u32,
         early_bird_fee_bps: u32,
+        ratios: Vec<u32>,
+        ratio_denominator: u64,
     ) -> u64 {
         check_not_paused(env);
         validate_allowed_token(env, &funding_token);
@@ -5648,6 +5772,8 @@ impl SplitContract {
             early_bird_window_ledgers,
             early_bird_fee_bps,
             early_bird_fee_credit: 0,
+            ratio_denominator,
+            ratios,
         };
 
         save_invoice(env, id, &invoice);
@@ -5814,9 +5940,11 @@ impl SplitContract {
                 None,           // recipient_max_payouts
                 false,          // recipient_whitelist_enabled
                 None,           // release_condition_hash
-                0,              // early_bird_window_ledgers
-                0,              // early_bird_fee_bps
-            );
+                 0,              // early_bird_window_ledgers
+                 0,              // early_bird_fee_bps
+                 Vec::new(&env), // ratios
+                 10_000u64,       // ratio_denominator
+             );
             ids.push_back(id);
         }
         ids
@@ -5923,9 +6051,11 @@ impl SplitContract {
                 None,             // recipient_max_payouts
                 false,            // recipient_whitelist_enabled
                 None,             // release_condition_hash
-                0,                // early_bird_window_ledgers
-                0,                // early_bird_fee_bps
-            );
+                 0,                // early_bird_window_ledgers
+                 0,                // early_bird_fee_bps
+                 Vec::new(&env), // ratios
+                 10_000u64,       // ratio_denominator
+             );
             ids.push_back(id);
         }
         ids
@@ -6018,9 +6148,11 @@ impl SplitContract {
             None,           // recipient_max_payouts
             false,          // recipient_whitelist_enabled
             None,           // release_condition_hash
-            0,              // early_bird_window_ledgers
-            0,              // early_bird_fee_bps
-        );
+             0,              // early_bird_window_ledgers
+             0,              // early_bird_fee_bps
+             Vec::new(&env), // ratios
+             10_000u64,       // ratio_denominator
+         );
 
         if months > 1 {
             // Build tokens vec for subscription params storage.
@@ -8894,7 +9026,13 @@ impl SplitContract {
         let funded = invoice.funded;
         let n = invoice.recipients.len();
 
-        let proportional = if idx == n - 1 {
+        let proportional = if !invoice.ratios.is_empty() {
+            let amount = invoice.amounts.get(idx).unwrap();
+            let ratio = invoice.ratios.get(idx).unwrap();
+            let denom = invoice.ratio_denominator as u128;
+            let r = *ratio as u128;
+            checked_proportion(amount as u128, r, denom).expect("ArithmeticOverflow")
+        } else if idx == n - 1 {
             // Last recipient gets remainder
             funded - {
                 let mut sum = 0i128;
@@ -8995,7 +9133,12 @@ impl SplitContract {
             .position(|r| r == recipient.clone())
             .expect("recipient not in invoice") as u32;
         let amount = invoice.amounts.get(idx).unwrap();
-        let payout = if n == 1 {
+        let payout = if !invoice.ratios.is_empty() {
+            let ratio = invoice.ratios.get(idx).unwrap();
+            let denom = invoice.ratio_denominator as u128;
+            let r = *ratio as u128;
+            checked_proportion(amount as u128, r, denom).expect("ArithmeticOverflow")
+        } else if n == 1 {
             funded
         } else {
             checked_proportion(amount as u128, funded as u128, total as u128)
@@ -9224,14 +9367,14 @@ impl SplitContract {
                 .instance()
                 .get(&treasury_key())
                 .expect("treasury not set");
-            funding_token_client.transfer(&env.current_contract_address(), &treasury, &total_fee);
+            Self::distribute_fee(env, total_fee, &funding_token_for(invoice), &treasury);
         }
 
         if total_tax > 0 {
             let tax_authority = invoice.tax_authority.as_ref().unwrap();
             funding_token_client.transfer(
                 &env.current_contract_address(),
-                tax_authority,
+                auth,
                 &total_tax,
             );
         }
@@ -9467,10 +9610,18 @@ impl SplitContract {
         for i in 0..n {
             let recipient = invoice.recipients.get(i).unwrap();
             let amount = invoice.amounts.get(i).unwrap();
-            let payout_raw = (amount as u128)
-                .saturating_mul(stage_bps as u128)
-                .saturating_mul(funded as u128)
-                / (10_000u128 * total as u128);
+            let payout_raw = if !invoice.ratios.is_empty() {
+                let ratio = invoice.ratios.get(i).unwrap();
+                let denom = invoice.ratio_denominator as u128;
+                let r = *ratio as u128;
+                checked_proportion(amount as u128, r, denom)
+                    .expect("ArithmeticOverflow")
+            } else {
+                (amount as u128)
+                    .saturating_mul(stage_bps as u128)
+                    .saturating_mul(funded as u128)
+                    / (10_000u128 * total as u128)
+            };
             let payout_raw = payout_raw as i128;
             if payout_raw > 0 {
                 let is_waived = waivers.iter().any(|a| a == recipient);
@@ -9496,7 +9647,7 @@ impl SplitContract {
                 .instance()
                 .get(&treasury_key())
                 .expect("treasury not set");
-            token_client.transfer(&env.current_contract_address(), &treasury, &total_fee);
+            Self::distribute_fee(&env, total_fee, &invoice.tokens.get(0).expect("no token"), &treasury);
         }
 
         if total_tax > 0 {
@@ -9775,7 +9926,13 @@ impl SplitContract {
             }
 
             // Issue: if split_rules are defined, compute payout from rule instead of amounts[].
-            let proportional = if !invoice.split_rules.is_empty() {
+            let proportional = if !invoice.ratios.is_empty() {
+                let amount = invoice.amounts.get(i).unwrap();
+                let ratio = invoice.ratios.get(i).unwrap();
+                let denom = invoice.ratio_denominator as u128;
+                let r = *ratio as u128;
+                checked_proportion(amount as u128, r, denom).expect("ArithmeticOverflow")
+            } else if !invoice.split_rules.is_empty() {
                 let rule = invoice.split_rules.get(i).unwrap();
                 match rule {
                     SplitRule::Fixed(fixed_amt) => fixed_amt,
@@ -9910,18 +10067,14 @@ impl SplitContract {
                 }
             }
 
-            // Transfer platform fee to global treasury.
+            // Transfer platform fee to configured fee recipients.
             if total_fee > 0 {
                 let treasury: Address = env
                     .storage()
                     .instance()
                     .get(&treasury_key())
                     .expect("treasury not set");
-                funding_token_client.transfer(
-                    &env.current_contract_address(),
-                    &treasury,
-                    &total_fee,
-                );
+                Self::distribute_fee(env, total_fee, &funding_token_for(invoice), &treasury);
             }
 
             let net = distributed - total_tax - total_fee;
@@ -10119,11 +10272,7 @@ impl SplitContract {
                     .instance()
                     .get(&treasury_key())
                     .expect("treasury not set");
-                funding_token_client.transfer(
-                    &env.current_contract_address(),
-                    &treasury,
-                    &total_fee,
-                );
+                Self::distribute_fee(env, total_fee, &funding_token_for(invoice), &treasury);
             }
         }
 
@@ -10494,9 +10643,11 @@ impl SplitContract {
                 None,          // recipient_max_payouts
                 false,         // recipient_whitelist_enabled
                 None,          // release_condition_hash
-                0,             // early_bird_window_ledgers
-                0,             // early_bird_fee_bps
-            );
+                 0,             // early_bird_window_ledgers
+                 0,             // early_bird_fee_bps
+                 Vec::new(env), // ratios
+                 10_000u64,      // ratio_denominator
+             );
             env.storage()
                 .persistent()
                 .remove(&subscription_params_key(invoice_id));
@@ -11589,6 +11740,8 @@ impl SplitContract {
             None,  // release_condition_hash
             old_invoice.early_bird_window_ledgers,
             old_invoice.early_bird_fee_bps,
+            old_invoice.ratios.clone(),
+            old_invoice.ratio_denominator,
         );
 
         // Copy payments from shards to new invoice (issue #177).
@@ -11961,9 +12114,11 @@ impl SplitContract {
             None,           // recipient_max_payouts
             false,          // recipient_whitelist_enabled
             None,           // release_condition_hash
-            0,              // early_bird_window_ledgers
-            0,              // early_bird_fee_bps
-        )
+             0,              // early_bird_window_ledgers
+             0,              // early_bird_fee_bps
+             Vec::new(&env),
+             10_000u64,
+         )
     }
 
     /// Link invoices into a group.
@@ -15199,6 +15354,8 @@ impl SplitContract {
             None,                 // release_condition_hash
             0,                    // early_bird_window_ledgers
             0,                    // early_bird_fee_bps
+            template.ratios.clone(),
+            10_000u64,
         );
 
         events::invoice_from_template(&env, invoice_id, &creator, template_id);
