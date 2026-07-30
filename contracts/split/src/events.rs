@@ -58,6 +58,20 @@ pub fn payment_committed(env: &Env, invoice_id: u64, payer: &Address, commit_led
     );
 }
 
+/// Emitted when a confidential (Pedersen-committed) payment is settled via
+/// `reveal_confidential_payment`. Deliberately omits the amount — that is the
+/// entire point of a confidential payment — even though the amount is visible
+/// elsewhere on-chain after settlement (e.g. the token transfer, `funded`).
+/// Topics: (split, conf_rev, invoice_id)
+/// Data: (payer, event_seq)
+pub fn confidential_payment_revealed(env: &Env, invoice_id: u64, payer: &Address) {
+    let event_seq = next_seq(env, invoice_id);
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("conf_rev"), invoice_id),
+        (payer.clone(), event_seq),
+    );
+}
+
 pub fn milestone_released(env: &Env, invoice_id: u64, milestone_bps: u32, amount_released: i128) {
     let event_seq = next_seq(env, invoice_id);
     env.events().publish(
