@@ -80,4 +80,8 @@ pub enum ContractError {
     CircularDependency = 45,
     /// Issue #453: Source contract has exceeded its call rate limit within the current window.
     SourceContractRateLimited = 46,
+    /// Issue #519: An invoice status transition is not permitted by the state machine.
+    InvalidStateTransition = 47,
+    /// Issue #518: A split ratio is invalid (e.g. >= denominator or sum mismatch).
+    InvalidRatio = 48,
 }

@@ -136,6 +136,8 @@ fn default_options(env: &Env) -> InvoiceOptions {
             overfunding_policy: types::OverfundingPolicy::Cap,
             early_bird_window_ledgers: 0,
             early_bird_fee_bps: 0,
+            early_bird_fee_credit: 0,
+            ratio_denominator: 10_000,
         },
     }
 }
@@ -163,6 +165,8 @@ fn default_options2(_env: &Env) -> InvoiceOptions2 {
         overfunding_policy: types::OverfundingPolicy::Cap,
         early_bird_window_ledgers: 0,
         early_bird_fee_bps: 0,
+        early_bird_fee_credit: 0,
+        ratio_denominator: 10_000,
     }
 }
 
@@ -231,10 +235,11 @@ fn invoice_options(
             release_condition_hash: None,
             recipient_whitelist_enabled: false,
             escrow_hold_period: None,
-            overfunding_policy: types::OverfundingPolicy::Cap,
-            early_bird_window_ledgers: 0,
-            early_bird_fee_bps: 0,
-        },
+        overfunding_policy: types::OverfundingPolicy::Cap,
+        early_bird_window_ledgers: 0,
+        early_bird_fee_bps: 0,
+        early_bird_fee_credit: 0,
+        ratio_denominator: 10_000,
     }
 }
 

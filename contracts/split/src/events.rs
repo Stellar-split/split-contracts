@@ -1,4 +1,4 @@
-use crate::types::{DisputeOutcome, InvoiceStatus, RepScore, TimelockAction};
+use crate::types::{DisputeOutcome, FeeSplit, InvoiceStatus, RepScore, TimelockAction};
 use soroban_sdk::{contracttype, symbol_short, Address, BytesN, Env, String, Vec};
 
 // ---------------------------------------------------------------------------
@@ -888,7 +888,19 @@ pub fn dispute_expired(env: &Env, invoice_id: u64) {
     );
 }
 
+/// Issue #521: Emitted when the fee recipients list is updated.
+pub fn fee_recipients_updated(env: &Env, recipients: &Vec<FeeSplit>) {
+    env.events().publish(
+        (
+            symbol_short!("split"),
+            symbol_short!("fee_rcp_upd"),
+        ),
+        (recipients.clone(),),
+    );
+}
+
 /// Issue #326: Emitted when a protocol fee is paid to treasury on release.
+///
 /// Topics: (split, fee_paid, invoice_id)
 /// Data: (amount, treasury, ledger)
 pub fn fee_paid(env: &Env, invoice_id: u64, amount: i128, treasury: &Address) {
