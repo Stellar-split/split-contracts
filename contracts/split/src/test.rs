@@ -11290,3 +11290,144 @@ fn test_direct_wallet_calls_bypass_rate_limiter() {
     let invoice_id = make_invoice(&env, &c, &creator, &recipient, 100, &token_id, 9_999);
     assert_eq!(invoice_id, 1);
 }
+
+// ---------------------------------------------------------------------------
+// Storage migration framework
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_fresh_contract_starts_at_current_schema() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    c.initialize(
+        &admin, &0_i128, &treasury, &token_id, &0_u32, &None, &0_u32, &0_u32, &0_u64,
+    );
+
+    // A freshly-initialized contract has nothing to migrate.
+    assert_eq!(c.get_schema_version(), migrations::CURRENT_SCHEMA_VERSION);
+    // migrate() is a no-op (but still auth-checked) once already current.
+    assert_eq!(c.migrate(&admin), migrations::CURRENT_SCHEMA_VERSION);
+}
+
+#[test]
+#[should_panic(expected = "caller is not an admin")]
+fn test_migrate_requires_super_admin() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let not_admin = Address::generate(&env);
+    c.initialize(
+        &admin, &0_i128, &treasury, &token_id, &0_u32, &None, &0_u32, &0_u32, &0_u64,
+    );
+
+    c.migrate(&not_admin);
+}
+
+#[test]
+#[should_panic(expected = "MigrationRequired")]
+fn test_stale_schema_blocks_create_invoice() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    c.initialize(
+        &admin, &0_i128, &treasury, &token_id, &0_u32, &None, &0_u32, &0_u32, &0_u64,
+    );
+
+    // Simulate a contract whose Wasm was upgraded out from under existing
+    // data, leaving schema_version behind at the pre-framework value.
+    env.as_contract(&contract_id, || {
+        env.storage()
+            .instance()
+            .set(&migrations::schema_version_key(), &1u32);
+    });
+
+    make_invoice(&env, &c, &creator, &recipient, 100, &token_id, 9_999);
+}
+
+#[test]
+#[should_panic(expected = "MigrationRequired")]
+fn test_stale_schema_blocks_pause() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    c.initialize(
+        &admin, &0_i128, &treasury, &token_id, &0_u32, &None, &0_u32, &0_u32, &0_u64,
+    );
+
+    env.as_contract(&contract_id, || {
+        env.storage()
+            .instance()
+            .set(&migrations::schema_version_key(), &1u32);
+    });
+
+    c.pause(&admin);
+}
+
+#[test]
+fn test_migrate_from_v1_backfills_and_renames_invoice_notes() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    c.initialize(
+        &admin, &0_i128, &treasury, &token_id, &0_u32, &None, &0_u32, &0_u32, &0_u64,
+    );
+
+    // Invoices created before the simulated upgrade — stands in for data
+    // that pre-dates the migration on a real upgraded deployment.
+    let id1 = make_invoice(&env, &c, &creator, &recipient, 100, &token_id, 9_999);
+    let id2 = make_invoice(&env, &c, &creator, &recipient, 200, &token_id, 9_999);
+
+    // Roll the contract back to a "just upgraded from v1" state: no
+    // InvoiceMeta records exist yet, matching a real pre-framework contract.
+    env.as_contract(&contract_id, || {
+        env.storage()
+            .instance()
+            .set(&migrations::schema_version_key(), &1u32);
+    });
+    assert_eq!(c.get_schema_version(), 1);
+    assert!(c.get_invoice_note(&id1).is_none());
+
+    let result = c.migrate(&admin);
+    assert_eq!(result, migrations::CURRENT_SCHEMA_VERSION);
+    assert_eq!(c.get_schema_version(), migrations::CURRENT_SCHEMA_VERSION);
+
+    // Both pre-existing invoices were backfilled (v1 -> v2) with a default
+    // note, now readable under the renamed (v2 -> v3) storage key.
+    let note1 = c.get_invoice_note(&id1).expect("note migrated for id1");
+    assert_eq!(note1.priority, 0);
+    assert_eq!(note1.note, String::from_str(&env, ""));
+    let note2 = c.get_invoice_note(&id2).expect("note migrated for id2");
+    assert_eq!(note2.priority, 0);
+
+    // The pre-rename (v2) key no longer holds anything once migrated.
+    env.as_contract(&contract_id, || {
+        assert!(!env
+            .storage()
+            .persistent()
+            .has(&migrations::invoice_meta_key_v2(id1)));
+    });
+
+    // Migrating again is a no-op and stays idempotent.
+    assert_eq!(c.migrate(&admin), migrations::CURRENT_SCHEMA_VERSION);
+
+    // Previously-blocked entry points work again post-migration.
+    c.pause(&admin);
+    c.unpause(&admin);
+    let id3 = make_invoice(&env, &c, &creator, &recipient, 300, &token_id, 9_999);
+    assert!(id3 > id2);
+}

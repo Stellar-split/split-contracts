@@ -80,4 +80,7 @@ pub enum ContractError {
     CircularDependency = 45,
     /// Issue #453: Source contract has exceeded its call rate limit within the current window.
     SourceContractRateLimited = 46,
+    /// Storage migration framework: `schema_version` is behind the version
+    /// this Wasm build expects. Call `migrate` before retrying.
+    MigrationRequired = 47,
 }
