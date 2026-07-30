@@ -1,4 +1,7 @@
-# split-contracts
+<div align="center">
+  <img src="https://raw.githubusercontent.com/Stellar-split/.github/main/assets/stellarsplit-mark.svg" alt="StellarSplit" width="80" />
+  <h1>split-contracts</h1>
+</div>
 
 ![Rust](https://img.shields.io/badge/Rust-1.84+-orange?logo=rust)
 ![Soroban SDK](https://img.shields.io/badge/soroban--sdk-22.0.0-blueviolet)

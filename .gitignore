@@ -2,9 +2,6 @@
 target/
 *.wasm
 
-# Cargo lock (library crates don't commit this)
-Cargo.lock
-
 # Environment files
 .env
 .env.local
@@ -13,6 +10,17 @@ Cargo.lock
 # OS files
 .DS_Store
 Thumbs.db
+.vscode/
+.idea/
+*.log
+*.tmp
+*.bak
+test_snapshots/
+snapshots/
+**/snapshots/
+*.swp
+*.swo
+*~
 
 # Editor/IDE
 .vscode/
@@ -25,19 +33,35 @@ Thumbs.db
 **/__snapshots__/
 *.snap
 **/test_snapshots/
+*.snapshot
 
 # Stellar CLI
 .stellar/
 identity/
+.stellar-cli/
 
 # Logs
 *.log
+*.log.*
 
 # Coverage reports
 lcov.info
 tarpaulin-report.html
 coverage/
+.nyc_output/
 
 # Temporary files
 *.tmp
 *.bak
+*.orig
+
+# Node / JS tooling (if any frontend tooling is added)
+node_modules/
+dist/
+.pnp
+.pnp.js
+.yarn/
+
+# Rust / Cargo artefacts not caught by target/
+**/*.rs.bk
+Cargo.lock.bak
