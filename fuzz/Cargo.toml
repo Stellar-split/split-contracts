@@ -73,4 +73,18 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "fuzz_fee_deduct"
+path = "fuzz_targets/fuzz_fee_deduct.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_ratio_validation"
+path = "fuzz_targets/fuzz_ratio_validation.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]

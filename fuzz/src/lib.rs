@@ -99,6 +99,8 @@ pub fn default_options(env: &Env) -> InvoiceOptions {
             min_payer_rep: None,
             payment_open_at: None,
             payment_close_at: None,
+            early_bird_fee_credit: 0,
+            ratio_denominator: 10_000,
         },
     }
 }

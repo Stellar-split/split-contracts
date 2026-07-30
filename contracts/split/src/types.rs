@@ -510,6 +510,11 @@ pub struct InvoiceOptions2 {
     /// Issue #559: creator-declared fee in basis points (0–10 000).
     /// Deducted from gross collected funds before recipient payouts.
     pub creator_fee_bps: u32,
+    /// Issue #489: total platform-fee discount accrued from early-bird
+    /// contributions so far; deducted from the platform fee at release.
+    pub early_bird_fee_credit: i128,
+    /// Issue #518: denominator for high-precision ratio splits.
+    pub ratio_denominator: u64,
 }
 
 /// Legacy invoice layout used by stored invoices created before the `version`
@@ -878,6 +883,10 @@ pub struct Invoice {
     /// Issue #559: creator-declared fee in basis points (0–10 000).
     /// Deducted from gross collected funds before recipient payouts.
     pub creator_fee_bps: u32,
+    /// Issue #518: denominator for high-precision ratio splits.
+    pub ratio_denominator: u64,
+    /// Issue #518: per-recipient split ratios evaluated at release time.
+    pub ratios: Vec<u32>,
 }
 
 impl Invoice {
@@ -987,6 +996,8 @@ impl Invoice {
                 early_bird_fee_bps: self.early_bird_fee_bps,
                 early_bird_fee_credit: self.early_bird_fee_credit,
                 creator_fee_bps: self.creator_fee_bps,
+                ratio_denominator: self.ratio_denominator,
+                ratios: self.ratios.clone(),
             },
         )
     }
@@ -1092,6 +1103,8 @@ impl Invoice {
             early_bird_fee_bps: ext2.early_bird_fee_bps,
             early_bird_fee_credit: ext2.early_bird_fee_credit,
             creator_fee_bps: ext2.creator_fee_bps,
+            ratio_denominator: ext2.ratio_denominator,
+            ratios: ext2.ratios,
         }
     }
 }
@@ -1351,6 +1364,8 @@ impl Invoice {
             early_bird_fee_bps: 0,
             early_bird_fee_credit: 0,
             creator_fee_bps: 0,
+            ratio_denominator: 10_000,
+            ratios: Vec::new(env),
         }
     }
 }
@@ -1432,6 +1447,14 @@ pub struct DisputeRecord {
 pub struct ProtocolFeeConfig {
     pub rate_bps: u32,
     pub treasury: Address,
+}
+
+/// Issue #521: A single fee-recipient entry for proportional fee distribution.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct FeeSplit {
+    pub address: Address,
+    pub basis_points: u32,
 }
 
 /// Issue #316 / #351: Compute budget estimate for a contract function.
