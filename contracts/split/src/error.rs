@@ -87,4 +87,13 @@ pub enum ContractError {
     /// Storage migration framework: `schema_version` is behind the version
     /// this Wasm build expects. Call `migrate` before retrying.
     MigrationRequired = 47,
+    /// Issue #556: The recipient list supplied at invoice creation contains a
+    /// duplicate address. Rejected before any storage is written.
+    DuplicateRecipient = 49,
+    /// Issue #557: Split ratios are locked after the first contribution is
+    /// recorded and may no longer be mutated.
+    SplitRatioLocked = 50,
+    /// Issue #558: A recipient address has not established a trustline for the
+    /// payment token. The offending address is surfaced in the panic message.
+    RecipientMissingTrustline = 51,
 }

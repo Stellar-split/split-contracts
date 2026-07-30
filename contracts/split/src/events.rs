@@ -1545,3 +1545,41 @@ pub fn batch_invoice_created(env: &Env, ids: &Vec<u64>) {
     env.events()
         .publish((symbol_short!("btch_crt"),), ids.clone());
 }
+
+// ---------------------------------------------------------------------------
+// #557 — Pre-Funding Split Ratio Lock
+// ---------------------------------------------------------------------------
+
+/// Emitted exactly once — on the first `pay()` call that records a
+/// contribution — signalling that the invoice's split ratios are now frozen
+/// and may no longer be mutated.
+///
+/// Topics: `("spl_lk", invoice_id)`
+/// Data:   `(locked_at_ledger, total_contributed)`
+pub fn split_ratio_locked(env: &Env, invoice_id: u64, locked_at_ledger: u32, total_contributed: i128) {
+    env.events().publish(
+        (symbol_short!("spl_lk"), invoice_id),
+        (locked_at_ledger, total_contributed),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #558 — Trustline Pre-Validation
+// ---------------------------------------------------------------------------
+
+/// Emitted when a recipient is found to be missing a trustline for the
+/// payment token during invoice activation.
+///
+/// Topics: `("no_trust", invoice_id)`
+/// Data:   `(recipient, token)`
+pub fn recipient_missing_trustline(
+    env: &Env,
+    invoice_id: u64,
+    recipient: &Address,
+    token: &Address,
+) {
+    env.events().publish(
+        (symbol_short!("no_trust"), invoice_id),
+        (recipient.clone(), token.clone()),
+    );
+}
