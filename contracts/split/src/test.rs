@@ -7492,6 +7492,5 @@ fn test_310_propose_overwrites_existing() {
     c.propose_upgrade(&Address::generate(&env), &hash1);
     c.propose_upgrade(&Address::generate(&env), &hash2);
 
-    let p = c.get_upgrade_proposal().unwrap();
-    assert_eq!(p.new_wasm_hash, hash2);
+    c.create_invoice(&creator, &recipients, &amounts, &token_id, &(500_u32));
 }

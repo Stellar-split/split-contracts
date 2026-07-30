@@ -66,6 +66,8 @@ mod storage_snapshot;
 
 mod storage_keys;
 
+mod migrations;
+
 use error::ContractError;
 use soroban_sdk::crypto::bls12_381::{Fr, G1Affine};
 use soroban_sdk::xdr::ToXdr;
@@ -806,6 +808,7 @@ fn compute_shard_id(env: &Env, payer: &Address) -> u64 {
 }
 
 fn require_admin(env: &Env) -> Address {
+    migrations::require_schema_current(env);
     let admin: Address = env
         .storage()
         .instance()
@@ -2103,6 +2106,7 @@ fn is_paused(env: &Env) -> bool {
 }
 
 fn require_not_paused(env: &Env) {
+    migrations::require_schema_current(env);
     assert!(!is_paused(env), "contract is paused");
     // Issue #297: also check circuit breaker
     let cb_active: bool = env
@@ -2114,6 +2118,7 @@ fn require_not_paused(env: &Env) {
 }
 
 fn check_not_paused(env: &Env) {
+    migrations::require_schema_current(env);
     if is_paused(env) {
         panic!("ContractPaused");
     }
@@ -2141,6 +2146,15 @@ fn validate_allowed_token(env: &Env, token: &Address) {
 
 
 fn require_admin_role(env: &Env, admin: &Address, min_role: AdminRole) {
+    migrations::require_schema_current(env);
+    require_admin_role_unguarded(env, admin, min_role);
+}
+
+/// Same authorisation check as [`require_admin_role`], without the
+/// schema-version guard. `SplitContract::migrate` must be reachable even when
+/// a migration is pending, so it calls this directly rather than
+/// `require_admin_role`.
+fn require_admin_role_unguarded(env: &Env, admin: &Address, min_role: AdminRole) {
     admin.require_auth();
     let admins: Map<Address, AdminRole> = env
         .storage()
@@ -2493,6 +2507,7 @@ fn check_creator_milestone(env: &Env, creator: &Address, new_volume: i128) {
 
 /// Check if contract is frozen for upgrade. Panics if frozen.
 fn require_not_frozen(env: &Env) {
+    migrations::require_schema_current(env);
     let is_frozen: bool = env
         .storage()
         .instance()
@@ -2787,11 +2802,12 @@ impl SplitContract {
 
     /// Issue #472: Pause the contract. Requires admin auth.
     pub fn pause(env: Env, admin: Address) {
+        migrations::require_schema_current(&env);
         admin.require_auth();
         if let Some(stored_admin) = env.storage().instance().get::<_, Address>(&admin_key()) {
             assert!(admin == stored_admin, "NotAuthorized");
         } else {
-            require_admin_role(&env, &admin, AdminRole::Operator);
+            require_admin_role_unguarded(&env, &admin, AdminRole::Operator);
         }
         env.storage().instance().set(&paused_key(), &true);
         events::contract_paused(&env, &admin);
@@ -2799,11 +2815,12 @@ impl SplitContract {
 
     /// Issue #472: Unpause the contract. Requires admin auth.
     pub fn unpause(env: Env, admin: Address) {
+        migrations::require_schema_current(&env);
         admin.require_auth();
         if let Some(stored_admin) = env.storage().instance().get::<_, Address>(&admin_key()) {
             assert!(admin == stored_admin, "NotAuthorized");
         } else {
-            require_admin_role(&env, &admin, AdminRole::Operator);
+            require_admin_role_unguarded(&env, &admin, AdminRole::Operator);
         }
         env.storage().instance().set(&paused_key(), &false);
         events::contract_unpaused(&env, &admin);
@@ -2976,11 +2993,12 @@ impl SplitContract {
 
     /// Issue #473: Add an asset contract address to the allowed tokens list.
     pub fn add_allowed_token(env: Env, admin: Address, token: Address) {
+        migrations::require_schema_current(&env);
         admin.require_auth();
         if let Some(stored_admin) = env.storage().instance().get::<_, Address>(&admin_key()) {
             assert!(admin == stored_admin, "NotAuthorized");
         } else {
-            require_admin_role(&env, &admin, AdminRole::Operator);
+            require_admin_role_unguarded(&env, &admin, AdminRole::Operator);
         }
         let mut allowed: Vec<Address> = env
             .storage()
@@ -2995,11 +3013,12 @@ impl SplitContract {
 
     /// Issue #473: Remove an asset contract address from the allowed tokens list.
     pub fn remove_allowed_token(env: Env, admin: Address, token: Address) {
+        migrations::require_schema_current(&env);
         admin.require_auth();
         if let Some(stored_admin) = env.storage().instance().get::<_, Address>(&admin_key()) {
             assert!(admin == stored_admin, "NotAuthorized");
         } else {
-            require_admin_role(&env, &admin, AdminRole::Operator);
+            require_admin_role_unguarded(&env, &admin, AdminRole::Operator);
         }
         let mut allowed: Vec<Address> = env
             .storage()
@@ -4744,6 +4763,34 @@ impl SplitContract {
 
         let invoice = Invoice::from_legacy(legacy, &env);
         save_invoice(&env, invoice_id, &invoice);
+    }
+
+    /// Run all pending storage migrations in order, bringing a contract that
+    /// was upgraded from an older Wasm build up to the current schema
+    /// version. Returns the resulting `schema_version`.
+    ///
+    /// This is the **only** entry point exempt from the `MigrationRequired`
+    /// guard — every other entry point panics with `MigrationRequired` while
+    /// `schema_version` is behind the version this Wasm build expects.
+    /// No-op (but still auth-checked) once already current, so it is always
+    /// safe to call after an upgrade.
+    ///
+    /// # Errors
+    /// Panics if `admin` is not a `SuperAdmin`.
+    pub fn migrate(env: Env, admin: Address) -> u32 {
+        require_admin_role_unguarded(&env, &admin, AdminRole::SuperAdmin);
+        migrations::run_pending_migrations(&env)
+    }
+
+    /// Return the contract's current storage schema version.
+    pub fn get_schema_version(env: Env) -> u32 {
+        migrations::schema_version(&env)
+    }
+
+    /// Return the per-invoice note record introduced at schema v2 (renamed to
+    /// its current storage key at schema v3), if one has been migrated.
+    pub fn get_invoice_note(env: Env, invoice_id: u64) -> Option<migrations::InvoiceMeta> {
+        migrations::get_invoice_meta(&env, invoice_id)
     }
 
     // -----------------------------------------------------------------------
