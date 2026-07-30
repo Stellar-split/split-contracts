@@ -18,6 +18,10 @@ fn next_seq(env: &Env, invoice_id: u64) -> u64 {
 // Events
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Existing events
+// ---------------------------------------------------------------------------
+
 /// Emitted when a new invoice is created.
 /// Topics: (split, created, invoice_id)
 /// Data: (creator, total, event_seq)
@@ -51,6 +55,20 @@ pub fn payment_committed(env: &Env, invoice_id: u64, payer: &Address, commit_led
     env.events().publish(
         (symbol_short!("split"), symbol_short!("pay_cmt"), invoice_id),
         (payer.clone(), commit_ledger, event_seq),
+    );
+}
+
+/// Emitted when a confidential (Pedersen-committed) payment is settled via
+/// `reveal_confidential_payment`. Deliberately omits the amount — that is the
+/// entire point of a confidential payment — even though the amount is visible
+/// elsewhere on-chain after settlement (e.g. the token transfer, `funded`).
+/// Topics: (split, conf_rev, invoice_id)
+/// Data: (payer, event_seq)
+pub fn confidential_payment_revealed(env: &Env, invoice_id: u64, payer: &Address) {
+    let event_seq = next_seq(env, invoice_id);
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("conf_rev"), invoice_id),
+        (payer.clone(), event_seq),
     );
 }
 
@@ -1476,4 +1494,54 @@ pub fn recipient_account_missing(env: &Env, invoice_id: u64, recipient: &Address
         ),
         recipient.clone(),
     );
+}
+
+// ---------------------------------------------------------------------------
+// #522 — Cross-Invoice Split Linkage
+// ---------------------------------------------------------------------------
+
+/// Emitted on the first successful release of a child invoice, once the
+/// parent is confirmed to be finalised.
+///
+/// Topics: `("child_unblk", child_id)`
+/// Data:   `parent_id`
+pub fn child_invoice_unblocked(env: &Env, child_id: u64, parent_id: u64) {
+    env.events().publish(
+        (symbol_short!("chld_ubl"), child_id),
+        parent_id,
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #523 — Late Payment Penalty Fee
+// ---------------------------------------------------------------------------
+
+/// Emitted every time a late-payment penalty is charged.
+///
+/// Topics: `("late_pen", invoice_id)`
+/// Data:   `(payer, penalty_amount)`
+pub fn late_payment_penalty_charged(
+    env: &Env,
+    invoice_id: u64,
+    payer: &Address,
+    penalty_amount: i128,
+) {
+    env.events().publish(
+        (symbol_short!("late_pen"), invoice_id),
+        (payer.clone(), penalty_amount),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #524 — Invoice Batch Creation
+// ---------------------------------------------------------------------------
+
+/// Emitted once after a successful `batch_create_invoices` call, carrying
+/// all newly created invoice IDs in creation order.
+///
+/// Topics: `("batch_crt",)`
+/// Data:   `ids: Vec<u64>`
+pub fn batch_invoice_created(env: &Env, ids: &Vec<u64>) {
+    env.events()
+        .publish((symbol_short!("btch_crt"),), ids.clone());
 }

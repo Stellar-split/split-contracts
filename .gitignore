@@ -13,6 +13,17 @@ wasm32-unknown-unknown/
 .DS_Store
 Thumbs.db
 desktop.ini
+.vscode/
+.idea/
+*.log
+*.tmp
+*.bak
+test_snapshots/
+snapshots/
+**/snapshots/
+*.swp
+*.swo
+*~
 
 # Editor/IDE
 .vscode/

@@ -84,4 +84,7 @@ pub enum ContractError {
     InvalidStateTransition = 47,
     /// Issue #518: A split ratio is invalid (e.g. >= denominator or sum mismatch).
     InvalidRatio = 48,
+    /// Storage migration framework: `schema_version` is behind the version
+    /// this Wasm build expects. Call `migrate` before retrying.
+    MigrationRequired = 47,
 }

@@ -25,9 +25,9 @@ mod test;
 
 use errors::Error;
 use soroban_sdk::{
-    contract, contractimpl, symbol_short, token, Address, Env, Symbol, Vec,
+    contract, contractimpl, symbol_short, token, Address, BytesN, Env, Symbol, Vec,
 };
-use types::{EscrowInvoice, EscrowStatus};
+use types::{BlacklistEntry, EscrowInvoice, EscrowStatus};
 
 // ---------------------------------------------------------------------------
 // Storage key helpers
@@ -57,6 +57,19 @@ fn invoice_key(id: u64) -> (Symbol, u64) {
 fn deposit_key(id: u64, payer: &Address) -> (Symbol, u64, Address) {
     (symbol_short!("deposit"), id, payer.clone())
 }
+
+/// Persistent storage: blacklist entry for a payer.
+fn blacklist_key(payer: &Address) -> (Symbol, Address) {
+    (symbol_short!("blacklist"), payer.clone())
+}
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+/// Number of ledgers during which a blacklisted payer can submit an appeal.
+/// ~30 minutes at 5s ledger close time.
+const APPEAL_WINDOW_LEDGERS: u32 = 360;
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -140,6 +153,30 @@ fn emit_refunded(env: &Env, id: u64, payer: &Address, amount: i128) {
     env.events().publish(
         (symbol_short!("escrow"), symbol_short!("refunded"), id),
         (payer.clone(), amount),
+    );
+}
+
+/// Topics: `(blacklist, bl_add)` — Data: `(payer, reason_hash, banned_at)`
+fn emit_payer_blacklisted(env: &Env, payer: &Address, reason_hash: &BytesN<32>, banned_at: u64) {
+    env.events().publish(
+        (symbol_short!("blacklist"), symbol_short!("bl_add")),
+        (payer.clone(), reason_hash.clone(), banned_at),
+    );
+}
+
+/// Topics: `(blacklist, appeal)` — Data: `(payer, appeal_hash)`
+fn emit_appeal_submitted(env: &Env, payer: &Address, appeal_hash: &BytesN<32>) {
+    env.events().publish(
+        (symbol_short!("blacklist"), symbol_short!("appeal")),
+        (payer.clone(), appeal_hash.clone()),
+    );
+}
+
+/// Topics: `(blacklist, bl_fin)` — Data: `(payer, upheld)`
+fn emit_blacklist_finalised(env: &Env, payer: &Address, upheld: bool) {
+    env.events().publish(
+        (symbol_short!("blacklist"), symbol_short!("bl_fin")),
+        (payer.clone(), upheld),
     );
 }
 
@@ -333,17 +370,31 @@ impl InvoiceEscrowContract {
     /// If the deposit completes funding the invoice, the funds are immediately
     /// released to the creator (auto-release on full funding).
     ///
+    /// Blacklisted payers (finalised + upheld) are blocked from depositing.
+    ///
     /// # Errors
     /// * [`Error::InvoiceNotFound`]    — Unknown invoice ID.
     /// * [`Error::InvalidStatus`]      — Invoice is not `Pending` or `Active`.
     /// * [`Error::DeadlinePassed`]     — Deposit window has closed.
     /// * [`Error::InvalidAmount`]      — `amount` ≤ 0.
     /// * [`Error::OverFunded`]         — Deposit would exceed `total_amount`.
+    /// * [`Error::PayerBlacklisted`]   — Payer is finalised-blacklisted.
     pub fn deposit(env: Env, payer: Address, invoice_id: u64, amount: i128) -> Result<(), Error> {
         if amount <= 0 {
             return Err(Error::InvalidAmount);
         }
         payer.require_auth();
+
+        // Block finalised-blacklisted payers.
+        if let Some(entry) = env
+            .storage()
+            .persistent()
+            .get::<_, BlacklistEntry>(&blacklist_key(&payer))
+        {
+            if entry.finalised && entry.upheld {
+                return Err(Error::PayerBlacklisted);
+            }
+        }
 
         let mut invoice = get_invoice(&env, invoice_id)?;
 
@@ -505,6 +556,213 @@ impl InvoiceEscrowContract {
     }
 
     // -----------------------------------------------------------------------
+    // Payer blacklist
+    // -----------------------------------------------------------------------
+
+    /// Blacklist a payer, preventing them from depositing into any invoice.
+    ///
+    /// Only the contract admin can blacklist a payer. The blacklist entry
+    /// starts with `finalised: false`, giving the payer a window to submit
+    /// an appeal via [`Self::submit_appeal`].
+    ///
+    /// # Arguments
+    /// * `admin` — Contract admin address (must authenticate).
+    /// * `payer` — Address to blacklist.
+    /// * `reason_hash` — 32-byte hash describing the reason for the blacklist.
+    ///
+    /// # Events
+    /// Emits `("blacklist", "bl_add")` with `(payer, reason_hash, banned_at)`.
+    ///
+    /// # Errors
+    /// * [`Error::NotAdmin`] if caller is not the admin.
+    /// * [`Error::NotInitialized`] if contract is not initialized.
+    pub fn blacklist_payer(
+        env: Env,
+        admin: Address,
+        payer: Address,
+        reason_hash: BytesN<32>,
+    ) -> Result<(), Error> {
+        if !env.storage().instance().has(&admin_key()) {
+            return Err(Error::NotInitialized);
+        }
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&admin_key())
+            .unwrap();
+        if admin != stored_admin {
+            return Err(Error::NotAdmin);
+        }
+        admin.require_auth();
+
+        let now = env.ledger().timestamp();
+        let entry = BlacklistEntry {
+            banned_at: now,
+            appeal_hash: None,
+            finalised: false,
+            upheld: false,
+            reason_hash: reason_hash.clone(),
+        };
+        env.storage()
+            .persistent()
+            .set(&blacklist_key(&payer), &entry);
+        emit_payer_blacklisted(&env, &payer, &reason_hash, now);
+        Ok(())
+    }
+
+    /// Submit an appeal against a blacklist entry.
+    ///
+    /// Only the blacklisted payer may call this, and only within
+    /// `APPEAL_WINDOW_LEDGERS` ledgers of being blacklisted. The appeal
+    /// hash should be a commitment to the appeal justification (revealed
+    /// off-chain if needed).
+    ///
+    /// # Arguments
+    /// * `payer` — The blacklisted payer (must authenticate).
+    /// * `invoice_id` — An invoice ID for context (logged in event).
+    /// * `appeal_hash` — 32-byte hash of the appeal justification.
+    ///
+    /// # Events
+    /// Emits `("blacklist", "appeal")` with `(payer, appeal_hash)`.
+    ///
+    /// # Errors
+    /// * [`Error::NotBlacklisted`] if payer has no blacklist entry.
+    /// * [`Error::AppealWindowExpired`] if the appeal window has passed.
+    /// * [`Error::AlreadyFinalised`] if the blacklist is already finalised.
+    /// * [`Error::NotBlacklistedPayer`] if caller is not the blacklisted payer.
+    pub fn submit_appeal(
+        env: Env,
+        payer: Address,
+        invoice_id: u64,
+        appeal_hash: BytesN<32>,
+    ) -> Result<(), Error> {
+        payer.require_auth();
+
+        let mut entry: BlacklistEntry = env
+            .storage()
+            .persistent()
+            .get(&blacklist_key(&payer))
+            .ok_or(Error::NotBlacklisted)?;
+
+        if entry.finalised {
+            return Err(Error::AlreadyFinalised);
+        }
+
+        // Check appeal window: must be within APPEAL_WINDOW_LEDGERS of ban.
+        // Uses rough timestamp conversion (~5s per ledger). For production,
+        // store `ban_ledger` in BlacklistEntry for precise ledger-based check.
+        let now = env.ledger().timestamp();
+        let appeal_deadline = entry
+            .banned_at
+            .saturating_add(APPEAL_WINDOW_LEDGERS as u64 * 5);
+        if now > appeal_deadline {
+            return Err(Error::AppealWindowExpired);
+        }
+
+        entry.appeal_hash = Some(appeal_hash.clone());
+        env.storage()
+            .persistent()
+            .set(&blacklist_key(&payer), &entry);
+        emit_appeal_submitted(&env, &payer, &appeal_hash);
+
+        // Log invoice context in event
+        env.events().publish(
+            (symbol_short!("appeal"), invoice_id),
+            payer,
+        );
+        Ok(())
+    }
+
+    /// Finalise a blacklist entry — either uphold the ban or reinstate the payer.
+    ///
+    /// Only the admin may call this. If `uphold` is `true`, the blacklist
+    /// entry is finalised and the payer remains blocked. If `uphold` is
+    /// `false`, the blacklist entry is removed entirely and the payer is
+    /// reinstated.
+    ///
+    /// # Arguments
+    /// * `admin` — Contract admin (must authenticate).
+    /// * `payer` — The blacklisted payer to finalise.
+    /// * `uphold` — `true` to keep the ban, `false` to reinstate.
+    ///
+    /// # Events
+    /// Emits `("blacklist", "bl_fin")` with `(payer, upheld)`.
+    ///
+    /// # Errors
+    /// * [`Error::NotAdmin`] if caller is not the admin.
+    /// * [`Error::NotBlacklisted`] if payer has no blacklist entry.
+    /// * [`Error::AlreadyFinalised`] if already finalised.
+    pub fn finalise_blacklist(
+        env: Env,
+        admin: Address,
+        payer: Address,
+        uphold: bool,
+    ) -> Result<(), Error> {
+        if !env.storage().instance().has(&admin_key()) {
+            return Err(Error::NotInitialized);
+        }
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&admin_key())
+            .unwrap();
+        if admin != stored_admin {
+            return Err(Error::NotAdmin);
+        }
+        admin.require_auth();
+
+        let mut entry: BlacklistEntry = env
+            .storage()
+            .persistent()
+            .get(&blacklist_key(&payer))
+            .ok_or(Error::NotBlacklisted)?;
+
+        if entry.finalised {
+            return Err(Error::AlreadyFinalised);
+        }
+
+        if uphold {
+            entry.finalised = true;
+            entry.upheld = true;
+            env.storage()
+                .persistent()
+                .set(&blacklist_key(&payer), &entry);
+        } else {
+            // Reinstate: remove the blacklist entry.
+            env.storage()
+                .persistent()
+                .remove(&blacklist_key(&payer));
+        }
+
+        emit_blacklist_finalised(&env, &payer, uphold);
+        Ok(())
+    }
+
+    /// Pay an invoice — delegates to [`Self::deposit`] which checks the
+    /// payer blacklist before processing.
+    ///
+    /// If the payer is blacklisted (`finalised` and `upheld`), the
+    /// call returns [`Error::PayerBlacklisted`].
+    ///
+    /// # Arguments
+    /// * `payer` — Address making the payment (must authenticate).
+    /// * `invoice_id` — Target invoice ID.
+    /// * `amount` — Amount to pay toward the invoice.
+    ///
+    /// # Errors
+    /// * [`Error::PayerBlacklisted`] — Payer is on the blacklist and
+    ///   the entry is finalised with `upheld: true`.
+    /// * See [`Self::deposit`] for all other errors.
+    pub fn pay_invoice(
+        env: Env,
+        payer: Address,
+        invoice_id: u64,
+        amount: i128,
+    ) -> Result<(), Error> {
+        Self::deposit(env, payer, invoice_id, amount)
+    }
+
+    // -----------------------------------------------------------------------
     // Read-only queries
     // -----------------------------------------------------------------------
 
@@ -522,5 +780,20 @@ impl InvoiceEscrowContract {
             .persistent()
             .get(&deposit_key(invoice_id, &payer))
             .unwrap_or(0)
+    }
+
+    /// Return the blacklist entry for a payer, if any.
+    pub fn get_blacklist_entry(env: Env, payer: Address) -> Option<BlacklistEntry> {
+        env.storage()
+            .persistent()
+            .get(&blacklist_key(&payer))
+    }
+
+    /// Return `true` if the payer is blacklisted with a finalised and upheld entry.
+    pub fn is_payer_blacklisted(env: Env, payer: Address) -> bool {
+        env.storage()
+            .persistent()
+            .get::<_, BlacklistEntry>(&blacklist_key(&payer))
+            .map_or(false, |entry| entry.finalised && entry.upheld)
     }
 }
