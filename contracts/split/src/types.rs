@@ -129,12 +129,27 @@ pub struct Bid {
     pub amount: i128,
 }
 
+// ---------------------------------------------------------------------------
+// Invoice status
+// ---------------------------------------------------------------------------
+
+/// Status of an invoice lifecycle.
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub enum InvoiceStatus {
     Pending,
     Released,
     Refunded,
+    /// Alias for Released used as the parent-finalisation gate (#522).
+    /// An invoice is considered Finalised once it has been Released.
+    Finalised,
+}
+
+// ---------------------------------------------------------------------------
+// Payment
+// ---------------------------------------------------------------------------
+
+/// A single payment made toward an invoice.
     Expired,
     Cancelled,
     Disputed,
@@ -225,6 +240,11 @@ pub struct Payment {
     pub donate_on_failure: bool,
 }
 
+// ---------------------------------------------------------------------------
+// Invoice
+// ---------------------------------------------------------------------------
+
+/// An on-chain invoice splitting payment among multiple recipients.
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct AuditEntry {

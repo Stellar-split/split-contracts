@@ -14587,6 +14587,21 @@ impl SplitContract {
             }
         }
 
+        // #522 — validate parent reference before creating the invoice.
+        if let Some(parent_id) = parent_invoice_id {
+            Self::_validate_parent(&env, parent_id, 0);
+        }
+
+        Self::_create_invoice_inner(
+            &env,
+            creator,
+            recipients,
+            amounts,
+            token,
+            deadline,
+            parent_invoice_id,
+            late_penalty_bps,
+        )
         // Refund every contributor. All transfers happen before state is mutated
         // so the operation is effectively atomic: if any transfer panics the
         // entire transaction is rolled back (Soroban's standard behaviour).
@@ -15150,6 +15165,25 @@ impl SplitContract {
             .persistent()
             .get(&template_id_key(&creator, template_id))
             .expect("template not found")
+    }
+
+    /// #522 — Walk the parent chain and verify:
+    /// 1. The chain depth does not exceed `MAX_PARENT_DEPTH`.
+    /// 2. Each referenced invoice exists.
+    ///
+    /// `depth` starts at 0 for the direct parent.
+    fn _validate_parent(env: &Env, parent_id: u64, depth: u32) {
+        if depth >= MAX_PARENT_DEPTH {
+            panic_with_error!(env, ContractError::ParentChainTooDeep);
+        }
+
+        // Load the parent — panics with "invoice not found" if it doesn't exist.
+        let parent = load_invoice(env, parent_id);
+
+        // Recurse if this parent also has a parent.
+        if let Some(grandparent_id) = parent.parent_invoice_id {
+            Self::_validate_parent(env, grandparent_id, depth + 1);
+        }
     }
 }
 
