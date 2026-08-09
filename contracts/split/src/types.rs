@@ -112,6 +112,8 @@ pub struct CreatorStats {
     pub total_payers: u32,
     /// Average funding time in ledgers (running average).
     pub avg_funding_time_ledgers: u32,
+    /// Total number of refunded invoices.
+    pub total_refunded: u32,
 }
 
 /// Issue #: A single (invoice_id, amount) pair for pool_pay.
@@ -164,6 +166,8 @@ pub struct Payment {
     pub tip: i128,
     pub attestation_hash: Option<BytesN<32>>,
     pub donate_on_failure: bool,
+    pub ledger: u32,
+    pub timestamp: u64,
 }
 
 /// Issue #449: Multi-phase invoice state machine.
@@ -238,17 +242,6 @@ pub struct TransferRecord {
     pub kind: TransferKind,
     /// Ledger sequence at the time of the transfer.
     pub ledger: u32,
-}
-
-/// A single payment made toward an invoice.
-#[contracttype]
-#[derive(Clone, Debug)]
-pub struct Payment {
-    pub payer: Address,
-    pub amount: i128,
-    pub tip: i128,
-    pub attestation_hash: Option<BytesN<32>>,
-    pub donate_on_failure: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -687,6 +680,12 @@ pub struct InvoiceExt2 {
     /// Issue #489: total platform-fee discount accrued from early-bird
     /// contributions so far; deducted from the platform fee at release.
     pub early_bird_fee_credit: i128,
+    /// Issue #559: creator fee in basis points (taken before platform fee).
+    pub creator_fee_bps: u32,
+    /// Issue #518: denominator for custom split ratios.
+    pub ratio_denominator: u64,
+    /// Issue #518: per-recipient split ratios (parallel to recipients vec).
+    pub ratios: Vec<u32>,
 }
 
 /// Issue #211: A single escalating penalty tier (seconds_after_deadline, bps).
@@ -1537,6 +1536,9 @@ impl InvoiceStatus {
             InvoiceStatus::Cancelled => 3,
             InvoiceStatus::Expired => 4,
             InvoiceStatus::Disputed => 5,
+            InvoiceStatus::PartiallyReleased => 6,
+            InvoiceStatus::Finalised => 7,
+            InvoiceStatus::Deleted => 8,
         }
     }
 
@@ -1548,6 +1550,9 @@ impl InvoiceStatus {
             3 => InvoiceStatus::Cancelled,
             4 => InvoiceStatus::Expired,
             5 => InvoiceStatus::Disputed,
+            6 => InvoiceStatus::PartiallyReleased,
+            7 => InvoiceStatus::Finalised,
+            8 => InvoiceStatus::Deleted,
             _ => InvoiceStatus::Pending,
         }
     }

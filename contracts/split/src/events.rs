@@ -635,6 +635,9 @@ pub fn invoice_state_changed(
         Some(InvoiceStatus::Expired) => symbol_short!("expired"),
         Some(InvoiceStatus::Cancelled) => symbol_short!("cancld"),
         Some(InvoiceStatus::Disputed) => symbol_short!("disputed"),
+        Some(InvoiceStatus::PartiallyReleased) => symbol_short!("part_rel"),
+        Some(InvoiceStatus::Finalised) => symbol_short!("finald"),
+        Some(InvoiceStatus::Deleted) => symbol_short!("deleted"),
     };
     let to_sym = match to_status {
         InvoiceStatus::Pending => symbol_short!("pending"),
@@ -643,6 +646,9 @@ pub fn invoice_state_changed(
         InvoiceStatus::Expired => symbol_short!("expired"),
         InvoiceStatus::Cancelled => symbol_short!("cancld"),
         InvoiceStatus::Disputed => symbol_short!("disputed"),
+        InvoiceStatus::PartiallyReleased => symbol_short!("part_rel"),
+        InvoiceStatus::Finalised => symbol_short!("finald"),
+        InvoiceStatus::Deleted => symbol_short!("deleted"),
     };
     env.events().publish(
         (symbol_short!("split"), symbol_short!("st_chg"), invoice_id),
@@ -911,7 +917,7 @@ pub fn fee_recipients_updated(env: &Env, recipients: &Vec<FeeSplit>) {
     env.events().publish(
         (
             symbol_short!("split"),
-            symbol_short!("fee_rcp_upd"),
+            symbol_short!("fee_rc_up"),
         ),
         (recipients.clone(),),
     );
@@ -1210,6 +1216,7 @@ pub fn trusted_caller_removed(env: &Env, caller: &Address) {
 /// RBAC: Emitted when an admin grants a role to an address.
 /// Topics: (split, role_grt, grantee)
 /// Data: (role_discriminant, admin)
+#[allow(dead_code)]
 pub fn role_granted(env: &Env, grantee: &Address, role_discriminant: u32, admin: &Address) {
     env.events().publish(
         (
@@ -1224,6 +1231,7 @@ pub fn role_granted(env: &Env, grantee: &Address, role_discriminant: u32, admin:
 /// RBAC: Emitted when an admin revokes a role from an address.
 /// Topics: (split, role_rev, grantee)
 /// Data: (role_discriminant, admin)
+#[allow(dead_code)]
 pub fn role_revoked(env: &Env, grantee: &Address, role_discriminant: u32, admin: &Address) {
     env.events().publish(
         (
@@ -1238,6 +1246,7 @@ pub fn role_revoked(env: &Env, grantee: &Address, role_discriminant: u32, admin:
 /// Issue #474: Emitted when a creator cancels an open invoice and all contributors are refunded.
 /// Topics: (split, inv_cncl, invoice_id)
 /// Data: (creator, total_refunded, ledger)
+#[allow(dead_code)]
 pub fn invoice_cancelled(env: &Env, invoice_id: u64, creator: &Address, total_refunded: i128) {
     env.events().publish(
         (
@@ -1411,7 +1420,7 @@ pub fn payer_spend_limit_reached(
     env.events().publish(
         (
             symbol_short!("split"),
-            symbol_short!("pay_sp_lim"),
+            symbol_short!("pay_sp_lm"),
             payer.clone(),
         ),
         (window_total, cap, env.ledger().sequence()),
@@ -1505,6 +1514,7 @@ pub fn recipient_account_missing(env: &Env, invoice_id: u64, recipient: &Address
 ///
 /// Topics: `("child_unblk", child_id)`
 /// Data:   `parent_id`
+#[allow(dead_code)]
 pub fn child_invoice_unblocked(env: &Env, child_id: u64, parent_id: u64) {
     env.events().publish(
         (symbol_short!("chld_ubl"), child_id),
@@ -1520,6 +1530,7 @@ pub fn child_invoice_unblocked(env: &Env, child_id: u64, parent_id: u64) {
 ///
 /// Topics: `("late_pen", invoice_id)`
 /// Data:   `(payer, penalty_amount)`
+#[allow(dead_code)]
 pub fn late_payment_penalty_charged(
     env: &Env,
     invoice_id: u64,
@@ -1541,6 +1552,7 @@ pub fn late_payment_penalty_charged(
 ///
 /// Topics: `("batch_crt",)`
 /// Data:   `ids: Vec<u64>`
+#[allow(dead_code)]
 pub fn batch_invoice_created(env: &Env, ids: &Vec<u64>) {
     env.events()
         .publish((symbol_short!("btch_crt"),), ids.clone());
@@ -1556,7 +1568,7 @@ pub fn batch_invoice_created(env: &Env, ids: &Vec<u64>) {
 /// Data:   `(creator, fee_amount)`
 pub fn creator_fee_paid(env: &Env, invoice_id: u64, creator: &Address, fee_amount: i128) {
     env.events().publish(
-        (symbol_short!("creator_fee"), invoice_id),
+        (symbol_short!("crtr_fee"), invoice_id),
         (creator.clone(), fee_amount),
     );
 }
@@ -1571,7 +1583,7 @@ pub fn creator_fee_paid(env: &Env, invoice_id: u64, creator: &Address, fee_amoun
 /// Data:   `(successor)`
 pub fn creator_nominated(env: &Env, invoice_id: u64, successor: &Address) {
     env.events().publish(
-        (symbol_short!("creator_nom"), invoice_id),
+        (symbol_short!("crtr_nom"), invoice_id),
         successor.clone(),
     );
 }
@@ -1582,7 +1594,7 @@ pub fn creator_nominated(env: &Env, invoice_id: u64, successor: &Address) {
 /// Data:   `(new_creator)`
 pub fn creator_migrated(env: &Env, invoice_id: u64, new_creator: &Address) {
     env.events().publish(
-        (symbol_short!("creator_mig"), invoice_id),
+        (symbol_short!("crtr_mig"), invoice_id),
         new_creator.clone(),
     );
 }
@@ -1603,7 +1615,52 @@ pub fn payout_initiated(
     amount: i128,
 ) {
     env.events().publish(
-        (symbol_short!("payout_init"), invoice_id, recipient_index),
+        (symbol_short!("pyt_init"), invoice_id, recipient_index),
         (recipient.clone(), amount),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Event version constants used by newer event functions
+// ---------------------------------------------------------------------------
+
+const INVOICE_LIMIT_UPDATED_V: u32 = 1;
+const RECIPIENT_ACCOUNT_MISSING_V: u32 = 1;
+
+// ---------------------------------------------------------------------------
+// Missing event functions (added by Wave 7 PRs)
+// ---------------------------------------------------------------------------
+
+/// Emitted when a contributor withdraws their contribution from a pending invoice.
+pub fn contribution_withdrawn(env: &Env, invoice_id: u64, payer: &Address, amount: i128) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("ctb_wdrw"), invoice_id),
+        (payer.clone(), amount),
+    );
+}
+
+/// Emitted when an admin locks a recipient's share of an invoice.
+pub fn recipient_share_locked(
+    env: &Env,
+    invoice_id: u64,
+    recipient: &Address,
+    admin: &Address,
+) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("sh_lock"), invoice_id),
+        (recipient.clone(), admin.clone()),
+    );
+}
+
+/// Emitted when an admin unlocks a recipient's share of an invoice.
+pub fn recipient_share_unlocked(
+    env: &Env,
+    invoice_id: u64,
+    recipient: &Address,
+    admin: &Address,
+) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("sh_unlk"), invoice_id),
+        (recipient.clone(), admin.clone()),
     );
 }

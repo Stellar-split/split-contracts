@@ -1,7 +1,7 @@
 use soroban_sdk::contracterror;
 
 /// Unified error taxonomy (issue #273). Discriminants are stable — never reorder, only append.
-#[contracterror]
+#[contracterror(export = false)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 #[repr(u32)]
 pub enum ContractError {
@@ -89,19 +89,33 @@ pub enum ContractError {
     /// Issue #562: attempted to read tombstone for an invoice that is not deleted.
     NotDeleted = 50,
     /// Issue #519: An invoice status transition is not permitted by the state machine.
-    InvalidStateTransition = 47,
+    InvalidStateTransition = 52,
     /// Issue #518: A split ratio is invalid (e.g. >= denominator or sum mismatch).
-    InvalidRatio = 48,
+    InvalidRatio = 53,
     /// Storage migration framework: `schema_version` is behind the version
     /// this Wasm build expects. Call `migrate` before retrying.
-    MigrationRequired = 47,
+    MigrationRequired = 54,
     /// Issue #556: The recipient list supplied at invoice creation contains a
     /// duplicate address. Rejected before any storage is written.
-    DuplicateRecipient = 49,
+    DuplicateRecipient = 55,
     /// Issue #557: Split ratios are locked after the first contribution is
     /// recorded and may no longer be mutated.
-    SplitRatioLocked = 50,
+    SplitRatioLocked = 56,
     /// Issue #558: A recipient address has not established a trustline for the
     /// payment token. The offending address is surfaced in the panic message.
     RecipientMissingTrustline = 51,
+    /// Issue #503: Creator has reached their open invoice limit.
+    CreatorInvoiceLimitReached = 57,
+    /// Issue #503: Co-creator count would exceed the maximum allowed.
+    CoCreatorLimitReached = 58,
+    /// Invoice is under active dispute and cannot be released.
+    InvoiceDisputed = 59,
+    /// Issue #503: Payer spend limit would be exceeded by this payment.
+    PayerSpendLimitExceeded = 60,
+    /// Issue #505: Recipient account does not exist on-ledger.
+    RecipientAccountMissing = 61,
+    /// Recipient not found in the invoice recipient list.
+    RecipientNotFound = 62,
+    /// Issue #522: Parent chain depth exceeds the allowed maximum.
+    ParentChainTooDeep = 63,
 }

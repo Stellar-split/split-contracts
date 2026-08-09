@@ -6,7 +6,7 @@
 
 #![no_std]
 
-use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, BytesN, Env, Symbol, Val, Vec};
+use soroban_sdk::{contract, contractimpl, symbol_short, xdr::ToXdr, Address, Bytes, BytesN, Env, Symbol, Val, Vec};
 
 // ---------------------------------------------------------------------------
 // Storage keys
@@ -109,10 +109,17 @@ impl SplitFactory {
             "deployment limit exceeded"
         );
 
+        // Derive a per-(creator, salt) effective deployment salt so different
+        // creators can independently reuse the same user-provided salt without
+        // address collisions. effective_salt = sha256(creator_xdr || user_salt).
+        let mut salt_input = creator.clone().to_xdr(&env);
+        salt_input.append(&Bytes::from_array(&env, &salt.to_array()));
+        let effective_salt: BytesN<32> = env.crypto().sha256(&salt_input).into();
+
         // Deploy using the clone-factory pattern.
         let deployed_address = env
             .deployer()
-            .with_current_contract(salt.clone())
+            .with_current_contract(effective_salt)
             .deploy(wasm_hash);
 
         // Invoke init on the deployed contract if init_args is non-empty.
@@ -163,13 +170,10 @@ impl SplitFactory {
 #[cfg(test)]
 mod test {
     use super::*;
-    use soroban_sdk::{testutils::Address as _, BytesN, Env, Val, Vec};
+    use soroban_sdk::{testutils::{Address as _, Events as _}, BytesN, Env, TryFromVal, Val, Vec};
 
-    /// Minimal valid Soroban WASM stub (WebAssembly module with no exports).
-    const STUB_WASM: &[u8] = &[
-        0x00, 0x61, 0x73, 0x6d, // magic: \0asm
-        0x01, 0x00, 0x00, 0x00, // version: 1
-    ];
+    /// Minimal valid Soroban WASM stub (soroban-sdk doctest fixture).
+    const STUB_WASM: &[u8] = include_bytes!("../../../tests/fixtures/stub_contract.wasm");
 
     #[test]
     fn test_deploy_single_contract() {
@@ -305,7 +309,7 @@ mod test {
             let topics = event.1;
             // topics: (factory, deployed, creator)
             if topics.len() >= 3 {
-                if let Ok(t0) = Symbol::try_from_val(&env, &topics.get_unchecked(0)) {
+                if let Ok(t0) = <Symbol as TryFromVal<Env, Val>>::try_from_val(&env, &topics.get_unchecked(0)) {
                     if t0 == symbol_short!("factory") {
                         found = true;
                         break;

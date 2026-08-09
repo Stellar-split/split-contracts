@@ -380,9 +380,19 @@ fn test_deposit_after_deadline_fails() {
     mint(&env, &token, &token_admin, &payer, 2_000_000);
 
     client.initialize(&admin);
-    let now = env.ledger().timestamp();
-    // Set deadline in the past by using timestamp 0 (already passed if now > 0)
+    // Deadline 0 — create invoice, then advance ledger past deadline before depositing.
     let id = client.create_invoice(&creator, &token, &1_000_000, &0u64);
+
+    env.ledger().set(LedgerInfo {
+        timestamp: 1,
+        protocol_version: 22,
+        sequence_number: 1,
+        network_id: Default::default(),
+        base_reserve: 10,
+        min_temp_entry_ttl: 10,
+        min_persistent_entry_ttl: 10,
+        max_entry_ttl: 3_110_400,
+    });
 
     let result = client.try_deposit(&payer, &id, &500_000);
     assert_eq!(result, Err(Ok(Error::DeadlinePassed)));

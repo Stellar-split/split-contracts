@@ -274,9 +274,6 @@ fn storage_key_snapshot() {
         hex_xdr(&env, template_version_key(&a, &s, 1)),
     ));
 
-    // Issue #474: invoice cancellation key (Symbol, u64)
-    keys.push(("invoice_cancelled_key", hex_xdr(&env, invoice_cancelled_key(1))));
-
     // Issue #475: multi-sig admin set key (Symbol — instance storage)
     keys.push(("admin_set_key", hex_xdr(&env, admin_set_key())));
 
@@ -284,16 +281,7 @@ fn storage_key_snapshot() {
     keys.push(("template_id_key", hex_xdr(&env, template_id_key(&a, 1))));
     keys.push(("template_id_counter_key", hex_xdr(&env, template_id_counter_key(&a))));
 
-    // Issue #474: invoice cancellation key (Symbol, u64)
-    keys.push(("invoice_cancelled_key", hex_xdr(&env, invoice_cancelled_key(1))));
-
-    // Issue #475: multi-sig admin keys
-    keys.push(("admin_set_key", hex_xdr(&env, admin_set_key())));
     // pending_admin_action_key uses BytesN<32> — skip snapshot (tested via integration)
-
-    // Issue #476: ID-based template factory keys
-    keys.push(("template_id_key", hex_xdr(&env, template_id_key(&a, 1))));
-    keys.push(("template_id_counter_key", hex_xdr(&env, template_id_counter_key(&a))));
     // Issue #485: contributor allowlist key (Symbol, u64)
     keys.push(("contributor_allowlist_key", hex_xdr(&env, contributor_allowlist_key(1))));
 

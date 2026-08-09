@@ -31,7 +31,7 @@
 //! Use [`migrate_persistent`] / [`migrate_instance`] when renaming a key
 //! between contract versions.
 
-use soroban_sdk::{contracttype, Address, Env, IntoVal, Symbol, TryFromVal, Val};
+use soroban_sdk::{contracttype, symbol_short, Address, Env, IntoVal, Symbol, TryFromVal, Val};
 
 // ---------------------------------------------------------------------------
 // Enum 1 — Instance-tier singletons
@@ -204,6 +204,7 @@ pub enum CompoundKey {
 ///
 /// Use this in contract `upgrade()` when renaming a storage key between
 /// contract versions.
+#[allow(dead_code)]
 pub fn migrate_persistent<OldKey, NewKey, V>(env: &Env, old_key: &OldKey, new_key: &NewKey)
 where
     OldKey: IntoVal<Env, Val>,
@@ -217,6 +218,7 @@ where
 }
 
 /// Same as [`migrate_persistent`] but operates on **instance** storage.
+#[allow(dead_code)]
 pub fn migrate_instance<OldKey, NewKey, V>(env: &Env, old_key: &OldKey, new_key: &NewKey)
 where
     OldKey: IntoVal<Env, Val>,
@@ -236,19 +238,23 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::{xdr::ToXdr, Env};
+    use soroban_sdk::{testutils::Address as _, xdr::ToXdr, Env};
 
     fn xdr_sk(env: &Env, k: &StorageKey) -> soroban_sdk::Bytes {
-        k.clone().into_val(env).to_xdr(env)
+        let v: soroban_sdk::Val = k.clone().into_val(env);
+        v.to_xdr(env)
     }
     fn xdr_ik(env: &Env, k: &InvoiceKey) -> soroban_sdk::Bytes {
-        k.clone().into_val(env).to_xdr(env)
+        let v: soroban_sdk::Val = k.clone().into_val(env);
+        v.to_xdr(env)
     }
     fn xdr_ak(env: &Env, k: &AddressKey) -> soroban_sdk::Bytes {
-        k.clone().into_val(env).to_xdr(env)
+        let v: soroban_sdk::Val = k.clone().into_val(env);
+        v.to_xdr(env)
     }
     fn xdr_ck(env: &Env, k: &CompoundKey) -> soroban_sdk::Bytes {
-        k.clone().into_val(env).to_xdr(env)
+        let v: soroban_sdk::Val = k.clone().into_val(env);
+        v.to_xdr(env)
     }
 
     #[test]
@@ -390,8 +396,15 @@ mod tests {
 
 /// Creator fee in basis points stored at invoice creation — persistent storage.
 /// Key: (Symbol, u64) → u32
+#[allow(dead_code)]
 pub fn creator_fee_bps_key(invoice_id: u64) -> (Symbol, u64) {
-    (symbol_short!("cr_fee_bps"), invoice_id)
+    (symbol_short!("cr_fee_bp"), invoice_id)
+}
+
+/// Set of allowed payment tokens — persistent storage.
+/// Key: Symbol → Vec<Address>
+pub fn allowed_tokens_key() -> Symbol {
+    symbol_short!("alwd_toks")
 }
 
 // ---------------------------------------------------------------------------
@@ -400,6 +413,7 @@ pub fn creator_fee_bps_key(invoice_id: u64) -> (Symbol, u64) {
 
 /// Pending successor creator address — persistent storage.
 /// Key: (Symbol, u64) → Address
+#[allow(dead_code)]
 pub fn pending_creator_key(invoice_id: u64) -> (Symbol, u64) {
     (symbol_short!("pend_cr"), invoice_id)
 }
@@ -410,6 +424,7 @@ pub fn pending_creator_key(invoice_id: u64) -> (Symbol, u64) {
 
 /// Tombstone record for soft-deleted invoices — persistent storage.
 /// Key: (Symbol, u64) → Tombstone
+#[allow(dead_code)]
 pub fn tombstone_key(invoice_id: u64) -> (Symbol, u64) {
     (symbol_short!("tombstone"), invoice_id)
 }

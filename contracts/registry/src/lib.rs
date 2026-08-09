@@ -40,7 +40,7 @@ pub fn contract_registered(env: &Env, creator: &Address, contract: &Address) {
     env.events().publish(
         (
             symbol_short!("registry"),
-            symbol_short!("registered"),
+            symbol_short!("register"),
             creator.clone(),
         ),
         contract.clone(),
@@ -149,7 +149,7 @@ mod test {
     use super::*;
     use soroban_sdk::{
         testutils::{Address as _, Events as _},
-        Address, Env, Symbol, Vec,
+        Address, Env, Symbol, TryFromVal, Val, Vec,
     };
 
     #[test]
@@ -241,7 +241,7 @@ mod test {
         for event in events.iter() {
             let topics = event.1;
             if topics.len() >= 3 {
-                if let Ok(t0) = Symbol::try_from_val(&env, &topics.get_unchecked(0)) {
+                if let Ok(t0) = <Symbol as TryFromVal<Env, Val>>::try_from_val(&env, &topics.get_unchecked(0)) {
                     if t0 == symbol_short!("registry") {
                         found = true;
                         break;
