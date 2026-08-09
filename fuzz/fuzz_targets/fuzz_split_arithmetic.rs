@@ -99,7 +99,7 @@ fuzz_target!(|input: Input| {
     let pay_amount = (input.pay_amount as i128).max(1);
     let payer = Address::generate(&env);
     fund(&env, &token_id, &payer);
-    let _ = c.try_pay(&payer, &invoice_id, &pay_amount, &0u64, &false, &false);
+    let _ = c.try_pay(&payer, &invoice_id, &pay_amount, &0u64, &false, &false, &None);
 
     // Attempt release — this exercises all the checked arithmetic paths.
     let _ = c.try_release(&invoice_id);

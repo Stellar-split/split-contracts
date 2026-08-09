@@ -80,7 +80,7 @@ fuzz_target!(|input: Input| {
     let payer = Address::generate(&env);
     fund(&env, &token_id, &payer);
     let total: i128 = amounts.iter().sum();
-    let _ = c.try_pay(&payer, &invoice_id, &total, &0u64, &false, &false);
+    let _ = c.try_pay(&payer, &invoice_id, &total, &0u64, &false, &false, &None);
 
     let _ = c.try_release(&invoice_id);
 });
