@@ -15288,6 +15288,12 @@ impl SplitContract {
         let invoice = load_invoice(&env, invoice_id);
         invoice.recipients
     }
+
+    /// Get the number of payments made toward an invoice.
+    pub fn get_invoice_payment_count(env: Env, invoice_id: u64) -> u32 {
+        let invoice = load_invoice(&env, invoice_id);
+        invoice.payments.len() as u32
+    }
 }
 
 /// Move a finalised invoice from hot storage to cold archival storage.

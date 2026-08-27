@@ -8057,3 +8057,33 @@ fn test_get_invoice_recipients() {
     assert_eq!(retrieved_recipients.get(0), recipient1);
     assert_eq!(retrieved_recipients.get(1), recipient2);
 }
+
+#[test]
+fn test_get_invoice_payment_count() {
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+    let tk = token_client(&env, &token_id);
+
+    let creator = Address::generate(&env);
+    let payer1 = Address::generate(&env);
+    let payer2 = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    StellarAssetClient::new(&env, &token_id).mint(&payer1, &500);
+    StellarAssetClient::new(&env, &token_id).mint(&payer2, &500);
+
+    env.ledger().set_timestamp(1_000);
+
+    let id = make_invoice(&env, &c, &creator, &recipient, 200, &token_id, 9_999);
+
+    // Fresh invoice should have 0 payments
+    assert_eq!(c.get_invoice_payment_count(&id), 0);
+
+    // After first payment, count should be 1
+    c.pay(&payer1, &id, &100_i128, &0_u64, &false, &false, &None);
+    assert_eq!(c.get_invoice_payment_count(&id), 1);
+
+    // After second payment, count should be 2
+    c.pay(&payer2, &id, &100_i128, &0_u64, &false, &false, &None);
+    assert_eq!(c.get_invoice_payment_count(&id), 2);
+}
