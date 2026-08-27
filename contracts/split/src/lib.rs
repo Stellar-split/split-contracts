@@ -4042,6 +4042,18 @@ impl SplitContract {
         }
     }
 
+    pub fn get_invoice_funded(env: Env, invoice_id: u64) -> Result<i128, ContractError> {
+        if let Some(hot) = env.storage().instance().get(&invoice_hot_key(invoice_id)) {
+            Ok(hot.funded)
+        } else if let Some(core) = env.storage().persistent().get(&invoice_key(invoice_id)) {
+            Ok(core.funded)
+        } else if let Some(core) = env.storage().instance().get(&invoice_key(invoice_id)) {
+            Ok(core.funded)
+        } else {
+            Err(ContractError::InvoiceNotFound)
+        }
+    }
+
     /// Get a consolidated invoice snapshot for off-chain audit.
     pub fn get_invoice_snapshot(env: Env, invoice_id: u64) -> types::InvoiceSnapshot {
         let core: types::InvoiceCore = env

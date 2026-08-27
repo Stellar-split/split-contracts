@@ -8043,3 +8043,36 @@ fn test_get_invoice_deadline_not_found() {
     let result = c.try_get_invoice_deadline(&999);
     assert!(result.is_err());
 }
+
+#[test]
+fn test_get_invoice_funded() {
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+    let tk = token_client(&env, &token_id);
+
+    let creator = Address::generate(&env);
+    let payer = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    StellarAssetClient::new(&env, &token_id).mint(&payer, &500);
+    env.ledger().set_timestamp(1_000);
+
+    let id = make_invoice(&env, &c, &creator, &recipient, 200, &token_id, 9_999);
+
+    let funded_before = c.get_invoice_funded(&id).expect("should return funded");
+    assert_eq!(funded_before, 0);
+
+    c.pay(&payer, &id, &150_i128, &0_u64, &false, &false, &None);
+
+    let funded_after = c.get_invoice_funded(&id).expect("should return funded");
+    assert_eq!(funded_after, 150);
+}
+
+#[test]
+fn test_get_invoice_funded_not_found() {
+    let (env, contract_id, _token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+
+    let result = c.try_get_invoice_funded(&999);
+    assert!(result.is_err());
+}
