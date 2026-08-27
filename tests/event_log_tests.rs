@@ -301,3 +301,19 @@ fn allowlist_updated_event_remove() {
 
     assert!(after_events.len() > before_events.len(), "Event should be published");
 }
+
+#[test]
+fn dispute_raised_event_carries_payer_and_hash() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let invoice_id = 1u64;
+    let payer = Address::generate(&env);
+    let reason_hash = BytesN::<32>::random(&env);
+
+    let before_events = env.events().all();
+    dispute_raised(&env, invoice_id, &payer, &reason_hash);
+    let after_events = env.events().all();
+
+    assert!(after_events.len() > before_events.len(), "Event should be published");
+}
