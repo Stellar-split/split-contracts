@@ -8017,3 +8017,40 @@ fn test_cancel_invoice_on_deleted_invoice_panics() {
     c.delete_invoice(&creator, &id);
     c.cancel_invoice(&creator, &id);
 }
+
+// ---------------------------------------------------------------------------
+// Issue #598: Add invoice_id to invoice_refunded event data
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_598_invoice_refunded_event_contains_invoice_id() {
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let payer = Address::generate(&env);
+
+    StellarAssetClient::new(&env, &token_id).mint(&payer, &100);
+    env.ledger().set_timestamp(1_000);
+
+    let mut recipients = Vec::new(&env);
+    recipients.push_back(recipient.clone());
+    let mut amounts = Vec::new(&env);
+    amounts.push_back(200_i128);
+
+    let invoice_id = c.create_invoice(
+        &creator,
+        &recipients,
+        &amounts,
+        &token_id,
+        &2_000,
+        &default_options(&env),
+    );
+
+    c.pay(&payer, &invoice_id, &100_i128, &0_u64, &false, &false, &None);
+
+    env.ledger().set_timestamp(3_000);
+
+    c.issue_refund(&creator, &invoice_id, &None);
+}
