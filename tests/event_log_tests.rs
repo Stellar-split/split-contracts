@@ -240,6 +240,28 @@ fn test_event_log_with_multiple_recipients() {
 
     // Create invoice with 3 recipients
     // Full fund and release
-    
+
     // Verify release event includes all 3 recipient addresses
+}
+
+#[test]
+fn fee_paid_event_carries_amount_and_treasury() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let treasury = Address::generate(&env);
+    let expected_amount: i128 = 500;
+
+    env.ledger().set_sequence(100);
+
+    split_contracts::events::fee_paid(&env, 1, expected_amount, &treasury);
+
+    let events = env.events().all();
+    assert!(!events.is_empty(), "should have at least one event");
+
+    let fee_paid_event = events.last().expect("should have fee_paid event");
+    let (topics, data): (Vec<Symbol>, (i128, Address, u32)) = fee_paid_event.parsed_data();
+
+    assert_eq!(data.0, expected_amount, "amount should match");
+    assert_eq!(data.1, treasury, "treasury should match");
 }
