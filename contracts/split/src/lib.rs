@@ -51,6 +51,7 @@ const ORACLE_RATE_SCALE: i128 = 1_000_000;
 /// growth; admins can tighten it via `set_invoice_storage_quota`.
 const DEFAULT_INVOICE_STORAGE_QUOTA: u64 = 65_536;
 
+mod constants;
 mod error;
 mod events;
 pub mod types;
@@ -64,6 +65,7 @@ mod fuzz_tests;
 #[cfg(test)]
 mod storage_snapshot;
 
+mod storage;
 mod storage_keys;
 
 mod migrations;
@@ -15256,6 +15258,35 @@ impl SplitContract {
             .persistent()
             .get(&template_id_key(&creator, template_id))
             .expect("template not found")
+    }
+
+    /// Issue #563: Extend the TTL of a live invoice.
+    ///
+    /// Callable by any address. Bumps the TTL of all DataKey entries associated
+    /// with the invoice to the maximum allowed duration, preventing silent
+    /// expiration during long-running campaigns or dispute periods.
+    pub fn bump_invoice_ttl(env: Env, invoice_id: u64) {
+        let _invoice = load_invoice(&env, invoice_id);
+
+        // Bump TTL for all known invoice keys
+        let min_ttl = constants::MIN_INVOICE_TTL_LEDGERS;
+        let max_ttl = constants::MAX_INVOICE_TTL_LEDGERS;
+
+        use storage_keys::InvoiceKey;
+        let keys = [
+            InvoiceKey::Invoice(invoice_id),
+            InvoiceKey::InvoiceExt(invoice_id),
+            InvoiceKey::InvoiceExt2(invoice_id),
+            InvoiceKey::RecipientsList(invoice_id),
+            InvoiceKey::AmountsList(invoice_id),
+            InvoiceKey::PaidFlags(invoice_id),
+        ];
+
+        for key in &keys {
+            env.storage()
+                .persistent()
+                .bump(key, min_ttl, max_ttl);
+        }
     }
 
     /// #522 — Walk the parent chain and verify:
