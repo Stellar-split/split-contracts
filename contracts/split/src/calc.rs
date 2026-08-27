@@ -4,6 +4,8 @@
 //! across recipients proportionally, ensuring every stroop is accounted for
 //! (i.e. `sum(result) == total` always holds).
 
+#[allow(unused_imports)]
+use crate::types::BASIS_POINTS_TOTAL;
 use soroban_sdk::{Env, Vec};
 
 /// Distribute `total` among recipients according to their `ratios` out of
@@ -13,7 +15,7 @@ use soroban_sdk::{Env, Vec};
 /// * `env`    – Soroban environment (needed to allocate the result `Vec`)
 /// * `total`  – total amount to distribute (stroops); must be ≥ 0
 /// * `ratios` – relative weight of each recipient (must be non-empty, all ≥ 0)
-/// * `denom`  – sum of all ratios (must be > 0)
+/// * `denom`  – sum of all ratios (must be > 0); typically [`BASIS_POINTS_TOTAL`]
 ///
 /// # Guarantees
 /// * `result.iter().sum::<i128>() == total` always

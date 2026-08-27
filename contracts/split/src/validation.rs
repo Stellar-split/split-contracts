@@ -12,8 +12,8 @@ use soroban_sdk::{symbol_short, Address, Env, Map, Vec};
 /// Uses a `soroban_sdk::Map` for O(n log n) membership tracking — no
 /// unbounded heap allocation and a single pass over the slice.
 ///
-/// Returns `Ok(())` when every address is distinct, or
-/// `Err(ContractError::DuplicateRecipient)` on the first duplicate found.
+/// # Errors
+/// Returns [ContractError::DuplicateRecipient] when a duplicate is found.
 pub fn assert_unique_recipients(env: &Env, recipients: &[Address]) -> Result<(), ContractError> {
     let mut seen: Map<Address, bool> = Map::new(env);
     for r in recipients.iter() {
@@ -40,6 +40,8 @@ pub fn assert_unique_recipients(env: &Env, recipients: &[Address]) -> Result<(),
 /// Returns `Ok(())` when every recipient returns a valid balance, or
 /// `Err(ContractError::RecipientMissingTrustline)` with the offending address
 /// surfaced in the panic message.
+/// # Errors
+/// Returns [ContractError::RecipientMissingTrustline] when a balance call fails.
 pub fn assert_recipients_have_trustlines(
     env: &Env,
     token: &Address,

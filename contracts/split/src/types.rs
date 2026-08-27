@@ -14,8 +14,14 @@ pub struct AssetPair {
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub enum OverflowBehavior {
+    /// Reject the payment outright. The payer receives an error and the
+    /// transaction does not credit the invoice.
     Reject,
+    /// Accept the full payment and mark the surplus for refund to the payer
+    /// at release time.
     Refund,
+    /// Accept the full payment and treat the surplus as a protocol donation;
+    /// no refund is issued.
     Donate,
 }
 
@@ -26,10 +32,19 @@ pub enum OverflowBehavior {
 /// default, and the value legacy invoices are migrated to — preserves the
 /// historical behaviour by delegating to the per-invoice [`OverflowBehavior`]
 /// setting, so invoices created before this field existed are unaffected.
+///
+/// # Relationship
+///
+/// `OverfundingPolicy` is the *outer* policy selector stored on the invoice.
+/// When it is `Cap`, the contract falls back to the per-invoice
+/// [`OverflowBehavior`] value to decide the exact outcome. The other two
+/// variants (`AcceptAll`, `ReturnSurplus`) bypass `OverflowBehavior` entirely
+/// and implement their own semantics directly in `_pay`.
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub enum OverfundingPolicy {
-    /// Reject any payment that would take `funded` past the invoice total.
+    /// Preserve legacy behaviour by delegating to the invoice's
+    /// [`OverflowBehavior`] field.
     Cap,
     /// Accept the payment in full; `funded` is allowed to exceed the total and
     /// the surplus is distributed pro-rata to recipients at release time.

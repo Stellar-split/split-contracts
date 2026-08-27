@@ -1,3 +1,30 @@
+//! # Event naming convention
+//!
+//! All split-contracts events follow a consistent topic layout:
+//! `(symbol_short!("split"), <action>, invoice_id?)`.
+//!
+//! - `<action>` is an 8-char symbol identifying the lifecycle stage
+//!   (`created`, `paid`, `released`, `refunded`, `st_chg`, …).
+//! - `invoice_id` is included as the third topic for per-invoice events
+//!   so indexers can filter by invoice without inspecting event data.
+//!
+//! ## When to call `next_seq`
+//!
+//! Events that represent discrete, countable occurrences on a single invoice
+//! should include an auto-incrementing `event_seq` (fetched via `next_seq`)
+//! as the last field in the event data. This gives indexers a stable,
+//! per-invoice ordering key. Do **not** call `next_seq` for:
+//! - global/contract-level events with no `invoice_id`
+//! - events that already contain a unique identifier (e.g. `action_id`,
+//!   `milestone_number`, `new_id`)
+//!
+//! ## `symbol_short!` vs `Symbol::new`
+//!
+//! Prefer `symbol_short!("abbr")` for event action topics because they are
+//! short, fixed strings. Use `Symbol::new(env, "LongName")` only when the
+//! symbol exceeds the short-macro length limit or must be constructed
+//! dynamically.
+
 use crate::types::{DisputeOutcome, FeeSplit, InvoiceStatus, RepScore, TimelockAction};
 use soroban_sdk::{contracttype, symbol_short, Address, BytesN, Env, String, Vec};
 
