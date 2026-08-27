@@ -251,6 +251,14 @@ mod tests {
         assert_exact(&env, 1_000_000_000, &[100_000, 200_000, 300_000], 600_000);
     }
 
+    #[test]
+    fn single_recipient_gets_full_amount() {
+        let env = Env::default();
+        let r = distribute_with_remainder(&env, 12345, &make_ratios(&env, &[1]), 1);
+        assert_eq!(r.len(), 1);
+        assert_eq!(r.get(0), Some(12345));
+    }
+
     /// Property-based style test: exhaustively verify sum == total for many inputs.
     #[test]
     fn test_property_sum_equals_total() {
