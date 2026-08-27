@@ -8054,3 +8054,87 @@ fn test_598_invoice_refunded_event_contains_invoice_id() {
 
     c.issue_refund(&creator, &invoice_id, &None);
 }
+
+// ---------------------------------------------------------------------------
+// Issue #597: Add get_invoice_amounts view function
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_597_get_invoice_amounts_returns_recipient_amounts() {
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let recipient1 = Address::generate(&env);
+    let recipient2 = Address::generate(&env);
+    let recipient3 = Address::generate(&env);
+
+    env.ledger().set_timestamp(1_000);
+
+    let mut recipients = Vec::new(&env);
+    recipients.push_back(recipient1.clone());
+    recipients.push_back(recipient2.clone());
+    recipients.push_back(recipient3.clone());
+
+    let mut amounts = Vec::new(&env);
+    amounts.push_back(100_i128);
+    amounts.push_back(200_i128);
+    amounts.push_back(300_i128);
+
+    let invoice_id = c.create_invoice(
+        &creator,
+        &recipients,
+        &amounts,
+        &token_id,
+        &9_999,
+        &default_options(&env),
+    );
+
+    let retrieved_amounts = c.get_invoice_amounts(&invoice_id);
+
+    assert_eq!(retrieved_amounts.len(), 3);
+    assert_eq!(retrieved_amounts.get(0), 100_i128);
+    assert_eq!(retrieved_amounts.get(1), 200_i128);
+    assert_eq!(retrieved_amounts.get(2), 300_i128);
+}
+
+#[test]
+fn test_597_get_invoice_amounts_single_recipient() {
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    env.ledger().set_timestamp(1_000);
+
+    let mut recipients = Vec::new(&env);
+    recipients.push_back(recipient.clone());
+    let mut amounts = Vec::new(&env);
+    amounts.push_back(500_i128);
+
+    let invoice_id = c.create_invoice(
+        &creator,
+        &recipients,
+        &amounts,
+        &token_id,
+        &9_999,
+        &default_options(&env),
+    );
+
+    let retrieved_amounts = c.get_invoice_amounts(&invoice_id);
+
+    assert_eq!(retrieved_amounts.len(), 1);
+    assert_eq!(retrieved_amounts.get(0), 500_i128);
+}
+
+#[test]
+#[should_panic(expected = "InvoiceNotFound")]
+fn test_597_get_invoice_amounts_invalid_invoice_id_panics() {
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+
+    env.ledger().set_timestamp(1_000);
+
+    c.get_invoice_amounts(&9999_u64);
+}

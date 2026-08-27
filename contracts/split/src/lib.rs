@@ -4246,6 +4246,16 @@ impl SplitContract {
         env.storage().instance().get(&fee_recipients_key())
     }
 
+    /// Issue #597: Query the per-recipient amounts for an invoice without retrieving the full invoice.
+    /// Throws ContractError::InvoiceNotFound if the invoice does not exist.
+    pub fn get_invoice_amounts(env: Env, invoice_id: u64) -> Vec<i128> {
+        env.storage()
+            .persistent()
+            .get(&storage_keys::InvoiceKey::AmountsList(invoice_id))
+            .ok_or(ContractError::InvoiceNotFound)
+            .unwrap()
+    }
+
     /// Preview the next invoice id that will be assigned by create_invoice.
     pub fn peek_next_invoice_id(env: Env) -> u64 {
         env.storage()
