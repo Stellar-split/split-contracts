@@ -98,4 +98,20 @@ mod tests {
         assert_eq!(stats.2, 0, "total_released should default to 0");
         assert_eq!(stats.3, 0, "total_refunded should default to 0");
     }
+
+    #[test]
+    fn record_invoice_created_increments_counter() {
+        let env = Env::default();
+
+        let stats_before = get_stats(&env);
+        assert_eq!(stats_before.0, 0, "invoice count should start at 0");
+
+        increment_invoice_count(&env);
+
+        let stats_after = get_stats(&env);
+        assert_eq!(stats_after.0, 1, "invoice count should increment to 1");
+        assert_eq!(stats_before.1, stats_after.1, "volume should remain unchanged");
+        assert_eq!(stats_before.2, stats_after.2, "released should remain unchanged");
+        assert_eq!(stats_before.3, stats_after.3, "refunded should remain unchanged");
+    }
 }
