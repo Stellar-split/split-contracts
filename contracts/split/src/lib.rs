@@ -15276,6 +15276,12 @@ impl SplitContract {
             Self::_validate_parent(env, grandparent_id, depth + 1);
         }
     }
+
+    /// Get the creator address for an invoice.
+    pub fn get_invoice_creator(env: Env, invoice_id: u64) -> Address {
+        let invoice = load_invoice(&env, invoice_id);
+        invoice.creator
+    }
 }
 
 /// Move a finalised invoice from hot storage to cold archival storage.

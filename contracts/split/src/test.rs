@@ -8017,3 +8017,17 @@ fn test_cancel_invoice_on_deleted_invoice_panics() {
     c.delete_invoice(&creator, &id);
     c.cancel_invoice(&creator, &id);
 }
+
+#[test]
+fn test_get_invoice_creator() {
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    env.ledger().set_timestamp(1_000);
+
+    let id = make_invoice(&env, &c, &creator, &recipient, 100, &token_id, 2_000);
+    assert_eq!(c.get_invoice_creator(&id), creator);
+}
