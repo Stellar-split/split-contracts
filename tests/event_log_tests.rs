@@ -269,3 +269,35 @@ fn invoice_state_changed_status_symbols() {
         assert!(after_events.len() > before_events.len(), "Event should be published");
     }
 }
+
+#[test]
+fn allowlist_updated_event_add() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let invoice_id = 1u64;
+    let creator = Address::generate(&env);
+    let payer = Address::generate(&env);
+
+    let before_events = env.events().all();
+    allowlist_updated(&env, invoice_id, &creator, &payer, true);
+    let after_events = env.events().all();
+
+    assert!(after_events.len() > before_events.len(), "Event should be published");
+}
+
+#[test]
+fn allowlist_updated_event_remove() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let invoice_id = 1u64;
+    let creator = Address::generate(&env);
+    let payer = Address::generate(&env);
+
+    let before_events = env.events().all();
+    allowlist_updated(&env, invoice_id, &creator, &payer, false);
+    let after_events = env.events().all();
+
+    assert!(after_events.len() > before_events.len(), "Event should be published");
+}
