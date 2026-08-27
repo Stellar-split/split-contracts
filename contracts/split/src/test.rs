@@ -8087,3 +8087,31 @@ fn test_get_invoice_payment_count() {
     c.pay(&payer2, &id, &100_i128, &0_u64, &false, &false, &None);
     assert_eq!(c.get_invoice_payment_count(&id), 2);
 }
+
+#[test]
+fn test_get_invoice_funding_percentage() {
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let payer = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    StellarAssetClient::new(&env, &token_id).mint(&payer, &1000);
+
+    env.ledger().set_timestamp(1_000);
+
+    let id = make_invoice(&env, &c, &creator, &recipient, 100, &token_id, 9_999);
+
+    // 0% funded
+    assert_eq!(c.get_invoice_funding_percentage(&id), 0);
+
+    // 50% funded
+    c.pay(&payer, &id, &50_i128, &0_u64, &false, &false, &None);
+    assert_eq!(c.get_invoice_funding_percentage(&id), 5000);
+
+    // Create new invoice for 100% test
+    let id2 = make_invoice(&env, &c, &creator, &recipient, 200, &token_id, 9_999);
+    c.pay(&payer, &id2, &200_i128, &0_u64, &false, &false, &None);
+    assert_eq!(c.get_invoice_funding_percentage(&id2), 10000);
+}

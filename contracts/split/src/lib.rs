@@ -15294,6 +15294,18 @@ impl SplitContract {
         let invoice = load_invoice(&env, invoice_id);
         invoice.payments.len() as u32
     }
+
+    /// Get the funding percentage of an invoice as basis points.
+    /// Returns (funded * 10_000 / total) as u32, or 0 if total is 0.
+    pub fn get_invoice_funding_percentage(env: Env, invoice_id: u64) -> u32 {
+        let invoice = load_invoice(&env, invoice_id);
+        let total: i128 = invoice.amounts.iter().sum();
+        if total == 0 {
+            0
+        } else {
+            ((invoice.funded * 10_000) / total) as u32
+        }
+    }
 }
 
 /// Move a finalised invoice from hot storage to cold archival storage.
