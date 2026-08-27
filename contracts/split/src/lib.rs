@@ -7,7 +7,9 @@ const SHARD_COUNT: u64 = 8;
 
 mod error;
 mod events;
+mod stats;
 mod types;
+mod validation;
 
 #[cfg(test)]
 mod test;
