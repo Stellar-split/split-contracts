@@ -1662,3 +1662,12 @@ pub struct RecipientShare {
     pub locked: bool,
 }
 
+/// Issue #527: A single payment record stored in a contributor's persistent history.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct PaymentRecord {
+    pub invoice_id: u64,
+    pub amount: i128,
+    pub ledger: u32,
+}
+

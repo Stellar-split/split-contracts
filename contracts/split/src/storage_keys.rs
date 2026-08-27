@@ -89,6 +89,8 @@ pub enum StorageKey {
     UpgradeProposal,
     ProtocolFee,
     ReentrancyGuard,
+    /// Issue #526: Minimum number of recipients required per invoice.
+    MinRecipients,
 }
 
 // ---------------------------------------------------------------------------
@@ -169,6 +171,8 @@ pub enum AddressKey {
     PauseExempt(Address),
     GlobalVelocity(Address),
     CreatorVolMile(Address),
+    /// Issue #527: Payment history for a contributor address.
+    PayerHistory(Address),
 }
 
 // ---------------------------------------------------------------------------
@@ -282,6 +286,7 @@ mod tests {
             StorageKey::PlatformVolThresh, StorageKey::PlatformVolMile,
             StorageKey::CreatorVolThresh, StorageKey::UpgradeProposal,
             StorageKey::ProtocolFee, StorageKey::ReentrancyGuard,
+            StorageKey::MinRecipients,
         ];
         for i in 0..keys.len() {
             for j in (i + 1)..keys.len() {
@@ -349,6 +354,7 @@ mod tests {
             AddressKey::CreatorStatsPayers(addr.clone()),
             AddressKey::GlobalVelocity(addr.clone()),
             AddressKey::PauseExempt(addr.clone()),
+            AddressKey::PayerHistory(addr.clone()),
         ];
         for i in 0..keys.len() {
             for j in (i + 1)..keys.len() {

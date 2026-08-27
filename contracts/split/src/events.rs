@@ -1664,3 +1664,23 @@ pub fn recipient_share_unlocked(
         (recipient.clone(), admin.clone()),
     );
 }
+
+/// Issue #528: Emitted when an admin transfer is proposed.
+/// Topics: (split, adm_prop)
+/// Data: (current_admin, proposed_admin)
+pub fn admin_transfer_proposed(env: &Env, current_admin: &Address, proposed_admin: &Address) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("adm_prop")),
+        (current_admin.clone(), proposed_admin.clone()),
+    );
+}
+
+/// Issue #528: Emitted when an admin transfer is completed.
+/// Topics: (split, adm_done)
+/// Data: new_admin
+pub fn admin_transfer_completed(env: &Env, new_admin: &Address) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("adm_done")),
+        new_admin.clone(),
+    );
+}

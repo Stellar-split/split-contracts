@@ -41,6 +41,8 @@ snapshots/
 *.snapshot
 **/snapshots/
 *.snap.bak
+tests/snapshots/
+tests/fixtures/
 
 # Stellar CLI
 .stellar/

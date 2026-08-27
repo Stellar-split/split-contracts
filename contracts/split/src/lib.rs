@@ -87,8 +87,8 @@ use types::{
     Invoice, InvoiceCore, InvoiceExt, InvoiceExt2, InvoiceExt3, InvoiceHot, InvoiceOptions,
     InvoiceOptions2, InvoicePayment, InvoiceStats, InvoiceStatus, InvoiceTemplate,
     InvoiceTemplateRecord, LegacyInvoice, OverflowBehavior, OverfundingPolicy, Payment,
-    PaymentCertificate, PaymentCommitment, PaymentProof, PendingAdminAction, ProtocolFeeConfig,
-    QueuedAction, RebateTier, Recipient, RepScore, ResolveAction,
+    PaymentCertificate, PaymentCommitment, PaymentProof, PaymentRecord, PendingAdminAction,
+    ProtocolFeeConfig, QueuedAction, RebateTier, Recipient, RepScore, ResolveAction,
     ResolveRule, Role, SimulateReleaseResult, SplitRule, SubscriptionParams, TimelockAction,
     Tombstone, Tranche, TransferRecord, TreasuryRecord, UpgradeProposal,
 };
@@ -843,6 +843,16 @@ fn fee_tiers_key() -> Symbol {
 
 fn pending_admin_key() -> Symbol {
     symbol_short!("pend_adm")
+}
+
+/// Issue #526: Minimum recipient count per invoice — instance storage.
+fn min_recipients_key() -> Symbol {
+    symbol_short!("min_recip")
+}
+
+/// Issue #527: Per-payer payment history — persistent storage.
+fn payer_history_key(payer: &Address) -> (Symbol, Address) {
+    (symbol_short!("pay_hist"), payer.clone())
 }
 
 /// Issue #310: pending upgrade proposal — instance storage.
@@ -2982,6 +2992,20 @@ impl SplitContract {
             }
 
             save_invoice(&env, invoice_id, &invoice);
+
+            // Issue #527: append to payer payment history.
+            let hist_key = payer_history_key(&payer);
+            let mut history: Vec<PaymentRecord> = env
+                .storage()
+                .persistent()
+                .get(&hist_key)
+                .unwrap_or_else(|| Vec::new(&env));
+            history.push_back(PaymentRecord {
+                invoice_id,
+                amount: amount_applied,
+                ledger: env.ledger().sequence(),
+            });
+            env.storage().persistent().set(&hist_key, &history);
         }
 
         ContributionResult {
@@ -3371,6 +3395,7 @@ impl SplitContract {
         env.storage()
             .instance()
             .set(&pending_admin_key(), &new_admin);
+        events::admin_transfer_proposed(&env, &admin, &new_admin);
     }
 
     /// Accept the admin role. Requires the proposed admin to authenticate.
@@ -3383,6 +3408,50 @@ impl SplitContract {
         pending.require_auth();
         env.storage().instance().set(&admin_key(), &pending);
         env.storage().instance().remove(&pending_admin_key());
+        events::admin_transfer_completed(&env, &pending);
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #526: Minimum recipient count
+    // -----------------------------------------------------------------------
+
+    /// Set the minimum number of recipients required per invoice. Requires admin auth.
+    pub fn set_min_recipients(env: Env, admin: Address, min: u32) {
+        require_admin(&env);
+        let _ = admin;
+        env.storage()
+            .instance()
+            .set(&min_recipients_key(), &min);
+    }
+
+    /// Get the minimum number of recipients required per invoice. Default is 2.
+    pub fn get_min_recipients(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&min_recipients_key())
+            .unwrap_or(2u32)
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #527: Payer history query
+    // -----------------------------------------------------------------------
+
+    /// Return a paginated slice of payment records for the given payer.
+    pub fn get_payer_history(env: Env, payer: Address, offset: u32, limit: u32) -> Vec<PaymentRecord> {
+        let hist_key = payer_history_key(&payer);
+        let history: Vec<PaymentRecord> = env
+            .storage()
+            .persistent()
+            .get(&hist_key)
+            .unwrap_or_else(|| Vec::new(&env));
+        let total = history.len();
+        let start = offset.min(total);
+        let end = (start + limit).min(total);
+        let mut result = Vec::new(&env);
+        for i in start..end {
+            result.push_back(history.get(i).unwrap());
+        }
+        result
     }
 
     // -----------------------------------------------------------------------
@@ -5193,6 +5262,17 @@ impl SplitContract {
         );
 
         assert!(!recipients.is_empty(), "must have at least one recipient");
+        // Issue #526: enforce minimum recipient count.
+        {
+            let min_recipients: u32 = env
+                .storage()
+                .instance()
+                .get(&min_recipients_key())
+                .unwrap_or(2u32);
+            if (recipients.len() as u32) < min_recipients {
+                panic_with_error!(env, ContractError::TooFewRecipients);
+            }
+        }
         // Issue #483: reject zero or negative amounts at entry point.
         for amt in amounts.iter() {
             guard_nonzero_amount(amt).expect("ZeroAmountNotAllowed");
