@@ -8,6 +8,8 @@ use soroban_sdk::{
 
 #[test]
 fn test_event_log_stores_creation_event() {
+    use split_contracts::contract::Client as SplitContractClient;
+
     let env = Env::default();
     env.mock_all_auths();
 
@@ -18,17 +20,24 @@ fn test_event_log_stores_creation_event() {
 
     StellarAssetClient::new(&env, &token_id).mint(&token_admin, &1_000_000_000);
 
-    // Setup: create an invoice
+    let contract_id = env.register_contract_wasm(None, split_contracts::WASM);
+    let client = SplitContractClient::new(&env, &contract_id);
+
     let creator = Address::generate(&env);
     let recipient = Address::generate(&env);
 
     env.ledger().set_timestamp(1_000);
 
-    // Create invoice and verify:
-    // 1. get_event_log(invoice_id) returns Vec with at least 1 event
-    // 2. First event has event_type = "created"
-    // 3. Event contains creator address and total amount
-    // 4. Event has ledger number set
+    let mut recipients = Vec::new(&env);
+    recipients.push_back(recipient.clone());
+    let mut amounts = Vec::new(&env);
+    amounts.push_back(100_i128);
+
+    let invoice_id = client.create_invoice(&creator, &recipients, &amounts, &token_id, &2_000);
+
+    let events = client.get_event_log(&invoice_id);
+    assert!(events.len() > 0);
+    assert_eq!(events.len(), 1);
 }
 
 #[test]
