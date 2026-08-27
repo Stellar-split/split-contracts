@@ -69,6 +69,42 @@ pub enum InvoiceStatus {
     Released,
     Refunded,
     Cancelled,
+    Expired,
+    Disputed,
+    PartiallyReleased,
+    Finalised,
+    Deleted,
+}
+
+impl InvoiceStatus {
+    pub fn to_u8(&self) -> u8 {
+        match self {
+            InvoiceStatus::Pending => 0,
+            InvoiceStatus::Released => 1,
+            InvoiceStatus::Refunded => 2,
+            InvoiceStatus::Cancelled => 3,
+            InvoiceStatus::Expired => 4,
+            InvoiceStatus::Disputed => 5,
+            InvoiceStatus::PartiallyReleased => 6,
+            InvoiceStatus::Finalised => 7,
+            InvoiceStatus::Deleted => 8,
+        }
+    }
+
+    pub fn from_u8(value: u8) -> Option<Self> {
+        match value {
+            0 => Some(InvoiceStatus::Pending),
+            1 => Some(InvoiceStatus::Released),
+            2 => Some(InvoiceStatus::Refunded),
+            3 => Some(InvoiceStatus::Cancelled),
+            4 => Some(InvoiceStatus::Expired),
+            5 => Some(InvoiceStatus::Disputed),
+            6 => Some(InvoiceStatus::PartiallyReleased),
+            7 => Some(InvoiceStatus::Finalised),
+            8 => Some(InvoiceStatus::Deleted),
+            _ => None,
+        }
+    }
 }
 
 #[contracttype]
@@ -869,4 +905,30 @@ pub struct InvoiceParams {
     pub creator: Address,
     pub recipients: Vec<Address>,
     // ... add all other fields here ...
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn invoice_status_u8_round_trip() {
+        let variants = vec![
+            InvoiceStatus::Pending,
+            InvoiceStatus::Released,
+            InvoiceStatus::Refunded,
+            InvoiceStatus::Cancelled,
+            InvoiceStatus::Expired,
+            InvoiceStatus::Disputed,
+            InvoiceStatus::PartiallyReleased,
+            InvoiceStatus::Finalised,
+            InvoiceStatus::Deleted,
+        ];
+
+        for status in variants {
+            let u8_val = status.to_u8();
+            let recovered = InvoiceStatus::from_u8(u8_val);
+            assert_eq!(recovered, Some(status.clone()), "Round-trip failed for {:?}", status);
+        }
+    }
 }
