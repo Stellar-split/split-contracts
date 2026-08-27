@@ -8031,3 +8031,29 @@ fn test_get_invoice_creator() {
     let id = make_invoice(&env, &c, &creator, &recipient, 100, &token_id, 2_000);
     assert_eq!(c.get_invoice_creator(&id), creator);
 }
+
+#[test]
+fn test_get_invoice_recipients() {
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let recipient1 = Address::generate(&env);
+    let recipient2 = Address::generate(&env);
+
+    env.ledger().set_timestamp(1_000);
+
+    let mut recipients = Vec::new(&env);
+    recipients.push_back(recipient1.clone());
+    recipients.push_back(recipient2.clone());
+    let mut amounts = Vec::new(&env);
+    amounts.push_back(100);
+    amounts.push_back(200);
+
+    let id = c.create_invoice(&creator, &recipients, &amounts, &token_id, &2_000, &default_options(&env));
+
+    let retrieved_recipients = c.get_invoice_recipients(&id);
+    assert_eq!(retrieved_recipients.len(), 2);
+    assert_eq!(retrieved_recipients.get(0), recipient1);
+    assert_eq!(retrieved_recipients.get(1), recipient2);
+}

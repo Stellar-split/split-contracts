@@ -15282,6 +15282,12 @@ impl SplitContract {
         let invoice = load_invoice(&env, invoice_id);
         invoice.creator
     }
+
+    /// Get the list of recipient addresses for an invoice.
+    pub fn get_invoice_recipients(env: Env, invoice_id: u64) -> Vec<Address> {
+        let invoice = load_invoice(&env, invoice_id);
+        invoice.recipients
+    }
 }
 
 /// Move a finalised invoice from hot storage to cold archival storage.
