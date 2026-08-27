@@ -8184,3 +8184,36 @@ fn test_596_get_contract_paused_returns_false_after_unpause() {
     let paused = c.get_contract_paused();
     assert_eq!(paused, false);
 }
+
+// ---------------------------------------------------------------------------
+// Issue #595: Add get_platform_fee_bps view function tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_595_get_platform_fee_bps_initial_zero() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    c.initialize(&admin, &0_i128, &treasury, &token_id, &0_u32, &None, &0_u32, &0_u32, &0_u64);
+
+    let fee_bps = c.get_platform_fee_bps();
+    assert_eq!(fee_bps, 0);
+}
+
+#[test]
+fn test_595_get_platform_fee_bps_returns_set_value() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    let platform_fee_bps = 500_u32;
+    c.initialize(&admin, &0_i128, &treasury, &token_id, &platform_fee_bps, &None, &0_u32, &0_u32, &0_u64);
+
+    let fee_bps = c.get_platform_fee_bps();
+    assert_eq!(fee_bps, platform_fee_bps);
+}
