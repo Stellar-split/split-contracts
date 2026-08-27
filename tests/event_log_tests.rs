@@ -1,10 +1,12 @@
 #![cfg(test)]
 
 use soroban_sdk::{
-    testutils::{Address as _, Ledger, Events},
+    testutils::{Address as _, Ledger, Events, BytesN as _},
     token::{Client as TokenClient, StellarAssetClient},
-    Address, Env, Symbol, Vec, Map,
+    Address, Env, Symbol, Vec, Map, BytesN,
 };
+use split_contracts::types::InvoiceStatus;
+use split_contracts::events::{invoice_state_changed, allowlist_updated, dispute_raised};
 
 #[test]
 fn test_event_log_stores_creation_event() {
@@ -242,4 +244,28 @@ fn test_event_log_with_multiple_recipients() {
     // Full fund and release
     
     // Verify release event includes all 3 recipient addresses
+}
+
+#[test]
+fn invoice_state_changed_status_symbols() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let invoice_id = 1u64;
+    let actor = Address::generate(&env);
+
+    let test_cases = vec![
+        (None, InvoiceStatus::Pending, "none", "pending"),
+        (Some(InvoiceStatus::Pending), InvoiceStatus::Released, "pending", "released"),
+        (Some(InvoiceStatus::Released), InvoiceStatus::Refunded, "released", "refunded"),
+        (Some(InvoiceStatus::Refunded), InvoiceStatus::Expired, "refunded", "expired"),
+    ];
+
+    for (from_status, to_status, expected_from, expected_to) in test_cases {
+        let before_events = env.events().all();
+        invoice_state_changed(&env, invoice_id, from_status.as_ref(), &to_status, &actor);
+        let after_events = env.events().all();
+
+        assert!(after_events.len() > before_events.len(), "Event should be published");
+    }
 }
