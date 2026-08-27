@@ -103,4 +103,17 @@ mod tests {
         let v: Vec<Address> = Vec::new(&env);
         assert!(assert_unique_recipients(&env, &v.to_vec()).is_ok());
     }
+
+    #[test]
+    fn two_identical_addresses_returns_duplicate_error() {
+        let env = Env::default();
+        let a = Address::generate(&env);
+        let mut v: Vec<Address> = Vec::new(&env);
+        v.push_back(a.clone());
+        v.push_back(a.clone());
+        assert_eq!(
+            assert_unique_recipients(&env, &v.to_vec()),
+            Err(ContractError::DuplicateRecipient)
+        );
+    }
 }
