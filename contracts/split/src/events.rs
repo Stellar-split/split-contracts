@@ -109,7 +109,7 @@ pub fn invoice_released(env: &Env, invoice_id: u64, recipients: &Vec<Address>) {
 
 /// Emitted when an invoice is refunded after deadline.
 /// Topics: (split, refunded, invoice_id)
-/// Data: (event_seq)
+/// Data: (invoice_id, event_seq)
 pub fn invoice_refunded(env: &Env, invoice_id: u64) {
     let event_seq = next_seq(env, invoice_id);
     env.events().publish(
@@ -118,7 +118,7 @@ pub fn invoice_refunded(env: &Env, invoice_id: u64) {
             symbol_short!("refunded"),
             invoice_id,
         ),
-        (event_seq,),
+        (invoice_id, event_seq),
     );
 }
 
