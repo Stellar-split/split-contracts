@@ -8138,3 +8138,49 @@ fn test_597_get_invoice_amounts_invalid_invoice_id_panics() {
 
     c.get_invoice_amounts(&9999_u64);
 }
+
+// ---------------------------------------------------------------------------
+// Issue #596: Add get_contract_paused view function
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_596_get_contract_paused_initial_state_is_false() {
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+
+    let paused = c.get_contract_paused();
+    assert_eq!(paused, false);
+}
+
+#[test]
+fn test_596_get_contract_paused_returns_true_after_pause() {
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    c.initialize(&admin, &0_i128, &Address::generate(&env), &token_id, &0_u32, &None, &0_u32, &0_u32, &0_u64);
+
+    env.ledger().set_timestamp(1_000);
+
+    c.pause(&admin);
+
+    let paused = c.get_contract_paused();
+    assert_eq!(paused, true);
+}
+
+#[test]
+fn test_596_get_contract_paused_returns_false_after_unpause() {
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    c.initialize(&admin, &0_i128, &Address::generate(&env), &token_id, &0_u32, &None, &0_u32, &0_u32, &0_u64);
+
+    env.ledger().set_timestamp(1_000);
+
+    c.pause(&admin);
+    c.unpause(&admin);
+
+    let paused = c.get_contract_paused();
+    assert_eq!(paused, false);
+}
