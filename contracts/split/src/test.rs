@@ -8076,3 +8076,36 @@ fn test_get_invoice_funded_not_found() {
     let result = c.try_get_invoice_funded(&999);
     assert!(result.is_err());
 }
+
+#[test]
+fn test_get_invoice_status() {
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+    let tk = token_client(&env, &token_id);
+
+    let creator = Address::generate(&env);
+    let payer = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    StellarAssetClient::new(&env, &token_id).mint(&payer, &500);
+    env.ledger().set_timestamp(1_000);
+
+    let id = make_invoice(&env, &c, &creator, &recipient, 200, &token_id, 9_999);
+
+    let status_pending = c.get_invoice_status(&id).expect("should return status");
+    assert_eq!(status_pending, InvoiceStatus::Pending);
+
+    c.pay(&payer, &id, &200_i128, &0_u64, &false, &false, &None);
+
+    let status_released = c.get_invoice_status(&id).expect("should return status");
+    assert_eq!(status_released, InvoiceStatus::Released);
+}
+
+#[test]
+fn test_get_invoice_status_not_found() {
+    let (env, contract_id, _token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+
+    let result = c.try_get_invoice_status(&999);
+    assert!(result.is_err());
+}
