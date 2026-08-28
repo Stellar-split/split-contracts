@@ -1538,6 +1538,14 @@ pub struct InvoiceHot {
 
 impl InvoiceStatus {
     /// Encode as a single byte — saves XDR overhead vs. the full enum variant.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use split::types::InvoiceStatus;
+    ///
+    /// assert_eq!(InvoiceStatus::Released.to_u8(), 1);
+    /// ```
     pub fn to_u8(&self) -> u8 {
         match self {
             InvoiceStatus::Pending => 0,
@@ -1553,6 +1561,14 @@ impl InvoiceStatus {
     }
 
     /// Decode from a single byte.  Unknown values map to Pending.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use split::types::InvoiceStatus;
+    ///
+    /// assert_eq!(InvoiceStatus::from_u8(1), InvoiceStatus::Released);
+    /// ```
     pub fn from_u8(v: u8) -> Self {
         match v {
             1 => InvoiceStatus::Released,
