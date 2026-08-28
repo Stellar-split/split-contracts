@@ -1370,8 +1370,29 @@ impl Invoice {
 }
 
 /// Issue #327 / #329 / #330: Extended invoice fields for new features.
-/// Stored in separate persistent storage (key: inv_ex3 + invoice_id) so existing
-/// InvoiceCore / InvoiceExt / InvoiceExt2 XDR layouts are not disturbed.
+/// Stored in separate persistent storage so existing InvoiceCore / InvoiceExt / InvoiceExt2
+/// XDR layouts are not disturbed.
+///
+/// # Storage layout
+/// Unlike `InvoiceCore`/`InvoiceExt`/`InvoiceExt2` (which are read from a single storage
+/// entry per invoice, keyed via the `InvoiceKey` enum in `storage_keys.rs`), `InvoiceExt3`
+/// is **not** persisted as one serialized struct under a single key. It is a read-model
+/// assembled on demand (see `get_invoice_ext3` in `lib.rs`) by reading four independent
+/// persistent-storage entries for the same `invoice_id`, each under its own `(Symbol, u64)`
+/// key defined in `lib.rs`:
+///   - `release_delay_ledgers` <- `release_delay_key(id)`      -> `(symbol_short!("rel_dly"), id)`
+///   - `funded_at_ledger`      <- `funded_at_ledger_key(id)`    -> `(symbol_short!("fund_led"), id)`
+///   - `metadata_hash`         <- `metadata_hash_key(id)`       -> `(symbol_short!("meta_hsh"), id)`
+///   - `paid_recipients`       <- `paid_recipients_key(id)`     -> `(symbol_short!("paid_rec"), id)`
+///
+/// `unlock_at_ledger` is not stored at all; it is derived at read time as
+/// `funded_at_ledger + release_delay_ledgers` (or `None` if either input is unset).
+///
+/// This per-field key layout — rather than a single `InvoiceKey::Ext3(invoice_id)`-style
+/// entry — lets each field evolve (be added, migrated, or left absent for older invoices)
+/// independently, without needing to re-serialize or migrate the whole struct. It keeps
+/// `InvoiceCore`/`InvoiceExt`/`InvoiceExt2`'s existing XDR layouts completely untouched,
+/// since none of these new fields share storage with them.
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct InvoiceExt3 {
