@@ -782,14 +782,18 @@ pub fn recipient_paid(env: &Env, invoice_id: u64, recipient: &Address, amount: i
 /// Issue #333: Emitted when an invoice crosses a funding milestone (25%, 50%, 75%, 100%).
 ///
 /// # Indexer Guide
-/// `milestone_bps` encodes the threshold in basis points:
-///   - 2500 = 25%
-///   - 5000 = 50%
-///   - 7500 = 75%
-///   - 10000 = 100%
+/// Indexers can subscribe to milestone crossings by filtering events with
+/// topic[1] == "milestone" (optionally narrowed further by topic[2] == invoice_id). Each
+/// event carries:
+///   - `milestone_bps`: the crossed threshold in basis points relative to the invoice total —
+///     2500 = 25%, 5000 = 50%, 7500 = 75%, 10000 = 100%.
+///   - `funded_amount`: the invoice's cumulative funded amount at the moment the threshold
+///     was crossed (in the invoice's payment token's base units).
+///   - `ledger`: the ledger sequence number at which the crossing was recorded.
 ///
 /// Multiple events can be emitted in a single `pay()` call when a large payment
-/// crosses several thresholds at once.
+/// crosses several thresholds at once — do not assume one event per payment; instead
+/// group by `invoice_id` and treat each `milestone_bps` as an independent crossing.
 ///
 /// Topics: (split, milestone, invoice_id)
 /// Data: (milestone_bps, funded_amount, ledger)
@@ -809,6 +813,23 @@ pub fn milestone_reached(env: &Env, invoice_id: u64, milestone_bps: u32, funded_
 /// Checkpoints are contract-level thresholds expressed in basis points where
 /// `10_000 = 100%`. A single payment can emit multiple checkpoint events when it
 /// crosses several configured thresholds at once.
+///
+/// # Indexer Guide
+/// Filter events with topic[1] == "fnd_chk" (topic[2] is the `invoice_id`, so narrow to a
+/// single invoice by matching that topic too). Unlike `milestone_reached`, whose thresholds
+/// are the fixed 25/50/75/100% set, `funding_checkpoint` thresholds are admin-configurable,
+/// so `threshold_bps` must always be read from the event data rather than assumed. The
+/// event's `FundingCheckpoint` payload carries:
+///   - `invoice_id`: redundant with topic[2], included in the data for convenience so the
+///     event can be decoded without also decoding topics.
+///   - `threshold_bps`: the configured checkpoint that was crossed, in basis points of the
+///     invoice total (`10_000 = 100%`).
+///   - `funded`: the invoice's cumulative funded amount at the moment of crossing.
+///   - `total`: the invoice's total amount, i.e. `funded / total` (scaled to bps) is
+///     approximately `threshold_bps` at the instant the event fires.
+///
+/// As with `milestone_reached`, a single payment may cross several configured checkpoints,
+/// emitting one event per checkpoint — group by `invoice_id` and treat each as independent.
 ///
 /// Topics: (split, fnd_chk, invoice_id)
 /// Data: FundingCheckpoint { invoice_id, threshold_bps, funded, total }
