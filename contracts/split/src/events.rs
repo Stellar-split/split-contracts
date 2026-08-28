@@ -251,25 +251,26 @@ pub fn invoice_archived(env: &Env, invoice_id: u64) {
 
 /// Emitted when a delegate is assigned to an invoice.
 /// Topics: (split, delegated, invoice_id)
-/// Data: delegate
+/// Data: (delegate, event_seq)
 pub fn delegate_set(env: &Env, invoice_id: u64, delegate: &Address) {
+    let event_seq = next_seq(env, invoice_id);
     env.events().publish(
         (
             symbol_short!("split"),
             symbol_short!("delegated"),
             invoice_id,
         ),
-        delegate.clone(),
+        (delegate.clone(), event_seq),
     );
 }
 
 /// Emitted when a delegate is revoked from an invoice.
 /// Topics: (split, revoked, invoice_id)
-/// Data: ()
-pub fn delegate_revoked(env: &Env, invoice_id: u64) {
+/// Data: (revoker, ledger_sequence)
+pub fn delegate_revoked(env: &Env, invoice_id: u64, revoker: &Address) {
     env.events().publish(
         (symbol_short!("split"), symbol_short!("revoked"), invoice_id),
-        (),
+        (revoker.clone(), env.ledger().sequence()),
     );
 }
 

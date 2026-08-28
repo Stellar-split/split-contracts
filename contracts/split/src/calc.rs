@@ -4,7 +4,31 @@
 //! across recipients proportionally, ensuring every stroop is accounted for
 //! (i.e. `sum(result) == total` always holds).
 
-use soroban_sdk::{Env, Vec};
+use soroban_sdk::{Address, BytesN, Env, Vec};
+
+use crate::error::ContractError;
+
+// ---------------------------------------------------------------------------
+// Platform fee calculation
+// ---------------------------------------------------------------------------
+
+/// Calculate the platform fee for a given funded amount and fee rate in
+/// basis points (1 bps = 0.01%).
+///
+/// # Formula
+/// `fee = funded * fee_bps / 10_000`
+///
+/// Uses checked arithmetic to prevent silent overflow on large amounts.
+///
+/// # Errors
+/// Returns [`ContractError::ArithmeticOverflow`] if the intermediate
+/// multiplication `funded * fee_bps` overflows `i128`.
+pub fn calc_platform_fee(funded: i128, fee_bps: u32) -> Result<i128, ContractError> {
+    let numerator = funded
+        .checked_mul(fee_bps as i128)
+        .ok_or(ContractError::ArithmeticOverflow)?;
+    Ok(numerator / 10_000)
+}
 
 /// Distribute `total` among recipients according to their `ratios` out of
 /// `denom`, using the largest-remainder method to handle rounding.
@@ -271,5 +295,35 @@ mod tests {
         for &(total, ratios, denom) in cases {
             assert_exact(&env, total, ratios, denom);
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // calc_platform_fee tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_calc_platform_fee_normal() {
+        // 1_000_000 funded at 250 bps (2.5%) → fee = 25_000
+        let fee = calc_platform_fee(1_000_000, 250).unwrap();
+        assert_eq!(fee, 25_000);
+    }
+
+    #[test]
+    fn test_calc_platform_fee_zero_bps() {
+        // Zero fee rate → always zero fee regardless of funded amount
+        assert_eq!(calc_platform_fee(999_999_999, 0).unwrap(), 0);
+    }
+
+    #[test]
+    fn test_calc_platform_fee_max_bps() {
+        // 10_000 bps = 100% → fee equals funded
+        assert_eq!(calc_platform_fee(500, 10_000).unwrap(), 500);
+    }
+
+    #[test]
+    fn test_calc_platform_fee_overflow() {
+        // i128::MAX * any fee_bps > 0 will overflow the intermediate multiplication
+        let result = calc_platform_fee(i128::MAX, 1);
+        assert_eq!(result, Err(crate::error::ContractError::ArithmeticOverflow));
     }
 }
