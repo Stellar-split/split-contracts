@@ -54,12 +54,29 @@ pub struct CloneOverrides {
 #[contracttype]
 #[derive(Clone, Debug)]
 pub enum SplitRule {
-    /// Pay this exact amount regardless of funded total.
+    /// Pay this exact amount regardless of the invoice's funded total.
+    ///
+    /// # Example
+    ///
+    /// `Fixed(2_500)` always pays out `2_500`, whether `funded` is `2_500`,
+    /// `10_000`, or anything else.
     Fixed(i128),
-    /// Pay `funded * bps / 10_000` to the recipient.
+    /// Pay `funded * bps / 10_000` to the recipient, where `bps` is basis
+    /// points (10_000 = 100%).
+    ///
+    /// # Example
+    ///
+    /// `Percentage(3_000)` (30%) on `funded = 10_000` yields
+    /// `10_000 * 3_000 / 10_000 = 3_000`.
     Percentage(u32),
-    /// Pay `funded * bps / 10_000` only when `funded > threshold`; else 0.
-    /// Encoded as (threshold, bps).
+    /// Pay `funded * bps / 10_000` only once `funded` strictly exceeds
+    /// `threshold`; otherwise pay `0`. Encoded as `(threshold, bps)`.
+    ///
+    /// # Example
+    ///
+    /// `Tiered(5_000, 2_000)` (20% once past 5_000) on `funded = 8_000`
+    /// yields `8_000 * 2_000 / 10_000 = 1_600`, because `8_000 > 5_000`.
+    /// On `funded = 4_000` it yields `0`, because `4_000 <= 5_000`.
     Tiered(i128, u32),
 }
 
