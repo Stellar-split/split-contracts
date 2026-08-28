@@ -1502,13 +1502,23 @@ pub struct UpgradeProposal {
 
 /// Hot invoice fields stored in instance storage for TTL-efficient reads.
 ///
-/// These four fields are read on every `pay()` call. Keeping them in the
-/// contract *instance* bucket means their TTL is extended by a single
-/// `extend_ttl` call that covers all active invoices simultaneously —
-/// O(1) per payment rather than one persistent-rent charge per invoice entry.
+/// These four fields are read on every `pay()` call.
 ///
-/// Cold creation params and audit metadata stay in persistent storage
-/// (`InvoiceCore` / `InvoiceExt` / `InvoiceExt2`).
+/// # Design
+///
+/// Soroban charges rent independently per storage entry, and each entry's
+/// TTL must be extended on its own. Keeping these hot fields in the
+/// contract's *instance* bucket — rather than one persistent entry per
+/// invoice — means a single `extend_ttl` call on the instance covers every
+/// active invoice's hot data simultaneously: O(1) per payment rather than
+/// one persistent-rent `extend_ttl` charge per invoice entry.
+///
+/// This is a trade-off: instance storage is wiped on contract upgrade unless
+/// explicitly preserved, and it grows with every invoice ever created (there
+/// is no per-key eviction). Cold creation params and audit metadata that are
+/// not needed on the payment hot path stay in persistent storage instead
+/// (`InvoiceCore` / `InvoiceExt` / `InvoiceExt2`), where they can expire and
+/// be restored independently per invoice.
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct InvoiceHot {
