@@ -964,15 +964,30 @@ pub fn tranche_released(env: &Env, invoice_id: u64, tranche_index: u32, amount: 
 
 /// Issue #349: Emitted when an address's reputation score is updated.
 /// Topics: (split, rep_upd, address)
-/// Data: score
-pub fn rep_updated(env: &Env, address: &Address, score: &RepScore) {
+/// Data: (score_struct, computed_score)
+///
+/// # Computed score formula
+///
+/// The `computed_score` is a single `u32` summary of the raw `RepScore`
+/// counters. The formula rewards consistent on-time payment and successful
+/// invoice completion while penalising late payments and refunds:
+///
+/// ```text
+/// base        = paid_on_time * 10 + invoices_released * 5
+/// deductions  = late_pays * 5 + invoices_refunded * 2
+/// computed    = base.saturating_sub(deductions)
+/// ```
+///
+/// Indexers are encouraged to use `computed_score` directly rather than
+/// re-implementing the formula off-chain.
+pub fn rep_updated(env: &Env, address: &Address, score: &RepScore, computed_score: u32) {
     env.events().publish(
         (
             symbol_short!("split"),
             symbol_short!("rep_upd"),
             address.clone(),
         ),
-        score.clone(),
+        (score.clone(), computed_score),
     );
 }
 
@@ -1529,7 +1544,10 @@ pub fn child_invoice_unblocked(env: &Env, child_id: u64, parent_id: u64) {
 /// Emitted every time a late-payment penalty is charged.
 ///
 /// Topics: `("late_pen", invoice_id)`
-/// Data:   `(payer, penalty_amount)`
+/// Data:   `(invoice_id, payer, penalty_amount)`
+///
+/// `invoice_id` is included in both the topics (for indexer filtering) and
+/// the data payload (for data-only decoders that do not inspect topics).
 #[allow(dead_code)]
 pub fn late_payment_penalty_charged(
     env: &Env,
@@ -1539,7 +1557,7 @@ pub fn late_payment_penalty_charged(
 ) {
     env.events().publish(
         (symbol_short!("late_pen"), invoice_id),
-        (payer.clone(), penalty_amount),
+        (invoice_id, payer.clone(), penalty_amount),
     );
 }
 

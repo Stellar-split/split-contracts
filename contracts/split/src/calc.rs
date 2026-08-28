@@ -6,6 +6,8 @@
 
 use soroban_sdk::{Env, Vec};
 
+use crate::error::ContractError;
+
 /// Distribute `total` among recipients according to their `ratios` out of
 /// `denom`, using the largest-remainder method to handle rounding.
 ///
@@ -20,17 +22,21 @@ use soroban_sdk::{Env, Vec};
 /// * recipients with larger fractional remainders receive an extra stroop
 /// * pure function: no side effects, no storage access
 ///
-/// # Panics
-/// * if `ratios` is empty
-/// * if `denom` is zero
+/// # Errors
+/// * [`ContractError::InvalidAmount`] if `ratios` is empty
+/// * [`ContractError::InvalidAmount`] if `denom` is zero or negative
 pub fn distribute_with_remainder(
     env: &Env,
     total: i128,
     ratios: &Vec<i128>,
     denom: i128,
-) -> Vec<i128> {
-    assert!(!ratios.is_empty(), "ratios must not be empty");
-    assert!(denom > 0, "denom must be positive");
+) -> Result<Vec<i128>, ContractError> {
+    if ratios.is_empty() {
+        return Err(ContractError::InvalidAmount);
+    }
+    if denom <= 0 {
+        return Err(ContractError::InvalidAmount);
+    }
 
     let n = ratios.len() as usize;
 
@@ -52,7 +58,9 @@ pub fn distribute_with_remainder(
     // Contracts with more than 64 recipients would need a larger cap, but
     // 64 is a reasonable upper bound for on-chain use.
     const MAX_RECIPIENTS: usize = 64;
-    assert!(n <= MAX_RECIPIENTS, "too many recipients (max 64)");
+    if n > MAX_RECIPIENTS {
+        return Err(ContractError::InvalidAmount);
+    }
 
     let mut indices = [0usize; MAX_RECIPIENTS];
     for i in 0..n {
@@ -88,7 +96,7 @@ pub fn distribute_with_remainder(
         shares_mut.set(idx, current + 1);
     }
 
-    shares_mut
+    Ok(shares_mut)
 }
 
 // ---------------------------------------------------------------------------
@@ -162,7 +170,8 @@ mod tests {
     /// Assert sum equals total and return shares.
     fn assert_exact(env: &Env, total: i128, ratios: &[i128], denom: i128) -> Vec<i128> {
         let r_vec = make_ratios(env, ratios);
-        let result = distribute_with_remainder(env, total, &r_vec, denom);
+        let result = distribute_with_remainder(env, total, &r_vec, denom)
+            .expect("distribute_with_remainder should not fail for valid inputs");
         let sum: i128 = result.iter().sum();
         assert_eq!(
             sum, total,
@@ -271,5 +280,31 @@ mod tests {
         for &(total, ratios, denom) in cases {
             assert_exact(&env, total, ratios, denom);
         }
+    }
+
+    /// Confirms that an empty ratios list returns Err(InvalidAmount) rather than panicking.
+    #[test]
+    fn test_empty_ratios_returns_err() {
+        let env = Env::default();
+        let empty = Vec::new(&env);
+        let result = distribute_with_remainder(&env, 1000, &empty, 1);
+        assert_eq!(
+            result,
+            Err(ContractError::InvalidAmount),
+            "expected Err(InvalidAmount) for empty ratios"
+        );
+    }
+
+    /// Confirms that denom == 0 returns Err(InvalidAmount) rather than panicking.
+    #[test]
+    fn test_zero_denom_returns_err() {
+        let env = Env::default();
+        let ratios = make_ratios(&env, &[1, 2, 3]);
+        let result = distribute_with_remainder(&env, 1000, &ratios, 0);
+        assert_eq!(
+            result,
+            Err(ContractError::InvalidAmount),
+            "expected Err(InvalidAmount) for zero denom"
+        );
     }
 }
