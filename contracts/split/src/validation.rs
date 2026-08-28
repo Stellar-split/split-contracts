@@ -64,6 +64,22 @@ pub fn assert_recipients_have_trustlines(
     Ok(())
 }
 
+/// Issue #628: Validate that a basis-points value is within the allowed range
+/// [0, 10_000] (i.e. it does not exceed 100%).
+///
+/// Basis-points fields such as `penalty_bps`, `tax_bps`, and
+/// `insurance_premium_bps` must never exceed 10 000 — values above that would
+/// represent a fee of more than 100%, which is nonsensical.
+///
+/// Returns `Ok(())` when `bps <= 10_000`, or
+/// `Err(ContractError::InvalidAmount)` otherwise.
+pub fn assert_valid_bps(bps: u32) -> Result<(), ContractError> {
+    if bps > 10_000 {
+        return Err(ContractError::InvalidAmount);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -102,5 +118,19 @@ mod tests {
         let env = Env::default();
         let v: Vec<Address> = Vec::new(&env);
         assert!(assert_unique_recipients(&env, &v.to_vec()).is_ok());
+    }
+
+    // Issue #628: assert_valid_bps tests
+    #[test]
+    fn valid_bps_passes() {
+        assert!(assert_valid_bps(0).is_ok());
+        assert!(assert_valid_bps(5000).is_ok());
+        assert!(assert_valid_bps(10_000).is_ok());
+    }
+
+    #[test]
+    fn out_of_range_bps_rejected() {
+        assert_eq!(assert_valid_bps(10_001), Err(ContractError::InvalidAmount));
+        assert_eq!(assert_valid_bps(u32::MAX), Err(ContractError::InvalidAmount));
     }
 }

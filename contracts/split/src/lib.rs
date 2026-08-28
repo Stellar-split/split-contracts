@@ -54,6 +54,7 @@ const DEFAULT_INVOICE_STORAGE_QUOTA: u64 = 65_536;
 mod error;
 mod events;
 pub mod types;
+mod validation;
 
 #[cfg(test)]
 mod test;
@@ -69,6 +70,7 @@ mod storage_keys;
 mod migrations;
 
 use error::ContractError;
+use validation::assert_valid_bps;
 use soroban_sdk::crypto::bls12_381::{Fr, G1Affine};
 use soroban_sdk::xdr::ToXdr;
 use soroban_sdk::{
@@ -1607,7 +1609,7 @@ fn archive_invoice_storage(env: &Env, id: u64, core: &InvoiceCore) {
             signatures: Vec::new(env),
             approver: None,
             approved: false,
-            oracle_address: None,
+            condition_oracle: None,
             condition_met: false,
             penalty_bps: 0,
             penalty_deadline: 0,
@@ -1824,7 +1826,7 @@ fn load_invoice(env: &Env, id: u64) -> Invoice {
             signatures: Vec::new(env),
             approver: None,
             approved: false,
-            oracle_address: None,
+            condition_oracle: None,
             condition_met: false,
             penalty_bps: 0,
             penalty_deadline: 0,
@@ -4058,7 +4060,7 @@ impl SplitContract {
                         signatures: Vec::new(&env),
                         approver: None,
                         approved: false,
-                        oracle_address: None,
+                        condition_oracle: None,
                         condition_met: false,
                         penalty_bps: 0,
                         penalty_deadline: 0,
@@ -4933,7 +4935,7 @@ impl SplitContract {
             options.release_stages,
             options.price_oracle,
             options.swap_tokens,
-            options.oracle_address,
+            options.condition_oracle,
             options.tax_bps.unwrap_or(0),
             options.tax_authority,
             options.insurance_premium_bps.unwrap_or(0),
@@ -5066,7 +5068,7 @@ impl SplitContract {
             options.release_stages,
             options.price_oracle,
             options.swap_tokens,
-            options.oracle_address,
+            options.condition_oracle,
             options.tax_bps.unwrap_or(0),
             options.tax_authority,
             options.insurance_premium_bps.unwrap_or(0),
@@ -5140,7 +5142,7 @@ impl SplitContract {
         release_stages: Vec<u32>,
         price_oracle: Option<Address>,
         swap_tokens: Vec<Option<Address>>,
-        oracle_address: Option<Address>,
+        condition_oracle: Option<Address>,
         tax_bps: u32,
         tax_authority: Option<Address>,
         insurance_premium_bps: u32,
@@ -5215,13 +5217,10 @@ impl SplitContract {
             );
         }
         assert!(bonus_pool >= 0, "bonus_pool must be non-negative");
-        assert!(penalty_bps <= 10_000, "penalty_bps must be ≤ 10000");
+        assert_valid_bps(penalty_bps).expect("penalty_bps must be ≤ 10000");
         assert!(min_funding_bps <= 10_000, "min_funding_bps must be ≤ 10000");
-        assert!(tax_bps <= 10_000, "tax_bps must be ≤ 10000");
-        assert!(
-            insurance_premium_bps <= 10_000,
-            "insurance_premium_bps must be ≤ 10000"
-        );
+        assert_valid_bps(tax_bps).expect("tax_bps must be ≤ 10000");
+        assert_valid_bps(insurance_premium_bps).expect("insurance_premium_bps must be ≤ 10000");
         // Issue #489: early-bird discounted platform fee must not exceed the
         // standard fee in effect for this creator at creation time.
         assert!(
@@ -5634,7 +5633,7 @@ impl SplitContract {
             tax_authority,
             insurance_premium_bps,
             insurance_fund: 0,
-            oracle_address,
+            condition_oracle,
             condition_met: false,
             smart_route,
             overflow_behavior,
@@ -5937,7 +5936,7 @@ impl SplitContract {
                 Vec::new(&env), // release_stages
                 None,           // price_oracle
                 Vec::new(&env), // swap_tokens
-                None,           // oracle_address
+                None,           // condition_oracle
                 0_u32,          // tax_bps
                 None,           // tax_authority
                 0_u32,          // insurance_premium_bps
@@ -6206,7 +6205,7 @@ impl SplitContract {
             signatures: source.signatures.clone(),
             approver: source.approver.clone(),
             approved: source.approved,
-            oracle_address: source.oracle_address.clone(),
+            condition_oracle: source.condition_oracle.clone(),
             condition_met: source.condition_met,
             penalty_bps: source.penalty_bps,
             penalty_deadline: source.penalty_deadline,
@@ -6485,7 +6484,7 @@ impl SplitContract {
                     || in_group
                     || !invoice.co_signers.is_empty()
                     || env.storage().persistent().has(&cosigners_key(invoice_id))
-                    || (invoice.oracle_address.is_some() && !invoice.condition_met)
+                    || (invoice.condition_oracle.is_some() && !invoice.condition_met)
                     || (invoice.min_funding_bps > 0
                         && invoice.funded
                             < (invoice.amounts.iter().sum::<i128>()
@@ -6679,7 +6678,7 @@ impl SplitContract {
                 || in_group
                 || !invoice.co_signers.is_empty()
                 || env.storage().persistent().has(&cosigners_key(invoice_id))
-                || (invoice.oracle_address.is_some() && !invoice.condition_met)
+                || (invoice.condition_oracle.is_some() && !invoice.condition_met)
                 || (invoice.min_funding_bps > 0
                     && invoice.funded
                         < (invoice.amounts.iter().sum::<i128>() * invoice.min_funding_bps as i128
@@ -7341,7 +7340,7 @@ impl SplitContract {
                 || in_group
                 || !invoice.co_signers.is_empty()
                 || env.storage().persistent().has(&cosigners_key(invoice_id))
-                || (invoice.oracle_address.is_some() && !invoice.condition_met)
+                || (invoice.condition_oracle.is_some() && !invoice.condition_met)
                 || (invoice.min_funding_bps > 0
                     && invoice.funded
                         < (invoice.amounts.iter().sum::<i128>() * invoice.min_funding_bps as i128
@@ -7613,7 +7612,7 @@ impl SplitContract {
                 || in_group
                 || !invoice.co_signers.is_empty()
                 || env.storage().persistent().has(&cosigners_key(invoice_id))
-                || (invoice.oracle_address.is_some() && !invoice.condition_met)
+                || (invoice.condition_oracle.is_some() && !invoice.condition_met)
                 || (invoice.min_funding_bps > 0
                     && invoice.funded
                         < (invoice.amounts.iter().sum::<i128>() * invoice.min_funding_bps as i128
@@ -7724,7 +7723,7 @@ impl SplitContract {
                     || in_group
                     || !inv.co_signers.is_empty()
                     || env.storage().persistent().has(&cosigners_key(p.invoice_id))
-                    || (inv.oracle_address.is_some() && !inv.condition_met)
+                    || (inv.condition_oracle.is_some() && !inv.condition_met)
                     || (inv.min_funding_bps > 0
                         && inv.funded
                             < (inv.amounts.iter().sum::<i128>() * inv.min_funding_bps as i128
@@ -8765,7 +8764,7 @@ impl SplitContract {
         let mut invoice = load_invoice(&env, invoice_id);
         assert!(!invoice.disputed, "invoice is disputed");
         let oracle = invoice
-            .oracle_address
+            .condition_oracle
             .as_ref()
             .expect("no oracle set for invoice");
         oracle.require_auth();
@@ -11031,7 +11030,7 @@ impl SplitContract {
             signatures: Vec::new(&env),
             approver: None,
             approved: false,
-            oracle_address: old_invoice.oracle_address.clone(),
+            condition_oracle: old_invoice.condition_oracle.clone(),
             condition_met: false,
             penalty_bps: old_invoice.penalty_bps,
             penalty_deadline: old_invoice.penalty_deadline,
@@ -11668,7 +11667,7 @@ impl SplitContract {
             old_invoice.release_stages.clone(),
             old_invoice.price_oracle.clone(),
             old_invoice.swap_tokens.clone(),
-            old_invoice.oracle_address.clone(),
+            old_invoice.condition_oracle.clone(),
             old_invoice.tax_bps,
             old_invoice.tax_authority.clone(),
             old_invoice.insurance_premium_bps,
@@ -12705,7 +12704,7 @@ impl SplitContract {
                 signatures: Vec::new(&env),
                 approver: None,
                 approved: false,
-                oracle_address: None,
+                condition_oracle: None,
                 condition_met: false,
                 penalty_bps: 0,
                 penalty_deadline: 0,
@@ -12831,7 +12830,7 @@ impl SplitContract {
                         signatures: Vec::new(&env),
                         approver: None,
                         approved: false,
-                        oracle_address: None,
+                        condition_oracle: None,
                         condition_met: false,
                         penalty_bps: 0,
                         penalty_deadline: 0,
@@ -13777,7 +13776,7 @@ impl SplitContract {
                 || in_group
                 || !invoice.co_signers.is_empty()
                 || env.storage().persistent().has(&cosigners_key(invoice_id))
-                || (invoice.oracle_address.is_some() && !invoice.condition_met);
+                || (invoice.condition_oracle.is_some() && !invoice.condition_met);
             if guarded {
                 save_invoice(&env, invoice_id, &invoice);
             } else {
@@ -15199,7 +15198,7 @@ impl SplitContract {
             Vec::new(&env),       // release_stages
             None,                 // price_oracle
             Vec::new(&env),       // swap_tokens
-            None,                 // oracle_address
+            None,                 // condition_oracle
             0,                    // tax_bps
             None,                 // tax_authority
             0,                    // insurance_premium_bps
