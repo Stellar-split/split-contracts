@@ -547,6 +547,61 @@ fn test_forward_to_invoice_credits_target_invoice() {
 }
 
 #[test]
+fn test_forward_configured_event_emitted_when_forward_to_set() {
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let forward_target = Address::generate(&env);
+
+    env.ledger().set_timestamp(1_000);
+
+    let mut opts = default_options(&env);
+    opts.forward_to = Some(forward_target.clone());
+
+    let mut recipients = Vec::new(&env);
+    recipients.push_back(recipient.clone());
+    let mut amounts = Vec::new(&env);
+    amounts.push_back(100_i128);
+    c.create_invoice(&creator, &recipients, &amounts, &token_id, &9_999_u64, &opts);
+
+    let has_forward_configured_event = env
+        .events()
+        .all()
+        .iter()
+        .any(|(_c, topics, _d)| topic1_is(&env, &topics, "fwd_cfg"));
+    assert!(
+        has_forward_configured_event,
+        "forward_configured event should be emitted when forward_to is set at creation"
+    );
+}
+
+#[test]
+fn test_forward_configured_event_absent_when_forward_to_unset() {
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    env.ledger().set_timestamp(1_000);
+
+    // default_options() leaves forward_to as None.
+    let _id = make_invoice(&env, &c, &creator, &recipient, 100, &token_id, 9_999);
+
+    let has_forward_configured_event = env
+        .events()
+        .all()
+        .iter()
+        .any(|(_c, topics, _d)| topic1_is(&env, &topics, "fwd_cfg"));
+    assert!(
+        !has_forward_configured_event,
+        "forward_configured event should not fire when forward_to is not set"
+    );
+}
+
+#[test]
 fn test_template_overwrite() {
     let (env, contract_id, token_id) = setup_initialized();
     let c = client(&env, &contract_id);
@@ -4815,6 +4870,28 @@ fn test_auto_resume_allows_payment_after_timestamp() {
     let invoice = c.get_invoice(&id);
     assert_eq!(invoice.status, InvoiceStatus::Released);
     assert_eq!(tk.balance(&recipient), 200);
+
+    // A distinct `invoice_auto_resumed` event fires for the timer-triggered
+    // resume; the manual `resumed` event must NOT fire (it wasn't a manual resume).
+    let has_auto_resumed_event = env
+        .events()
+        .all()
+        .iter()
+        .any(|(_c, topics, _d)| topic1_is(&env, &topics, "auto_res"));
+    assert!(
+        has_auto_resumed_event,
+        "invoice_auto_resumed event should be emitted on lazy auto-resume"
+    );
+
+    let has_manual_resumed_event = env
+        .events()
+        .all()
+        .iter()
+        .any(|(_c, topics, _d)| topic1_is(&env, &topics, "resumed"));
+    assert!(
+        !has_manual_resumed_event,
+        "manual invoice_resumed should not fire for an automatic resume"
+    );
 }
 
 #[test]
@@ -6881,6 +6958,87 @@ fn test_309_allowlist_restricts_payers() {
     c.pay(&allowed_payer, &id, &500_i128, &0_u64, &false, &false, &None);
     assert_eq!(c.get_invoice(&id).status, types::InvoiceStatus::Released);
     let _ = blocked_payer;
+}
+
+#[test]
+fn test_contributor_allowlist_toggle_events() {
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let contributor = Address::generate(&env);
+
+    env.ledger().set_timestamp(1_000);
+
+    let id = make_invoice(&env, &c, &creator, &recipient, 200, &token_id, 9_999);
+
+    let ext_before = c.get_invoice_ext2(&id);
+    assert!(ext_before.contributor_allowlist.is_none());
+
+    // Adding the first contributor turns gating ON (None -> Some).
+    c.add_contributor_to_allowlist(&creator, &id, &contributor);
+
+    let ext_enabled = c.get_invoice_ext2(&id);
+    assert!(ext_enabled.contributor_allowlist.is_some());
+
+    let toggled_on_count = env
+        .events()
+        .all()
+        .iter()
+        .filter(|(_c, topics, _d)| topic1_is(&env, topics, "al_tog"))
+        .count();
+    assert_eq!(
+        toggled_on_count, 1,
+        "contributor_allowlist_toggled(enabled=true) should fire exactly once on first add"
+    );
+
+    // Removing the only contributor turns gating OFF (Some -> None).
+    c.remove_contributor_allowlist(&creator, &id, &contributor);
+
+    let ext_disabled = c.get_invoice_ext2(&id);
+    assert!(ext_disabled.contributor_allowlist.is_none());
+
+    let toggled_total_count = env
+        .events()
+        .all()
+        .iter()
+        .filter(|(_c, topics, _d)| topic1_is(&env, topics, "al_tog"))
+        .count();
+    assert_eq!(
+        toggled_total_count, 2,
+        "one toggle event for enabling, one for disabling"
+    );
+}
+
+#[test]
+fn test_payment_received_event_includes_tip() {
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let payer = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    StellarAssetClient::new(&env, &token_id).mint(&payer, &500);
+    env.ledger().set_timestamp(1_000);
+
+    let id = make_invoice(&env, &c, &creator, &recipient, 200, &token_id, 9_999);
+    c.pay(&payer, &id, &200_i128, &0_u64, &false, &false, &None);
+
+    use soroban_sdk::TryIntoVal;
+    let mut found_tip: Option<i128> = None;
+    for (_contract, topics, data) in env.events().all().iter() {
+        if topic1_is(&env, &topics, "paid") {
+            let decoded: (Address, i128, i128, u64) = data.try_into_val(&env).unwrap();
+            found_tip = Some(decoded.2);
+        }
+    }
+    assert_eq!(
+        found_tip,
+        Some(0),
+        "payment_received event data should include the tip amount"
+    );
 }
 
 #[test]

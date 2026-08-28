@@ -5729,6 +5729,9 @@ impl SplitContract {
         }
 
         events::invoice_created(env, id, &creator, total, &invoice.cross_chain_ref);
+        if let Some(ref addr) = invoice.forward_to {
+            events::forward_configured(env, id, addr);
+        }
         maybe_record_created(env, &creator, total);
         update_creator_stats_on_creation(env, &creator);
 
@@ -6469,7 +6472,7 @@ impl SplitContract {
                 .set(&cumulative_key, &(cumulative + net_paid));
 
             // In real app we might handle penalty/oracle, but for simplicity:
-            events::payment_received(&env, invoice_id, &payer, net_paid);
+            events::payment_received(&env, invoice_id, &payer, net_paid, 0);
 
             let total: i128 = invoice.amounts.iter().sum();
             check_and_emit_funding_checkpoints(&env, invoice_id, invoice.funded, total);
@@ -6866,6 +6869,7 @@ impl SplitContract {
                     invoice.pause_reason = None;
                     invoice.auto_resume_at = None;
                     save_invoice(env, invoice_id, &invoice);
+                    events::invoice_auto_resumed(env, invoice_id, auto_at);
                 }
             }
         }
@@ -7259,7 +7263,7 @@ impl SplitContract {
             .set(&credit_key(payer), &(credit + 1));
 
         append_audit_entry(env, invoice_id, symbol_short!("pay"), payer);
-        events::payment_received(env, invoice_id, payer, credited_amount);
+        events::payment_received(env, invoice_id, payer, credited_amount, 0);
         // Issue #333: emit milestone events for any thresholds crossed by this payment.
         {
             let total_for_milestone: i128 = total; // already computed above
@@ -7485,7 +7489,7 @@ impl SplitContract {
             .set(&cumulative_key, &(cumulative + credited_amount));
 
         append_audit_entry(&env, invoice_id, symbol_short!("pay_tok"), &payer);
-        events::payment_received(&env, invoice_id, &payer, credited_amount);
+        events::payment_received(&env, invoice_id, &payer, credited_amount, 0);
         check_and_emit_funding_checkpoints(&env, invoice_id, invoice.funded, total);
         Self::record_invoice_rate_limit(&env, invoice_id, &payer);
         notify_invoice(
@@ -7592,7 +7596,7 @@ impl SplitContract {
             .set(&cumulative_key, &(cumulative + converted));
 
         append_audit_entry(&env, invoice_id, symbol_short!("brdg_pay"), &payer);
-        events::payment_received(&env, invoice_id, &payer, converted);
+        events::payment_received(&env, invoice_id, &payer, converted, 0);
         check_and_emit_funding_checkpoints(&env, invoice_id, invoice.funded, total);
         Self::record_invoice_rate_limit(&env, invoice_id, &payer);
         notify_invoice(
@@ -7710,7 +7714,7 @@ impl SplitContract {
                 .set(&cumulative_key, &(cumulative + p.amount));
 
             append_audit_entry(&env, p.invoice_id, symbol_short!("pool_pay"), &payer);
-            events::payment_received(&env, p.invoice_id, &payer, p.amount);
+            events::payment_received(&env, p.invoice_id, &payer, p.amount, 0);
 
             let inv_total: i128 = inv.amounts.iter().sum();
             if inv.funded >= inv_total {
@@ -8323,6 +8327,7 @@ impl SplitContract {
             invoice.creator == creator || invoice.co_creators.contains(&creator),
             "NotAuthorized"
         );
+        let was_disabled = invoice.contributor_allowlist.is_none();
         let mut list = invoice
             .contributor_allowlist
             .unwrap_or_else(|| Vec::new(&env));
@@ -8332,6 +8337,9 @@ impl SplitContract {
         invoice.contributor_allowlist = Some(list);
         save_invoice(&env, invoice_id, &invoice);
         append_audit_entry(&env, invoice_id, symbol_short!("al_add"), &creator);
+        if was_disabled {
+            events::contributor_allowlist_toggled(&env, invoice_id, &creator, true);
+        }
     }
 
     /// Remove `contributor` from the per-invoice contributor allowlist.
@@ -8350,6 +8358,7 @@ impl SplitContract {
             invoice.creator == creator || invoice.co_creators.contains(&creator),
             "NotAuthorized"
         );
+        let mut became_disabled = false;
         if let Some(old_list) = invoice.contributor_allowlist {
             let mut new_list: Vec<Address> = Vec::new(&env);
             for addr in old_list.iter() {
@@ -8357,6 +8366,7 @@ impl SplitContract {
                     new_list.push_back(addr);
                 }
             }
+            became_disabled = new_list.is_empty();
             invoice.contributor_allowlist = if new_list.is_empty() {
                 None
             } else {
@@ -8365,6 +8375,9 @@ impl SplitContract {
         }
         save_invoice(&env, invoice_id, &invoice);
         append_audit_entry(&env, invoice_id, symbol_short!("al_rm"), &creator);
+        if became_disabled {
+            events::contributor_allowlist_toggled(&env, invoice_id, &creator, false);
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -13054,7 +13067,7 @@ impl SplitContract {
             .set(&cumulative_key, &(cumulative + amount));
 
         append_audit_entry(&env, invoice_id, symbol_short!("del_pay"), &delegate);
-        events::payment_received(&env, invoice_id, &beneficiary, amount);
+        events::payment_received(&env, invoice_id, &beneficiary, amount, 0);
         check_and_emit_funding_checkpoints(&env, invoice_id, invoice.funded, total);
         Self::record_invoice_rate_limit(&env, invoice_id, &beneficiary);
         notify_invoice(
@@ -13760,7 +13773,7 @@ impl SplitContract {
             .set(&cumulative_key, &(cumulative + amount));
 
         events::delegated_payment(&env, invoice_id, &on_behalf_of, &executor, amount);
-        events::payment_received(&env, invoice_id, &on_behalf_of, amount);
+        events::payment_received(&env, invoice_id, &on_behalf_of, amount, 0);
         check_and_emit_funding_checkpoints(&env, invoice_id, invoice.funded, total);
         Self::record_invoice_rate_limit(&env, invoice_id, &on_behalf_of);
         append_audit_entry(&env, invoice_id, symbol_short!("dlgt_pay"), &executor);
