@@ -76,15 +76,15 @@ pub fn invoice_released(env: &Env, invoice_id: u64, recipients: &Vec<Address>) {
 
 /// Emitted when an invoice is refunded after deadline.
 /// Topics: (split, refunded, invoice_id)
-/// Data: ()
-pub fn invoice_refunded(env: &Env, invoice_id: u64) {
+/// Data: total_amount (sum returned to all payers, excluding any creator payout)
+pub fn invoice_refunded(env: &Env, invoice_id: u64, total_amount: i128) {
     env.events().publish(
         (
             symbol_short!("split"),
             symbol_short!("refunded"),
             invoice_id,
         ),
-        (),
+        total_amount,
     );
 }
 
@@ -104,15 +104,15 @@ pub fn condition_verified(env: &Env, invoice_id: u64, preimage_hash: &BytesN<32>
 
 /// Emitted when an invoice expires.
 /// Topics: (split, expired, invoice_id)
-/// Data: (deadline, funded)
-pub fn invoice_expired(env: &Env, invoice_id: u64, deadline: u64, funded: i128) {
+/// Data: (deadline, funded, creator)
+pub fn invoice_expired(env: &Env, invoice_id: u64, deadline: u64, funded: i128, creator: &Address) {
     env.events().publish(
         (
             symbol_short!("split"),
             symbol_short!("expired"),
             invoice_id,
         ),
-        (deadline, funded),
+        (deadline, funded, creator.clone()),
     );
 }
 

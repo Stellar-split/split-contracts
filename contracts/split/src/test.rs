@@ -6,7 +6,7 @@ use super::*;
 use soroban_sdk::{
     testutils::{Address as _, Events as _, Ledger, LedgerInfo},
     token::{Client as TokenClient, StellarAssetClient},
-    Address, Bytes, BytesN, Env, String, Symbol, TryFromVal, Vec,
+    Address, Bytes, BytesN, Env, String, Symbol, TryFromVal, Val, Vec,
 };
 use types::{InvoiceOptions, InvoiceOptions2};
 
@@ -9520,4 +9520,182 @@ fn test_milestones_auto_release() {
     c.pay(&payer, &id, &50_i128, &1_u64, &false, &false);
     assert_eq!(tk.balance(&recipient), 100);
     assert_eq!(c.get_invoice(&id).status, InvoiceStatus::Released);
+}
+
+// ---------------------------------------------------------------------------
+// invoice_expired: creator address included in the event payload
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_invoice_expired_event_includes_creator() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let payer = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    StellarAssetClient::new(&env, &token_id).mint(&payer, &100);
+    env.ledger().set_timestamp(1_000);
+
+    let id = make_invoice(&env, &c, &creator, &recipient, 500, &token_id, 2_000);
+    c.pay(&payer, &id, &100_i128, &0_u64, &false, &false);
+
+    env.ledger().set_timestamp(3_000);
+    c.notify_expired(&id);
+
+    let event_data = env
+        .events()
+        .all()
+        .iter()
+        .find_map(|(_contract, topics, data)| {
+            if topic1_is(&env, &topics, "expired") {
+                Some(data)
+            } else {
+                None
+            }
+        })
+        .expect("invoice_expired event not emitted");
+
+    let items = Vec::<Val>::try_from_val(&env, &event_data).expect("expired data not a tuple");
+    assert_eq!(items.len(), 3, "expired event should carry (deadline, funded, creator)");
+    let deadline = u64::try_from_val(&env, &items.get(0).unwrap()).unwrap();
+    let funded = i128::try_from_val(&env, &items.get(1).unwrap()).unwrap();
+    let event_creator = Address::try_from_val(&env, &items.get(2).unwrap()).unwrap();
+
+    assert_eq!(deadline, 2_000);
+    assert_eq!(funded, 100);
+    assert_eq!(event_creator, creator);
+}
+
+// ---------------------------------------------------------------------------
+// invoice_refunded: total amount returned to all payers included in the event
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_invoice_refunded_event_includes_total_amount() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let payer_a = Address::generate(&env);
+    let payer_b = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    StellarAssetClient::new(&env, &token_id).mint(&payer_a, &100);
+    StellarAssetClient::new(&env, &token_id).mint(&payer_b, &50);
+    env.ledger().set_timestamp(1_000);
+
+    let id = make_invoice(&env, &c, &creator, &recipient, 500, &token_id, 2_000);
+    c.pay(&payer_a, &id, &100_i128, &0_u64, &false, &false);
+    c.pay(&payer_b, &id, &50_i128, &0_u64, &false, &false);
+
+    env.ledger().set_timestamp(3_000);
+    c.notify_expired(&id);
+    c.refund(&id);
+
+    let event_data = env
+        .events()
+        .all()
+        .iter()
+        .find_map(|(_contract, topics, data)| {
+            if topic1_is(&env, &topics, "refunded") {
+                Some(data)
+            } else {
+                None
+            }
+        })
+        .expect("invoice_refunded event not emitted");
+
+    let total_amount = i128::try_from_val(&env, &event_data).expect("refunded data not i128");
+    assert_eq!(total_amount, 150, "refunded event should total all payer refunds");
+}
+
+// ---------------------------------------------------------------------------
+// Issue #327: funds_unlocked event consistency across release paths
+// ---------------------------------------------------------------------------
+
+fn release_delay_invoice(
+    env: &Env,
+    c: &SplitContractClient,
+    token_id: &Address,
+    creator: &Address,
+    recipient: &Address,
+    amount: i128,
+    delay_ledgers: u32,
+) -> u64 {
+    let mut options = default_options(env);
+    options.ext.release_delay_ledgers = Some(delay_ledgers);
+    c.create_invoice(
+        creator,
+        &one_address_vec(env, recipient),
+        &one_amount_vec(env, amount),
+        token_id,
+        &9_999_u64,
+        &options,
+    )
+}
+
+fn has_funds_unlocked_event(env: &Env) -> bool {
+    env.events()
+        .all()
+        .iter()
+        .any(|(_c, topics, _d)| topic1_is(env, &topics, "fnd_unlk"))
+}
+
+#[test]
+#[should_panic(expected = "FundsLockedUntil")]
+fn test_release_to_recipient_respects_time_lock() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let payer = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    StellarAssetClient::new(&env, &token_id).mint(&payer, &500);
+    set_ledger(&env, 100, 1_000);
+
+    let id = release_delay_invoice(&env, &c, &token_id, &creator, &recipient, 500, 5);
+    c.pay(&payer, &id, &500_i128, &0_u64, &false, &false);
+
+    // Unlock is at sequence 105; still locked at 104.
+    set_ledger(&env, 104, 1_000);
+    c.release_to_recipient(&id, &recipient);
+}
+
+#[test]
+fn test_funds_unlocked_emitted_at_exact_unlock_on_release_to_recipient() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+    let tk = token_client(&env, &token_id);
+
+    let creator = Address::generate(&env);
+    let payer = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    StellarAssetClient::new(&env, &token_id).mint(&payer, &500);
+    set_ledger(&env, 100, 1_000);
+
+    let id = release_delay_invoice(&env, &c, &token_id, &creator, &recipient, 500, 5);
+    c.pay(&payer, &id, &500_i128, &0_u64, &false, &false);
+
+    // Fully funded but time-locked: release_to_recipient's own guard prevented the
+    // automatic release path, so the invoice stays Pending and no unlock event fires yet.
+    assert_eq!(c.get_invoice(&id).status, InvoiceStatus::Pending);
+    assert!(
+        !has_funds_unlocked_event(&env),
+        "funds_unlocked must not fire before the delay elapses"
+    );
+
+    // Advance to the exact unlock ledger (funded_at=100 + delay=5) and release.
+    set_ledger(&env, 105, 1_000);
+    c.release_to_recipient(&id, &recipient);
+
+    assert_eq!(tk.balance(&recipient), 500);
+    assert!(
+        has_funds_unlocked_event(&env),
+        "release_to_recipient must emit funds_unlocked at the exact moment the lock expires, \
+         matching release_invoice's behavior"
+    );
 }
