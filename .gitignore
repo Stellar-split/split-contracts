@@ -1,6 +1,8 @@
 # Build output
 target/
 *.wasm
+wasm32-unknown-unknown/
+**/wasm32-unknown-unknown/
 
 # Environment files
 .env
@@ -10,6 +12,18 @@ target/
 # OS files
 .DS_Store
 Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+*.log
+*.tmp
+*.bak
+test_snapshots/
+snapshots/
+**/snapshots/
+*.swp
+*.swo
+*~
 
 # Editor/IDE
 .vscode/
@@ -17,12 +31,16 @@ Thumbs.db
 *.swp
 *.swo
 *~
+*.sublime-project
+*.sublime-workspace
 
 # Test snapshots
 **/__snapshots__/
 *.snap
 **/test_snapshots/
 *.snapshot
+**/snapshots/
+*.snap.bak
 
 # Stellar CLI
 .stellar/
@@ -32,17 +50,25 @@ identity/
 # Logs
 *.log
 *.log.*
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
 
 # Coverage reports
 lcov.info
 tarpaulin-report.html
 coverage/
 .nyc_output/
+profdata/
 
 # Temporary files
 *.tmp
 *.bak
 *.orig
+*.rej
+*~
+.*.swp
+.*.swo
 
 # Node / JS tooling (if any frontend tooling is added)
 node_modules/
@@ -50,7 +76,26 @@ dist/
 .pnp
 .pnp.js
 .yarn/
+.next/
+.nuxt/
+.parcel-cache/
+.cache/
 
 # Rust / Cargo artefacts not caught by target/
 **/*.rs.bk
 Cargo.lock.bak
+**/*.profraw
+**/*.profdata
+
+# Fuzz corpus (generated during fuzzing runs)
+fuzz/corpus/*
+!fuzz/corpus/.gitkeep
+
+# Cargo audit / deny / outdated cache
+.cargo-ok
+cargo-audit.toml
+
+# Python / misc tooling
+__pycache__/
+*.pyc
+.pytest_cache/

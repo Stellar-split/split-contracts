@@ -57,5 +57,6 @@ fuzz_target!(|input: Input| {
         &input.nonce,
         &input.auto_convert,
         &input.donate_on_failure,
+        &None,
     );
 });

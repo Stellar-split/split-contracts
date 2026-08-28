@@ -78,7 +78,7 @@ fuzz_target!(|input: Input| {
                     payers.push(fresh.clone());
                     fresh
                 };
-                let _ = c.try_pay(&payer, &invoice_id, &(amount as i128), &0u64, &false, &false);
+                let _ = c.try_pay(&payer, &invoice_id, &(amount as i128), &0u64, &false, &false, &None);
             }
             Op::Release { invoice_slot } => {
                 let invoice_id = resolve_id(&created, invoice_slot);

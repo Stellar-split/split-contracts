@@ -11,7 +11,7 @@
 use soroban_sdk::testutils::Address as _;
 use soroban_sdk::token::StellarAssetClient;
 use soroban_sdk::{Address, Env, Vec};
-use split::types::{InvoiceOptions, InvoiceOptions2, OverflowBehavior};
+use split::types::{InvoiceOptions, InvoiceOptions2, OverflowBehavior, OverfundingPolicy};
 use split::{SplitContract, SplitContractClient};
 
 /// Balance minted to every generated payer. Set to `i128::MAX` so that a
@@ -82,6 +82,9 @@ pub fn default_options(env: &Env) -> InvoiceOptions {
         refund_grace_secs: None,
         scheduled_release_at: None,
         require_kyc: false,
+        ratios: Vec::new(env),
+        cosigners: None,
+        cosigner_threshold: None,
         ext: InvoiceOptions2 {
             target_usd_cents: None,
             payment_token: None,
@@ -96,6 +99,17 @@ pub fn default_options(env: &Env) -> InvoiceOptions {
             min_payer_rep: None,
             payment_open_at: None,
             payment_close_at: None,
+            milestones: None,
+            recipient_max_payouts: None,
+            release_condition_hash: None,
+            recipient_whitelist_enabled: false,
+            escrow_hold_period: None,
+            overfunding_policy: OverfundingPolicy::Cap,
+            early_bird_window_ledgers: 0,
+            early_bird_fee_bps: 0,
+            creator_fee_bps: 0,
+            early_bird_fee_credit: 0,
+            ratio_denominator: 10_000,
         },
     }
 }

@@ -1,5 +1,5 @@
 [package]
-name = "split"
+name = "invoice-escrow"
 version = "0.1.0"
 edition = "2021"
 
@@ -11,14 +11,6 @@ soroban-sdk = { workspace = true }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
-proptest = "1"
 
 [features]
 testutils = ["soroban-sdk/testutils"]
-
-[profile.release]
-opt-level = "z"
-lto = true
-codegen-units = 1
-panic = "abort"
-strip = "symbols"

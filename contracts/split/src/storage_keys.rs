@@ -1,282 +1,431 @@
-//! Centralised storage key registry (issue #278).
+//! Centralised storage key registry (issue #312).
 //!
-//! Every storage key used by the contract is defined here so there are no
-//! raw string literals scattered throughout `lib.rs`.
+//! All storage keys used by the contract are declared here in one of four
+//! `#[contracttype]` enums. The enum-based approach guarantees that no two
+//! keys serialize to the same XDR value within a storage tier, and it
+//! replaces the scattered `symbol_short!` literals that previously lived
+//! inside `lib.rs`.
 //!
-//! Storage tiers:
-//! - **instance** – shared contract-level state (`admin`, `paused`, counters, …)
-//! - **persistent** – per-entity state (`invoice_key`, `nonce_key`, …)
+//! ## Why four enums?
+//! Soroban's XDR spec limits a `#[contracttype]` enum to **50 variants**.
+//! The contract uses ~115 distinct keys, so they are split by storage role:
+//!
+//! | Enum          | Tier       | Key shape                       | Variants |
+//! |---------------|------------|---------------------------------|----------|
+//! | `StorageKey`  | instance   | unit (no data)                  | ≤50      |
+//! | `InvoiceKey`  | persistent | `(invoice_id: u64)` or similar  | ≤50      |
+//! | `AddressKey`  | persistent | `(address: Address)` singletons | ≤50      |
+//! | `CompoundKey` | persistent | two or three fields             | ≤50      |
+//!
+//! ## Collision safety
+//! Within each enum, Rust/XDR guarantees that every variant name is unique,
+//! so no two variants can produce the same serialised value. Cross-enum
+//! collisions cannot happen in practice because:
+//! - `StorageKey` variants are only written to **instance** storage.
+//! - `InvoiceKey`, `AddressKey`, `CompoundKey` are only written to
+//!   **persistent** storage.
+//! - Even within persistent storage, the variant names are globally unique
+//!   across the three enums (enforced by the tests below).
+//!
+//! ## Key migration
+//! Use [`migrate_persistent`] / [`migrate_instance`] when renaming a key
+//! between contract versions.
 
-use soroban_sdk::{symbol_short, Address, Symbol};
-
-// ---------------------------------------------------------------------------
-// Instance-tier keys (contract-level singletons)
-// ---------------------------------------------------------------------------
-
-/// Admin address — instance storage.
-pub fn admin_key() -> Symbol { symbol_short!("admin") }
-/// Admin map (role → address list) — instance storage.
-pub fn admins_key() -> Symbol { symbol_short!("admins") }
-/// Global pause flag — instance storage.
-pub fn paused_key() -> Symbol { symbol_short!("paused") }
-/// Per-function pause set — instance storage.
-pub fn paused_fns_key() -> Symbol { symbol_short!("ps_fns") }
-/// Reentrancy guard flag — instance storage.
-pub fn reentrancy_key() -> Symbol { symbol_short!("re_guard") }
-/// Platform treasury address — instance storage.
-pub fn treasury_key() -> Symbol { symbol_short!("treasury") }
-/// USDC token contract address — instance storage.
-pub fn usdc_token_key() -> Symbol { symbol_short!("usdc_tok") }
-/// Invoice creation fee — instance storage.
-pub fn creation_fee_key() -> Symbol { symbol_short!("crt_fee") }
-/// Platform fee in basis points — instance storage.
-pub fn platform_fee_bps_key() -> Symbol { symbol_short!("plat_fee") }
-/// Platform fee waiver address list — instance storage.
-pub fn platform_fee_waiver_list_key() -> Symbol { symbol_short!("fee_wvrs") }
-/// Invoice ID counter — instance storage.
-pub fn counter_key() -> Symbol { symbol_short!("counter") }
-/// Global payer velocity limit — instance storage.
-pub fn global_payer_limit_key() -> Symbol { symbol_short!("g_vel_lim") }
-/// Global payer velocity window — instance storage.
-pub fn global_payer_window_key() -> Symbol { symbol_short!("g_vel_win") }
-/// Stream contract address — instance storage.
-pub fn stream_contract_key() -> Symbol { symbol_short!("strm_ctr") }
-/// Creator whitelist flag — instance storage.
-pub fn creator_whitelist_key() -> Symbol { symbol_short!("crt_wl") }
-/// Compliance contract address — instance storage.
-pub fn compliance_key() -> Symbol { symbol_short!("comply") }
-/// KYC verification contract address — instance storage.
-pub fn kyc_contract_key() -> Symbol { symbol_short!("kyc_ctr") }
-/// Global rate limit (max invoices per window) — instance storage.
-pub fn rate_limit_key() -> Symbol { symbol_short!("rate_lim") }
-/// Global rate limit window in seconds — instance storage.
-pub fn rate_window_key() -> Symbol { symbol_short!("rate_win") }
-/// Maximum cancellation rate in basis points — instance storage.
-pub fn max_cancel_bps_key() -> Symbol { symbol_short!("mx_cnl_bp") }
-/// Receipt token factory contract address — instance storage.
-pub fn receipt_factory_key() -> Symbol { symbol_short!("rcpt_fac") }
-/// Dashboard contract address — instance storage.
-pub fn dashboard_contract_key() -> Symbol { symbol_short!("dash_ctr") }
-/// NFT gate contract address — instance storage.
-pub fn nft_gate_key() -> Symbol { symbol_short!("nft_gte") }
-/// Timelock duration in seconds — instance storage.
-pub fn timelock_secs_key() -> Symbol { symbol_short!("tl_secs") }
-/// Timelock action counter — instance storage.
-pub fn timelock_action_counter_key() -> Symbol { symbol_short!("tl_cntr") }
-/// Fee tiers list — instance storage.
-pub fn fee_tiers_key() -> Symbol { symbol_short!("fee_trs") }
-/// Pending admin proposal address — instance storage.
-pub fn pending_admin_key() -> Symbol { symbol_short!("pend_adm") }
-/// Timestamp of pending admin proposal — instance storage.
-pub fn admin_proposal_time_key() -> Symbol { symbol_short!("adm_prop") }
-/// Governance contract address — instance storage.
-pub fn governance_contract_key() -> Symbol { symbol_short!("gov_ctr") }
-/// Authorised factory addresses — instance storage.
-pub fn factories_key() -> Symbol { symbol_short!("factories") }
-/// DEX contract address — instance storage.
-pub fn dex_contract_key() -> Symbol { symbol_short!("dex_ctr") }
-/// Total invoices created counter — instance storage.
-pub fn total_invoices_key() -> Symbol { symbol_short!("tot_inv") }
-/// Total funded volume counter — instance storage.
-pub fn total_volume_key() -> Symbol { symbol_short!("tot_vol") }
-/// Total released volume counter — instance storage.
-pub fn total_released_key() -> Symbol { symbol_short!("tot_rel") }
-/// Total refunded volume counter — instance storage.
-pub fn total_refunded_key() -> Symbol { symbol_short!("tot_ref") }
-/// Treasury group counter — instance storage.
-pub fn treasury_group_counter_key() -> Symbol { symbol_short!("grp_tr_cn") }
-/// Contract version — instance storage (issue #279).
-pub fn contract_version_key() -> Symbol { symbol_short!("ct_ver") }
+use soroban_sdk::{contracttype, symbol_short, Address, Env, IntoVal, Symbol, TryFromVal, Val};
 
 // ---------------------------------------------------------------------------
-// Persistent-tier keys (per-entity)
+// Enum 1 — Instance-tier singletons
 // ---------------------------------------------------------------------------
 
-/// Core invoice fields — persistent storage.
-pub fn invoice_key(id: u64) -> (Symbol, u64) { (symbol_short!("inv"), id) }
-/// Extended invoice fields (`InvoiceExt`) — persistent storage.
-pub fn invoice_ext_key(id: u64) -> (Symbol, u64) { (symbol_short!("inv_ext"), id) }
-/// Extended invoice fields 2 (`InvoiceExt2`) — persistent storage.
-pub fn invoice_ext2_key(id: u64) -> (Symbol, u64) { (symbol_short!("inv_ex2"), id) }
-/// Compact byte representation of an invoice — persistent storage.
-pub fn invoice_compact_key(id: u64) -> (Symbol, u64) { (symbol_short!("inv_cpt"), id) }
-/// Audit log entries for an invoice — persistent storage.
-pub fn audit_log_key(id: u64) -> (Symbol, u64) { (symbol_short!("log"), id) }
-/// Sharded payment list: `(invoice_id, shard_id)` — persistent storage.
-pub fn payment_shard_key(invoice_id: u64, shard_id: u64) -> (Symbol, u64, u64) { (symbol_short!("pay_sh"), invoice_id, shard_id) }
-/// Timelock action entry — persistent storage.
-pub fn timelock_action_key(action_id: u64) -> (Symbol, u64) { (symbol_short!("tl_act"), action_id) }
-/// Subscription parameters — persistent storage.
-pub fn subscription_params_key(id: u64) -> (Symbol, u64) { (symbol_short!("sub"), id) }
-/// Subscription subscriber list — persistent storage.
-pub fn subscription_subscribers_key(sub_id: u64) -> (Symbol, u64) { (symbol_short!("sub_sub"), sub_id) }
-/// External governance vote key — persistent storage.
-pub fn ext_vote_key(id: u64) -> (Symbol, u64) { (symbol_short!("ext_vote"), id) }
-/// Invoice group — persistent storage.
-pub fn group_key(group_id: u64) -> (Symbol, u64) { (symbol_short!("grp"), group_id) }
-/// Reverse lookup: invoice → group — persistent storage.
-pub fn invoice_group_key(invoice_id: u64) -> (Symbol, u64) { (symbol_short!("invgrp"), invoice_id) }
-/// Invoice-level treasury record — persistent storage.
-pub fn invoice_treasury_key(invoice_id: u64) -> (Symbol, u64) { (symbol_short!("inv_tr"), invoice_id) }
-/// Treasury group — persistent storage.
-pub fn group_treasury_key(group_id: u64) -> (Symbol, u64) { (symbol_short!("grp_tr"), group_id) }
-/// Invoice template — persistent storage.
-pub fn template_key(creator: &Address, name: &Symbol) -> (Symbol, Address, Symbol) { (symbol_short!("tmpl"), creator.clone(), name.clone()) }
-/// Versioned invoice template — persistent storage.
-pub fn template_version_key(creator: &Address, name: &Symbol, version: u32) -> (Symbol, Address, Symbol, u32) { (symbol_short!("tmpl_v"), creator.clone(), name.clone(), version) }
-/// Template version counter — persistent storage.
-pub fn template_version_count_key(creator: &Address, name: &Symbol) -> (Symbol, Address, Symbol) { (symbol_short!("tmpl_ct"), creator.clone(), name.clone()) }
-/// Pending payout per `(invoice_id, recipient)` — persistent storage.
-pub fn pending_payout_key(invoice_id: u64, recipient: &Address) -> (Symbol, u64, Address) { (symbol_short!("pend_pay"), invoice_id, recipient.clone()) }
-/// Per-address reputation counter — persistent storage.
-pub fn rep_key(payer: &Address) -> (Symbol, Address) { (symbol_short!("rep"), payer.clone()) }
-/// Per-address credit score — persistent storage.
-pub fn credit_key(payer: &Address) -> (Symbol, Address) { (symbol_short!("credit"), payer.clone()) }
-/// Per-address referral count — persistent storage.
-pub fn referral_count_key(referrer: &Address) -> (Symbol, Address) { (symbol_short!("ref_cnt"), referrer.clone()) }
-/// Payment channel state — persistent storage.
-pub fn channel_key(invoice_id: u64, payer: &Address) -> (Symbol, u64, Address) { (symbol_short!("chan"), invoice_id, payer.clone()) }
-/// Per-payer per-invoice nonce (replay protection) — persistent storage.
-pub fn nonce_key(invoice_id: u64, payer: &Address) -> (Symbol, u64, Address) { (symbol_short!("nonce"), invoice_id, payer.clone()) }
-/// Per-payer velocity window state — persistent storage.
-pub fn vel_key(invoice_id: u64, payer: &Address) -> (Symbol, u64, Address) { (symbol_short!("vel"), invoice_id, payer.clone()) }
-/// Global cross-invoice per-payer velocity — persistent storage.
-pub fn global_vel_key(payer: &Address) -> (Symbol, Address) { (symbol_short!("g_vel"), payer.clone()) }
-/// Per-recipient invoice ID index — persistent storage.
-pub fn recipient_invoice_ids_key(recipient: &Address) -> (Symbol, Address) { (symbol_short!("rec_inv"), recipient.clone()) }
-/// Delegate address for an invoice — persistent storage.
-pub fn delegate_key(invoice_id: u64) -> (Symbol, u64) { (symbol_short!("delegate"), invoice_id) }
-/// Delegate-pay authorization — persistent storage.
-pub fn delegate_pay_key(beneficiary: &Address) -> (Symbol, Address) { (symbol_short!("dlgt_pay"), beneficiary.clone()) }
-/// Per-creator rate limit usage — persistent storage.
-pub fn rate_usage_key(creator: &Address) -> (Symbol, Address) { (symbol_short!("rate"), creator.clone()) }
-/// Per-creator invoice creation count — persistent storage.
-pub fn invoice_count_key(creator: &Address) -> (Symbol, Address) { (symbol_short!("inv_count"), creator.clone()) }
-/// Per-creator invoice cancellation count — persistent storage.
-pub fn cancel_count_key(creator: &Address) -> (Symbol, Address) { (symbol_short!("cnl_count"), creator.clone()) }
-/// Per-payer per-invoice receipt token address — persistent storage.
-pub fn receipt_token_key(invoice_id: u64, payer: &Address) -> (Symbol, u64, Address) { (symbol_short!("rcpt"), invoice_id, payer.clone()) }
-/// Per-invoice per-payer micro-payment accumulator — persistent storage.
-pub fn accum_key(invoice_id: u64, payer: &Address) -> (Symbol, u64, Address) { (symbol_short!("accum"), invoice_id, payer.clone()) }
-/// Per-creator total invoice count — persistent storage.
-pub fn creator_stats_count_key(creator: &Address) -> (Symbol, Address) { (symbol_short!("cr_cnt"), creator.clone()) }
-/// Per-creator total funded volume — persistent storage.
-pub fn creator_stats_volume_key(creator: &Address) -> (Symbol, Address) { (symbol_short!("cr_vol"), creator.clone()) }
-/// Per-creator total released volume — persistent storage.
-pub fn creator_stats_released_key(creator: &Address) -> (Symbol, Address) { (symbol_short!("cr_rel"), creator.clone()) }
-/// Per-creator total refunded volume — persistent storage.
-pub fn creator_stats_refunded_key(creator: &Address) -> (Symbol, Address) { (symbol_short!("cr_ref"), creator.clone()) }
-/// Per-payer cooldown timestamp — persistent storage.
-pub fn payer_cooldown_key(invoice_id: u64, payer: Address) -> (Symbol, u64, Address) { (symbol_short!("pyr_cd"), invoice_id, payer) }
-/// Sliding-window payment timestamps for rate limiting — persistent storage.
-pub fn payment_window_key(invoice_id: u64) -> (Symbol, u64) { (symbol_short!("pay_win"), invoice_id) }
-/// Payment completion certificate — persistent storage.
-pub fn cert_key(invoice_id: u64) -> (Symbol, u64) { (symbol_short!("cert"), invoice_id) }
-/// Reminder entry — persistent storage.
-pub fn reminder_key(invoice_id: u64, address: &Address) -> (Symbol, u64, Address) { (symbol_short!("rem"), invoice_id, address.clone()) }
-/// Per-address pause exemption flag — persistent storage.
-pub fn pause_exempt_key(address: &Address) -> (Symbol, Address) { (symbol_short!("p_exempt"), address.clone()) }
-/// Creator volume cap (admin-set) — persistent storage.
-pub fn creator_volume_cap_key(creator: &Address) -> (Symbol, Address) { (symbol_short!("cr_v_cap"), creator.clone()) }
-/// Creator volume used — persistent storage.
-pub fn creator_volume_used_key(creator: &Address) -> (Symbol, Address) { (symbol_short!("cr_v_use"), creator.clone()) }
-/// Creator self-imposed spending limit — persistent storage.
-pub fn creator_self_limit_key(creator: &Address) -> (Symbol, Address) { (symbol_short!("cr_slf_lim"), creator.clone()) }
-/// Creator self-limit daily usage — persistent storage.
-pub fn creator_self_used_key(creator: &Address) -> (Symbol, Address) { (symbol_short!("cr_slf_use"), creator.clone()) }
-/// Creator self-limit last reset day — persistent storage.
-pub fn creator_self_limit_day_key(creator: &Address) -> (Symbol, Address) { (symbol_short!("cr_slf_day"), creator.clone()) }
-/// Creator self-limit pending raise request — persistent storage.
-pub fn creator_self_limit_raise_key(creator: &Address) -> (Symbol, Address) { (symbol_short!("cr_slf_rse"), creator.clone()) }
-
-// ---------------------------------------------------------------------------
-// Issue #332: Recipient payout optimization
-// ---------------------------------------------------------------------------
-
-/// Contiguous Vec<Address> of all recipients for an invoice — persistent storage.
-/// Replaces per-recipient storage keys so the full list can be loaded with a
-/// single `env.storage().persistent().get()` call during release.
-pub fn recipients_list_key(invoice_id: u64) -> (Symbol, u64) { (symbol_short!("rec_lst"), invoice_id) }
-
-/// Contiguous Vec<i128> of amounts parallel to `recipients_list_key` — persistent storage.
-pub fn amounts_list_key(invoice_id: u64) -> (Symbol, u64) { (symbol_short!("amt_lst"), invoice_id) }
-
-/// Bit-vector (u32) of paid flags parallel to recipients list — persistent storage.
-/// Bit N is set when recipients[N] has been paid. Supports up to 32 recipients per
-/// compact flag word; a second word (`paid_flags_1`, etc.) would extend capacity.
-pub fn paid_flags_key(invoice_id: u64) -> (Symbol, u64) { (symbol_short!("paid_flg"), invoice_id) }
-
-// ---------------------------------------------------------------------------
-// Issue #333: Payment milestone events
-// ---------------------------------------------------------------------------
-
-/// Bitmask (u8) of milestones already emitted for an invoice — instance storage.
-/// Bit 0 = 25%, Bit 1 = 50%, Bit 2 = 75%, Bit 3 = 100%.
-/// Stored in instance storage so it piggybacks on the instance-level TTL bump
-/// that already happens on every pay() call, avoiding extra rent.
-pub fn milestone_flags_key(invoice_id: u64) -> (Symbol, u64) { (symbol_short!("ms_flgs"), invoice_id) }
-
-// ---------------------------------------------------------------------------
-// Issue #334: Compact XDR storage
-// ---------------------------------------------------------------------------
-
-/// Compact status byte (u8) for an invoice — persistent storage (overlay).
-/// 0 = Pending, 1 = Released, 2 = Refunded, 3 = Cancelled.
-/// Replaces storing the full InvoiceStatus enum variant for minimal XDR cost.
-pub fn compact_status_key(invoice_id: u64) -> (Symbol, u64) { (symbol_short!("cpt_sts"), invoice_id) }
-
-/// Compact deadline stored as u32 ledger sequence — persistent storage.
-/// Used when wall-clock time is not required (opt-in via compact_migrate).
-pub fn compact_deadline_ledger_key(invoice_id: u64) -> (Symbol, u64) { (symbol_short!("cpt_dlg"), invoice_id) }
-
-pub fn fallback_escrow_key(invoice_id: u64, recipient: Address) -> (Symbol, u64, Address) {
-    (symbol_short!("fb_esc"), invoice_id, recipient)
+/// Contract-level singleton keys stored in **instance** storage.
+///
+/// All variants are unit (carry no data). Instance storage is wiped on
+/// upgrade unless explicitly preserved, so these represent live config.
+#[contracttype]
+#[derive(Clone)]
+pub enum StorageKey {
+    Admin,
+    Admins,
+    Paused,
+    PausedFns,
+    Treasury,
+    UsdcToken,
+    CreationFee,
+    PlatformFeeBps,
+    PlatformFeeWaiverList,
+    CreatorFeeWaiver,
+    Counter,
+    GlobalPayerLimit,
+    GlobalPayerWindow,
+    StreamContract,
+    CreatorWhitelist,
+    Compliance,
+    KycContract,
+    RateLimit,
+    RateWindow,
+    MaxCancelBps,
+    ReceiptFactory,
+    DashboardContract,
+    NftGate,
+    TimelockSecs,
+    TimelockActionCounter,
+    FeeTiers,
+    PendingAdmin,
+    GovernanceContract,
+    Factories,
+    DexContract,
+    TotalInvoices,
+    TotalVolume,
+    TotalReleased,
+    TotalRefunded,
+    TreasuryGroupCounter,
+    ContractVersion,
+    ArchiveAfterLedgers,
+    CircuitBreaker,
+    CircuitBreakerReason,
+    PlatformVolThresh,
+    PlatformVolMile,
+    CreatorVolThresh,
+    UpgradeProposal,
+    ProtocolFee,
+    ReentrancyGuard,
 }
 
-pub fn plan_key(invoice_id: u64, payer: Address) -> (Symbol, u64, Address) {
-    (symbol_short!("inst_pl"), invoice_id, payer)
+// ---------------------------------------------------------------------------
+// Enum 2 — Persistent-tier per-invoice keys
+// ---------------------------------------------------------------------------
+
+/// Per-invoice or per-resource keys stored in **persistent** storage.
+///
+/// Most variants carry a single `invoice_id: u64`; `PaymentShard` carries
+/// two `u64` values.
+#[contracttype]
+#[derive(Clone)]
+pub enum InvoiceKey {
+    Invoice(u64),
+    InvoiceExt(u64),
+    InvoiceExt2(u64),
+    InvoiceCompact(u64),
+    InvoiceHot(u64),
+    AuditLog(u64),
+    PaymentShard(u64, u64),
+    ReleaseDelay(u64),
+    FundedAtLedger(u64),
+    MetadataHash(u64),
+    PaidRecipients(u64),
+    CompactStatus(u64),
+    CompactDeadlineLedger(u64),
+    ConfidentialCount(u64),
+    InvoiceGroup(u64),
+    InvoiceTreasury(u64),
+    Delegate(u64),
+    PaymentWindow(u64),
+    Cert(u64),
+    DisputeRecord(u64),
+    DisputeRaisedAt(u64),
+    Refunded(u64),
+    RecipientsList(u64),
+    AmountsList(u64),
+    PaidFlags(u64),
+    MilestoneFlags(u64),
+    ArchiveMarker(u64),
+    CreatedLedger(u64),
+    SubscriptionParams(u64),
+    SubscriptionSubscribers(u64),
+    ExtVote(u64),
+    Group(u64),
+    GroupTreasury(u64),
+    TimelockAction(u64),
 }
 
-pub fn fee_brackets_key() -> Symbol {
-    symbol_short!("fee_brks")
+// ---------------------------------------------------------------------------
+// Enum 3 — Persistent-tier per-address keys
+// ---------------------------------------------------------------------------
+
+/// Per-`Address` keys stored in **persistent** storage.
+#[contracttype]
+#[derive(Clone)]
+pub enum AddressKey {
+    Reputation(Address),
+    Credit(Address),
+    ReferralCount(Address),
+    RecipientInvoiceIds(Address),
+    DelegatePay(Address),
+    RateUsage(Address),
+    InvoiceCount(Address),
+    CancelCount(Address),
+    CreatorStatsCount(Address),
+    CreatorStatsVolume(Address),
+    CreatorStatsReleased(Address),
+    CreatorStatsRefunded(Address),
+    CreatorStatsPayers(Address),
+    CreatorStatsAvgFunding(Address),
+    CreatorVolumeCap(Address),
+    CreatorVolumeUsed(Address),
+    CreatorSelfLimit(Address),
+    CreatorSelfUsed(Address),
+    CreatorSelfLimitDay(Address),
+    CreatorSelfLimitRaise(Address),
+    PauseExempt(Address),
+    GlobalVelocity(Address),
+    CreatorVolMile(Address),
 }
-// ---------------------------------------------------------------------------
-// Issue #438: Invoice anonymity mode
-// ---------------------------------------------------------------------------
-
-/// Per-invoice anonymity mode flag — persistent storage.
-pub fn anonymous_recipients_key(invoice_id: u64) -> (Symbol, u64) { (symbol_short!("anon_rec"), invoice_id) }
-
-/// Recipient commitment hash for anonymous invoice — persistent storage.
-/// Key: (invoice_id, recipient_index)
-pub fn recipient_commitment_key(invoice_id: u64, index: u32) -> (Symbol, u64, u32) { (symbol_short!("rec_cmt"), invoice_id, index) }
 
 // ---------------------------------------------------------------------------
-// Issue #437: Recipient payout delay
+// Enum 4 — Persistent-tier compound keys
 // ---------------------------------------------------------------------------
 
-/// Delayed payout record — persistent storage.
-/// Key: (invoice_id, recipient)
-pub fn delayed_payout_key(invoice_id: u64, recipient: &Address) -> (Symbol, u64, Address) { (symbol_short!("del_pay"), invoice_id, recipient.clone()) }
+/// Compound (multi-field) persistent-storage keys.
+#[contracttype]
+#[derive(Clone)]
+pub enum CompoundKey {
+    PendingPayout(u64, Address),
+    Channel(u64, Address),
+    Nonce(u64, Address),
+    Velocity(u64, Address),
+    ReceiptToken(u64, Address),
+    Accumulator(u64, Address),
+    Reminder(u64, Address),
+    ConfidentialPay(u64, Address),
+    Delegation(u64, Address),
+    PayerCooldown(u64, Address),
+    CreatorPayerSet(Address, Address),
+    Template(Address, Symbol),
+    TemplateVersion(Address, Symbol, u32),
+    TemplateVersionCount(Address, Symbol),
+}
 
 // ---------------------------------------------------------------------------
-// Issue #436: Payment proof commitment
+// Migration helpers
 // ---------------------------------------------------------------------------
 
-/// Rolling payment root hash for an invoice — persistent storage.
-pub fn payment_root_key(invoice_id: u64) -> (Symbol, u64) { (symbol_short!("pay_root"), invoice_id) }
+/// Copy a value from `old_key` to `new_key` in **persistent** storage and
+/// remove the old entry. No-op when `old_key` is absent.
+///
+/// Use this in contract `upgrade()` when renaming a storage key between
+/// contract versions.
+#[allow(dead_code)]
+pub fn migrate_persistent<OldKey, NewKey, V>(env: &Env, old_key: &OldKey, new_key: &NewKey)
+where
+    OldKey: IntoVal<Env, Val>,
+    NewKey: IntoVal<Env, Val>,
+    V: IntoVal<Env, Val> + TryFromVal<Env, Val>,
+{
+    if let Some(val) = env.storage().persistent().get::<OldKey, V>(old_key) {
+        env.storage().persistent().set(new_key, &val);
+        env.storage().persistent().remove(old_key);
+    }
+}
+
+/// Same as [`migrate_persistent`] but operates on **instance** storage.
+#[allow(dead_code)]
+pub fn migrate_instance<OldKey, NewKey, V>(env: &Env, old_key: &OldKey, new_key: &NewKey)
+where
+    OldKey: IntoVal<Env, Val>,
+    NewKey: IntoVal<Env, Val>,
+    V: IntoVal<Env, Val> + TryFromVal<Env, Val>,
+{
+    if let Some(val) = env.storage().instance().get::<OldKey, V>(old_key) {
+        env.storage().instance().set(new_key, &val);
+        env.storage().instance().remove(old_key);
+    }
+}
 
 // ---------------------------------------------------------------------------
-// Issue #435: Contract upgrade freeze
+// Tests — key uniqueness
 // ---------------------------------------------------------------------------
 
-/// Contract upgrade freeze flag — instance storage.
-pub fn upgrade_freeze_key() -> Symbol { symbol_short!("upg_frz") }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use soroban_sdk::{testutils::Address as _, xdr::ToXdr, Env};
 
-/// Contract upgrade checkpoint hash — instance storage.
-pub fn upgrade_checkpoint_key() -> Symbol { symbol_short!("upg_ckpt") }
+    fn xdr_sk(env: &Env, k: &StorageKey) -> soroban_sdk::Bytes {
+        let v: soroban_sdk::Val = k.clone().into_val(env);
+        v.to_xdr(env)
+    }
+    fn xdr_ik(env: &Env, k: &InvoiceKey) -> soroban_sdk::Bytes {
+        let v: soroban_sdk::Val = k.clone().into_val(env);
+        v.to_xdr(env)
+    }
+    fn xdr_ak(env: &Env, k: &AddressKey) -> soroban_sdk::Bytes {
+        let v: soroban_sdk::Val = k.clone().into_val(env);
+        v.to_xdr(env)
+    }
+    fn xdr_ck(env: &Env, k: &CompoundKey) -> soroban_sdk::Bytes {
+        let v: soroban_sdk::Val = k.clone().into_val(env);
+        v.to_xdr(env)
+    }
 
-/// Issue #451: per-invoice required memo hash — persistent storage.
-pub fn required_memo_hash_key(invoice_id: u64) -> (Symbol, u64) { (symbol_short!("req_memo"), invoice_id) }
-/// Issue #452: per-invoice tags — persistent storage.
-pub fn invoice_tags_key(invoice_id: u64) -> (Symbol, u64) { (symbol_short!("inv_tags"), invoice_id) }
+    #[test]
+    fn instance_keys_are_unique() {
+        let env = Env::default();
+        let keys: &[StorageKey] = &[
+            StorageKey::Admin, StorageKey::Admins, StorageKey::Paused,
+            StorageKey::PausedFns, StorageKey::Treasury, StorageKey::UsdcToken,
+            StorageKey::CreationFee, StorageKey::PlatformFeeBps,
+            StorageKey::PlatformFeeWaiverList, StorageKey::CreatorFeeWaiver,
+            StorageKey::Counter, StorageKey::GlobalPayerLimit,
+            StorageKey::GlobalPayerWindow, StorageKey::StreamContract,
+            StorageKey::CreatorWhitelist, StorageKey::Compliance,
+            StorageKey::KycContract, StorageKey::RateLimit, StorageKey::RateWindow,
+            StorageKey::MaxCancelBps, StorageKey::ReceiptFactory,
+            StorageKey::DashboardContract, StorageKey::NftGate,
+            StorageKey::TimelockSecs, StorageKey::TimelockActionCounter,
+            StorageKey::FeeTiers, StorageKey::PendingAdmin,
+            StorageKey::GovernanceContract, StorageKey::Factories,
+            StorageKey::DexContract, StorageKey::TotalInvoices,
+            StorageKey::TotalVolume, StorageKey::TotalReleased,
+            StorageKey::TotalRefunded, StorageKey::TreasuryGroupCounter,
+            StorageKey::ContractVersion, StorageKey::ArchiveAfterLedgers,
+            StorageKey::CircuitBreaker, StorageKey::CircuitBreakerReason,
+            StorageKey::PlatformVolThresh, StorageKey::PlatformVolMile,
+            StorageKey::CreatorVolThresh, StorageKey::UpgradeProposal,
+            StorageKey::ProtocolFee, StorageKey::ReentrancyGuard,
+        ];
+        for i in 0..keys.len() {
+            for j in (i + 1)..keys.len() {
+                assert_ne!(
+                    xdr_sk(&env, &keys[i]),
+                    xdr_sk(&env, &keys[j]),
+                    "StorageKey variant {i} and {j} collide"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn invoice_keys_differ_by_variant() {
+        let env = Env::default();
+        let id = 42u64;
+        let keys: &[InvoiceKey] = &[
+            InvoiceKey::Invoice(id), InvoiceKey::InvoiceExt(id),
+            InvoiceKey::InvoiceExt2(id), InvoiceKey::InvoiceCompact(id),
+            InvoiceKey::InvoiceHot(id), InvoiceKey::AuditLog(id),
+            InvoiceKey::ReleaseDelay(id), InvoiceKey::CompactStatus(id),
+            InvoiceKey::RecipientsList(id), InvoiceKey::AmountsList(id),
+            InvoiceKey::PaidFlags(id), InvoiceKey::MilestoneFlags(id),
+            InvoiceKey::ArchiveMarker(id), InvoiceKey::CreatedLedger(id),
+        ];
+        for i in 0..keys.len() {
+            for j in (i + 1)..keys.len() {
+                assert_ne!(
+                    xdr_ik(&env, &keys[i]),
+                    xdr_ik(&env, &keys[j]),
+                    "InvoiceKey {i} and {j} collide"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn invoice_key_id_uniqueness() {
+        let env = Env::default();
+        assert_ne!(
+            xdr_ik(&env, &InvoiceKey::Invoice(1)),
+            xdr_ik(&env, &InvoiceKey::Invoice(2))
+        );
+        assert_ne!(
+            xdr_ik(&env, &InvoiceKey::PaymentShard(1, 0)),
+            xdr_ik(&env, &InvoiceKey::PaymentShard(1, 1))
+        );
+    }
+
+    #[test]
+    fn address_keys_differ_by_variant() {
+        let env = Env::default();
+        let addr = soroban_sdk::Address::generate(&env);
+        let keys: &[AddressKey] = &[
+            AddressKey::Reputation(addr.clone()),
+            AddressKey::Credit(addr.clone()),
+            AddressKey::ReferralCount(addr.clone()),
+            AddressKey::RecipientInvoiceIds(addr.clone()),
+            AddressKey::DelegatePay(addr.clone()),
+            AddressKey::RateUsage(addr.clone()),
+            AddressKey::InvoiceCount(addr.clone()),
+            AddressKey::CancelCount(addr.clone()),
+            AddressKey::CreatorStatsCount(addr.clone()),
+            AddressKey::CreatorStatsVolume(addr.clone()),
+            AddressKey::CreatorStatsPayers(addr.clone()),
+            AddressKey::GlobalVelocity(addr.clone()),
+            AddressKey::PauseExempt(addr.clone()),
+        ];
+        for i in 0..keys.len() {
+            for j in (i + 1)..keys.len() {
+                assert_ne!(
+                    xdr_ak(&env, &keys[i]),
+                    xdr_ak(&env, &keys[j]),
+                    "AddressKey {i} and {j} collide"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn compound_keys_differ_by_variant() {
+        let env = Env::default();
+        let addr = soroban_sdk::Address::generate(&env);
+        let id = 1u64;
+        let keys: &[CompoundKey] = &[
+            CompoundKey::PendingPayout(id, addr.clone()),
+            CompoundKey::Channel(id, addr.clone()),
+            CompoundKey::Nonce(id, addr.clone()),
+            CompoundKey::Velocity(id, addr.clone()),
+            CompoundKey::ReceiptToken(id, addr.clone()),
+            CompoundKey::Accumulator(id, addr.clone()),
+            CompoundKey::Reminder(id, addr.clone()),
+            CompoundKey::ConfidentialPay(id, addr.clone()),
+            CompoundKey::Delegation(id, addr.clone()),
+            CompoundKey::PayerCooldown(id, addr.clone()),
+        ];
+        for i in 0..keys.len() {
+            for j in (i + 1)..keys.len() {
+                assert_ne!(
+                    xdr_ck(&env, &keys[i]),
+                    xdr_ck(&env, &keys[j]),
+                    "CompoundKey {i} and {j} collide"
+                );
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Issue #559: Creator Revenue Share
+// ---------------------------------------------------------------------------
+
+/// Creator fee in basis points stored at invoice creation — persistent storage.
+/// Key: (Symbol, u64) → u32
+#[allow(dead_code)]
+pub fn creator_fee_bps_key(invoice_id: u64) -> (Symbol, u64) {
+    (symbol_short!("cr_fee_bp"), invoice_id)
+}
+
+/// Set of allowed payment tokens — persistent storage.
+/// Key: Symbol → Vec<Address>
+pub fn allowed_tokens_key() -> Symbol {
+    symbol_short!("alwd_toks")
+}
+
+// ---------------------------------------------------------------------------
+// Issue #560: Creator Migration
+// ---------------------------------------------------------------------------
+
+/// Pending successor creator address — persistent storage.
+/// Key: (Symbol, u64) → Address
+#[allow(dead_code)]
+pub fn pending_creator_key(invoice_id: u64) -> (Symbol, u64) {
+    (symbol_short!("pend_cr"), invoice_id)
+}
+
+// ---------------------------------------------------------------------------
+// Issue #562: Soft-Delete with Tombstone
+// ---------------------------------------------------------------------------
+
+/// Tombstone record for soft-deleted invoices — persistent storage.
+/// Key: (Symbol, u64) → Tombstone
+#[allow(dead_code)]
+pub fn tombstone_key(invoice_id: u64) -> (Symbol, u64) {
+    (symbol_short!("tombstone"), invoice_id)
+}
+

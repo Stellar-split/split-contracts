@@ -40,7 +40,7 @@ fuzz_target!(|input: Input| {
         if input.pay_amount > 0 {
             let payer = Address::generate(&env);
             fund(&env, &token_id, &payer);
-            let _ = c.try_pay(&payer, &id, &(input.pay_amount as i128), &0u64, &false, &false);
+            let _ = c.try_pay(&payer, &id, &(input.pay_amount as i128), &0u64, &false, &false, &None);
         }
     }
 
