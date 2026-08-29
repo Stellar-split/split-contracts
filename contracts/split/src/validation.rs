@@ -12,8 +12,8 @@ use soroban_sdk::{symbol_short, Address, Env, Map, Vec};
 /// Uses a `soroban_sdk::Map` for O(n log n) membership tracking — no
 /// unbounded heap allocation and a single pass over the slice.
 ///
-/// Returns `Ok(())` when every address is distinct, or
-/// `Err(ContractError::DuplicateRecipient)` on the first duplicate found.
+/// # Errors
+/// Returns [ContractError::DuplicateRecipient] when a duplicate is found.
 pub fn assert_unique_recipients(env: &Env, recipients: &[Address]) -> Result<(), ContractError> {
     let mut seen: Map<Address, bool> = Map::new(env);
     for r in recipients.iter() {
@@ -40,6 +40,8 @@ pub fn assert_unique_recipients(env: &Env, recipients: &[Address]) -> Result<(),
 /// Returns `Ok(())` when every recipient returns a valid balance, or
 /// `Err(ContractError::RecipientMissingTrustline)` with the offending address
 /// surfaced in the panic message.
+/// # Errors
+/// Returns [ContractError::RecipientMissingTrustline] when a balance call fails.
 pub fn assert_recipients_have_trustlines(
     env: &Env,
     token: &Address,
@@ -64,18 +66,33 @@ pub fn assert_recipients_have_trustlines(
     Ok(())
 }
 
-/// Issue #628: Validate that a basis-points value is within the allowed range
-/// [0, 10_000] (i.e. it does not exceed 100%).
+/// Issue #623: Verify that the sum of `values` equals exactly `BASIS_POINTS_TOTAL` (10 000).
 ///
-/// Basis-points fields such as `penalty_bps`, `tax_bps`, and
-/// `insurance_premium_bps` must never exceed 10 000 — values above that would
-/// represent a fee of more than 100%, which is nonsensical.
+/// Used wherever a slice of basis-point weights must cover 100% of a whole:
+/// split ratios, release stages, fee recipients, etc.
 ///
-/// Returns `Ok(())` when `bps <= 10_000`, or
-/// `Err(ContractError::InvalidAmount)` otherwise.
-pub fn assert_valid_bps(bps: u32) -> Result<(), ContractError> {
-    if bps > 10_000 {
-        return Err(ContractError::InvalidAmount);
+/// # Errors
+/// Returns `Err(ContractError::InvalidRatioSum)` when `values.iter().sum::<u32>() != 10_000`.
+///
+/// # Examples
+/// ```
+/// assert!(assert_bps_sum(&[5_000u32, 5_000]).is_ok());
+/// assert!(assert_bps_sum(&[3_000u32, 3_000]).is_err());
+/// ```
+pub const BASIS_POINTS_TOTAL: u32 = 10_000;
+
+pub fn assert_bps_sum(values: &[u32]) -> Result<(), ContractError> {
+    let sum: u32 = values.iter().copied().fold(0u32, |acc, v| acc.saturating_add(v));
+    assert_bps_total(sum)
+}
+
+/// Variant of [`assert_bps_sum`] for call sites where the sum has already
+/// been computed (e.g. from a soroban `Vec` iterator in a `no_std` context).
+///
+/// Returns `Err(ContractError::InvalidRatioSum)` when `total != 10_000`.
+pub fn assert_bps_total(total: u32) -> Result<(), ContractError> {
+    if total != BASIS_POINTS_TOTAL {
+        return Err(ContractError::InvalidRatioSum);
     }
     Ok(())
 }
@@ -120,17 +137,32 @@ mod tests {
         assert!(assert_unique_recipients(&env, &v.to_vec()).is_ok());
     }
 
-    // Issue #628: assert_valid_bps tests
+    // --- assert_bps_sum (issue #623) ---
+
     #[test]
-    fn valid_bps_passes() {
-        assert!(assert_valid_bps(0).is_ok());
-        assert!(assert_valid_bps(5000).is_ok());
-        assert!(assert_valid_bps(10_000).is_ok());
+    fn bps_sum_equals_10000_passes() {
+        assert!(assert_bps_sum(&[5_000u32, 5_000]).is_ok());
+        assert!(assert_bps_sum(&[3_000u32, 3_000, 4_000]).is_ok());
+        assert!(assert_bps_sum(&[10_000u32]).is_ok());
     }
 
     #[test]
-    fn out_of_range_bps_rejected() {
-        assert_eq!(assert_valid_bps(10_001), Err(ContractError::InvalidAmount));
-        assert_eq!(assert_valid_bps(u32::MAX), Err(ContractError::InvalidAmount));
+    fn bps_sum_not_10000_fails() {
+        assert_eq!(
+            assert_bps_sum(&[3_000u32, 3_000]),
+            Err(ContractError::InvalidRatioSum)
+        );
+        assert_eq!(
+            assert_bps_sum(&[0u32]),
+            Err(ContractError::InvalidRatioSum)
+        );
+        assert_eq!(
+            assert_bps_sum(&[10_001u32]),
+            Err(ContractError::InvalidRatioSum)
+        );
+        assert_eq!(
+            assert_bps_sum(&[]),
+            Err(ContractError::InvalidRatioSum)
+        );
     }
 }
