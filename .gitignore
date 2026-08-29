@@ -27,10 +27,8 @@ desktop.ini
 *.snap.orig
 *.snapshot
 *.snap.bak
-test_snapshots/
-**/test_snapshots/
-snapshots/
-**/snapshots/
+tests/snapshots/
+tests/fixtures/
 
 # Stellar CLI
 .stellar/

@@ -253,6 +253,34 @@ mod tests {
         assert_exact(&env, 1_000_000_000, &[100_000, 200_000, 300_000], 600_000);
     }
 
+    #[test]
+    fn single_recipient_gets_full_amount() {
+        let env = Env::default();
+        let r = distribute_with_remainder(&env, 12345, &make_ratios(&env, &[1]), 1);
+        assert_eq!(r.len(), 1);
+        assert_eq!(r.get(0), Some(12345));
+    }
+
+    #[test]
+    fn sum_invariant_holds_with_unequal_ratios() {
+        let env = Env::default();
+        // Case 1: 3 recipients with ratios [1, 1, 1] and total=10
+        // Total is not evenly divisible by denom (10 % 3 != 0)
+        let r1 = distribute_with_remainder(&env, 10, &make_ratios(&env, &[1, 1, 1]), 3);
+        let sum1: i128 = r1.iter().sum();
+        assert_eq!(sum1, 10);
+
+        // Case 2: 4 recipients with ratios [2, 3, 1, 4] and total=100
+        let r2 = distribute_with_remainder(&env, 100, &make_ratios(&env, &[2, 3, 1, 4]), 10);
+        let sum2: i128 = r2.iter().sum();
+        assert_eq!(sum2, 100);
+
+        // Case 3: 2 recipients with ratios [1, 3] and total=999
+        let r3 = distribute_with_remainder(&env, 999, &make_ratios(&env, &[1, 3]), 4);
+        let sum3: i128 = r3.iter().sum();
+        assert_eq!(sum3, 999);
+    }
+
     /// Property-based style test: exhaustively verify sum == total for many inputs.
     #[test]
     fn test_property_sum_equals_total() {

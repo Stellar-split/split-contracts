@@ -136,7 +136,7 @@ pub fn invoice_released(env: &Env, invoice_id: u64, recipients: &Vec<Address>) {
 
 /// Emitted when an invoice is refunded after deadline.
 /// Topics: (split, refunded, invoice_id)
-/// Data: (event_seq)
+/// Data: (invoice_id, event_seq)
 pub fn invoice_refunded(env: &Env, invoice_id: u64) {
     let event_seq = next_seq(env, invoice_id);
     env.events().publish(
@@ -145,7 +145,7 @@ pub fn invoice_refunded(env: &Env, invoice_id: u64) {
             symbol_short!("refunded"),
             invoice_id,
         ),
-        (event_seq,),
+        (invoice_id, event_seq),
     );
 }
 
@@ -1689,5 +1689,25 @@ pub fn recipient_share_unlocked(
     env.events().publish(
         (symbol_short!("split"), symbol_short!("sh_unlk"), invoice_id),
         (recipient.clone(), admin.clone()),
+    );
+}
+
+/// Issue #528: Emitted when an admin transfer is proposed.
+/// Topics: (split, adm_prop)
+/// Data: (current_admin, proposed_admin)
+pub fn admin_transfer_proposed(env: &Env, current_admin: &Address, proposed_admin: &Address) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("adm_prop")),
+        (current_admin.clone(), proposed_admin.clone()),
+    );
+}
+
+/// Issue #528: Emitted when an admin transfer is completed.
+/// Topics: (split, adm_done)
+/// Data: new_admin
+pub fn admin_transfer_completed(env: &Env, new_admin: &Address) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("adm_done")),
+        new_admin.clone(),
     );
 }
