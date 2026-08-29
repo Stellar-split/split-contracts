@@ -3933,6 +3933,15 @@ impl SplitContract {
                 .persistent()
                 .set(&recipient_whitelist_key(invoice_id), &whitelist);
             events::recipient_whitelisted(&env, invoice_id, &address);
+            let mut added: Vec<Address> = Vec::new(&env);
+            added.push_back(address.clone());
+            events::recipient_whitelist_updated(
+                &env,
+                invoice_id,
+                invoice.recipient_whitelist_enabled,
+                &added,
+                &Vec::new(&env),
+            );
         }
     }
 
@@ -3973,6 +3982,15 @@ impl SplitContract {
                 .persistent()
                 .set(&recipient_whitelist_key(invoice_id), &new_wl);
             events::recipient_removed_from_whitelist(&env, invoice_id, &address);
+            let mut removed: Vec<Address> = Vec::new(&env);
+            removed.push_back(address.clone());
+            events::recipient_whitelist_updated(
+                &env,
+                invoice_id,
+                invoice.recipient_whitelist_enabled,
+                &Vec::new(&env),
+                &removed,
+            );
         }
     }
 
@@ -7325,6 +7343,36 @@ impl SplitContract {
             }
         }
 
+        // Issue #686: announce when the overfunding policy actually changes the
+        // outcome of this payment, i.e. it would push `funded` past `total`.
+        // `Cap` has its own `overflow_behavior` events, so it is excluded here.
+        match invoice.overfunding_policy {
+            OverfundingPolicy::AcceptAll => {
+                let surplus = (invoice.funded + credited_amount - total).max(0);
+                if surplus > 0 {
+                    events::overfunding_triggered(
+                        env,
+                        invoice_id,
+                        payer,
+                        &invoice.overfunding_policy,
+                        surplus,
+                    );
+                }
+            }
+            OverfundingPolicy::ReturnSurplus => {
+                if excess > 0 {
+                    events::overfunding_triggered(
+                        env,
+                        invoice_id,
+                        payer,
+                        &invoice.overfunding_policy,
+                        excess,
+                    );
+                }
+            }
+            OverfundingPolicy::Cap => {}
+        }
+
         invoice.insurance_fund += premium;
 
         // Penalty for late payment (issues #42, #211).
@@ -7360,6 +7408,14 @@ impl SplitContract {
                             token_client.transfer(payer, &recipient, &share);
                         }
                     }
+                    // Issue #687: surface the late-payment penalty deduction.
+                    events::penalty_applied(
+                        env,
+                        invoice_id,
+                        payer,
+                        penalty_amount,
+                        penalty_bps,
+                    );
                 }
             }
         }
@@ -11853,9 +11909,11 @@ impl SplitContract {
             assert!(is_creator_or_co || is_delegate, "not authorized");
         }
 
+        let old_deadline = invoice.deadline;
         invoice.deadline = new_deadline;
         save_invoice(&env, invoice_id, &invoice);
         append_audit_entry(&env, invoice_id, symbol_short!("extend"), &caller);
+        events::deadline_extended(&env, invoice_id, old_deadline, new_deadline);
     }
 
     /// Roll over a partially funded invoice to a new invoice with the same recipients,

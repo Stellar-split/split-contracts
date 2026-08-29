@@ -25,7 +25,9 @@
 //! symbol exceeds the short-macro length limit or must be constructed
 //! dynamically.
 
-use crate::types::{DisputeOutcome, FeeSplit, InvoiceStatus, RepScore, TimelockAction};
+use crate::types::{
+    DisputeOutcome, FeeSplit, InvoiceStatus, OverfundingPolicy, RepScore, TimelockAction,
+};
 use soroban_sdk::{contracttype, symbol_short, Address, BytesN, Env, String, Vec};
 
 // ---------------------------------------------------------------------------
@@ -182,12 +184,6 @@ pub fn invoice_expired(env: &Env, invoice_id: u64, deadline: u64, funded: i128, 
             invoice_id,
         ),
         (deadline, funded, creator.clone()),
-/// Data: (deadline, funded)
-pub fn invoice_expired(env: &Env, invoice_id: u64, deadline: u64, funded: i128) {
-    let event_seq = next_seq(env, invoice_id);
-    env.events().publish(
-        (symbol_short!("split"), symbol_short!("expired"), invoice_id),
-        (deadline, funded, event_seq),
     );
 }
 
@@ -1817,5 +1813,120 @@ pub fn admin_transfer_completed(env: &Env, new_admin: &Address) {
     env.events().publish(
         (symbol_short!("split"), symbol_short!("adm_done")),
         new_admin.clone(),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Issue #686: Overfunding policy activation
+// ---------------------------------------------------------------------------
+
+/// Map an `OverfundingPolicy` variant to a stable, short symbol for events.
+fn overfunding_policy_sym(policy: &OverfundingPolicy) -> soroban_sdk::Symbol {
+    match policy {
+        OverfundingPolicy::Cap => symbol_short!("cap"),
+        OverfundingPolicy::AcceptAll => symbol_short!("acceptall"),
+        OverfundingPolicy::ReturnSurplus => symbol_short!("retsurpls"),
+    }
+}
+
+/// Issue #686: Emitted when a payment pushes `funded` past `total` and the
+/// invoice's [`OverfundingPolicy`] (either `AcceptAll` or `ReturnSurplus`)
+/// decides what happens to the excess. Not emitted for the default `Cap`
+/// policy, which defers to `overflow_behavior` and has its own events.
+///
+/// Topics: (split, ovf_trig, invoice_id)
+/// Data: (payer, policy, surplus, event_seq)
+///
+/// `surplus` is the amount beyond `total`: the stroops refunded to the payer
+/// for `ReturnSurplus`, or the stroops accepted over the target for `AcceptAll`.
+pub fn overfunding_triggered(
+    env: &Env,
+    invoice_id: u64,
+    payer: &Address,
+    policy: &OverfundingPolicy,
+    surplus: i128,
+) {
+    let event_seq = next_seq(env, invoice_id);
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("ovf_trig"), invoice_id),
+        (
+            payer.clone(),
+            overfunding_policy_sym(policy),
+            surplus,
+            event_seq,
+        ),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Issue #687: Late-payment penalty
+// ---------------------------------------------------------------------------
+
+/// Issue #687: Emitted from the payment path when a late payment incurs a
+/// `penalty_bps` deduction (i.e. `penalty_bps > 0` and `penalty_deadline` has
+/// passed). `penalty_amount` is the actual stroops taken from the payment and
+/// distributed to recipients.
+///
+/// Topics: (split, pen_appl, invoice_id)
+/// Data: (payer, penalty_amount, penalty_bps, event_seq)
+pub fn penalty_applied(
+    env: &Env,
+    invoice_id: u64,
+    payer: &Address,
+    penalty_amount: i128,
+    penalty_bps: u32,
+) {
+    let event_seq = next_seq(env, invoice_id);
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("pen_appl"), invoice_id),
+        (payer.clone(), penalty_amount, penalty_bps, event_seq),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Issue #688: Invoice deadline extension
+// ---------------------------------------------------------------------------
+
+/// Issue #688: Emitted from `extend_deadline` so payers who planned around the
+/// original deadline get an on-chain record of the change.
+///
+/// Topics: (split, dl_ext, invoice_id)
+/// Data: (old_deadline, new_deadline, event_seq)
+pub fn deadline_extended(env: &Env, invoice_id: u64, old_deadline: u64, new_deadline: u64) {
+    let event_seq = next_seq(env, invoice_id);
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("dl_ext"), invoice_id),
+        (old_deadline, new_deadline, event_seq),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Issue #689: Recipient whitelist updates
+// ---------------------------------------------------------------------------
+
+/// Issue #689: Emitted whenever an invoice's recipient whitelist state changes
+/// so off-chain monitors that gate on whitelist membership do not have to poll.
+///
+/// `enabled` reflects `recipient_whitelist_enabled` for the invoice. `added`
+/// and `removed` are the addresses affected by this particular change (each is
+/// typically a single entry, but the vectors leave room for batch updates).
+///
+/// Topics: (split, rcp_wl_up, invoice_id)
+/// Data: (enabled, added, removed, event_seq)
+pub fn recipient_whitelist_updated(
+    env: &Env,
+    invoice_id: u64,
+    enabled: bool,
+    added: &Vec<Address>,
+    removed: &Vec<Address>,
+) {
+    let event_seq = next_seq(env, invoice_id);
+    env.events().publish(
+        (
+            symbol_short!("split"),
+            symbol_short!("rcp_wl_up"),
+            invoice_id,
+        ),
+        (enabled, added.clone(), removed.clone(), event_seq),
     );
 }

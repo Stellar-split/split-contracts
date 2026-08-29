@@ -5,7 +5,6 @@ use soroban_sdk::{
     testutils::{Address as _, Events as _, Ledger},
     token::{Client as TokenClient, StellarAssetClient},
     Address, Bytes, BytesN, Env, String, Symbol, TryFromVal, Val, Vec,
-    Address, Bytes, BytesN, Env, String, Symbol, Vec,
 };
 use types::InvoiceOptions;
 
@@ -8361,4 +8360,300 @@ fn test_get_invoice_status_not_found() {
 
     let result = c.try_get_invoice_status(&999);
     assert!(result.is_err());
+}
+
+// ---------------------------------------------------------------------------
+// Issue #686 — overfunding_triggered event
+// ---------------------------------------------------------------------------
+
+fn count_events_with_topic1(env: &Env, name: &str) -> usize {
+    env.events()
+        .all()
+        .iter()
+        .filter(|(_c, topics, _d)| topic1_is(env, topics, name))
+        .count()
+}
+
+#[test]
+fn test_overfunding_triggered_event_emitted_for_return_surplus() {
+    use soroban_sdk::TryIntoVal;
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+    let tk = token_client(&env, &token_id);
+
+    let creator = Address::generate(&env);
+    let payer = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    StellarAssetClient::new(&env, &token_id).mint(&payer, &200);
+    env.ledger().set_timestamp(1_000);
+
+    let id = make_invoice(&env, &c, &creator, &recipient, 100, &token_id, 9_999);
+    c.set_overfunding_policy(&creator, &id, &types::OverfundingPolicy::ReturnSurplus);
+
+    // Pay 150 toward a 100 invoice: 100 is credited, 50 is returned.
+    c.pay(&payer, &id, &150_i128, &0_u64, &false, &false, &None);
+
+    let mut found: Option<(Address, Symbol, i128, u64)> = None;
+    for (_contract, topics, data) in env.events().all().iter() {
+        if topic1_is(&env, &topics, "ovf_trig") {
+            found = Some(data.try_into_val(&env).unwrap());
+        }
+    }
+    let (evt_payer, policy, surplus, _seq) = found.expect("overfunding_triggered event missing");
+    assert_eq!(evt_payer, payer);
+    assert_eq!(policy, Symbol::new(&env, "retsurpls"));
+    assert_eq!(surplus, 50, "surplus is the amount refunded beyond total");
+    // Payer: -150 paid, +50 refunded.
+    assert_eq!(tk.balance(&payer), 100);
+}
+
+#[test]
+fn test_overfunding_triggered_event_emitted_for_accept_all() {
+    use soroban_sdk::TryIntoVal;
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let payer = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    StellarAssetClient::new(&env, &token_id).mint(&payer, &200);
+    env.ledger().set_timestamp(1_000);
+
+    let id = make_invoice(&env, &c, &creator, &recipient, 100, &token_id, 9_999);
+    c.set_overfunding_policy(&creator, &id, &types::OverfundingPolicy::AcceptAll);
+
+    c.pay(&payer, &id, &150_i128, &0_u64, &false, &false, &None);
+
+    let mut found: Option<(Address, Symbol, i128, u64)> = None;
+    for (_contract, topics, data) in env.events().all().iter() {
+        if topic1_is(&env, &topics, "ovf_trig") {
+            found = Some(data.try_into_val(&env).unwrap());
+        }
+    }
+    let (_p, policy, surplus, _seq) = found.expect("overfunding_triggered event missing");
+    assert_eq!(policy, Symbol::new(&env, "acceptall"));
+    assert_eq!(surplus, 50, "surplus is the amount accepted beyond total");
+}
+
+#[test]
+fn test_overfunding_triggered_not_emitted_when_within_total() {
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let payer = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    StellarAssetClient::new(&env, &token_id).mint(&payer, &200);
+    env.ledger().set_timestamp(1_000);
+
+    let id = make_invoice(&env, &c, &creator, &recipient, 100, &token_id, 9_999);
+    c.set_overfunding_policy(&creator, &id, &types::OverfundingPolicy::ReturnSurplus);
+
+    // Exact fill: funded + payment == total, so no overfunding occurs.
+    c.pay(&payer, &id, &100_i128, &0_u64, &false, &false, &None);
+
+    assert_eq!(
+        count_events_with_topic1(&env, "ovf_trig"),
+        0,
+        "overfunding_triggered must not fire unless funded + payment exceeds total"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Issue #687 — penalty_applied event
+// ---------------------------------------------------------------------------
+
+fn late_penalty_invoice(
+    env: &Env,
+    c: &SplitContractClient,
+    creator: &Address,
+    recipient: &Address,
+    token_id: &Address,
+) -> u64 {
+    let mut recipients = Vec::new(env);
+    recipients.push_back(recipient.clone());
+    let mut amounts = Vec::new(env);
+    amounts.push_back(500_i128);
+    c.create_invoice(
+        creator,
+        &recipients,
+        &amounts,
+        token_id,
+        &9_999_u64,
+        &InvoiceOptions {
+            penalty_bps: Some(1_000), // 10%
+            penalty_deadline: Some(2_000),
+            ..default_options(env)
+        },
+    )
+}
+
+#[test]
+fn test_penalty_applied_event_emitted_for_late_payment() {
+    use soroban_sdk::TryIntoVal;
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let payer = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    StellarAssetClient::new(&env, &token_id).mint(&payer, &1_000);
+    env.ledger().set_timestamp(1_000);
+
+    let id = late_penalty_invoice(&env, &c, &creator, &recipient, &token_id);
+
+    // Pay after the penalty deadline.
+    env.ledger().set_timestamp(3_000);
+    c.pay(&payer, &id, &500_i128, &0_u64, &false, &false, &None);
+
+    let mut found: Option<(Address, i128, u32, u64)> = None;
+    for (_contract, topics, data) in env.events().all().iter() {
+        if topic1_is(&env, &topics, "pen_appl") {
+            found = Some(data.try_into_val(&env).unwrap());
+        }
+    }
+    let (evt_payer, penalty_amount, penalty_bps, _seq) =
+        found.expect("penalty_applied event missing for late payment");
+    assert_eq!(evt_payer, payer);
+    assert_eq!(penalty_amount, 50, "500 * 10% deducted from the payment");
+    assert_eq!(penalty_bps, 1_000);
+}
+
+#[test]
+fn test_penalty_applied_event_absent_for_on_time_payment() {
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let payer = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    StellarAssetClient::new(&env, &token_id).mint(&payer, &1_000);
+    env.ledger().set_timestamp(1_000);
+
+    let id = late_penalty_invoice(&env, &c, &creator, &recipient, &token_id);
+
+    // Pay before the penalty deadline.
+    c.pay(&payer, &id, &500_i128, &0_u64, &false, &false, &None);
+
+    assert_eq!(
+        count_events_with_topic1(&env, "pen_appl"),
+        0,
+        "penalty_applied must not fire for an on-time payment"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Issue #688 — deadline_extended event
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_deadline_extended_event_carries_old_and_new_values() {
+    use soroban_sdk::TryIntoVal;
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    env.ledger().set_timestamp(1_000);
+    let id = make_invoice(&env, &c, &creator, &recipient, 100, &token_id, 5_000);
+
+    c.extend_deadline(&id, &10_000_u64, &creator);
+
+    let mut found: Option<(u64, u64, u64)> = None;
+    for (_contract, topics, data) in env.events().all().iter() {
+        if topic1_is(&env, &topics, "dl_ext") {
+            found = Some(data.try_into_val(&env).unwrap());
+        }
+    }
+    let (old_deadline, new_deadline, _seq) =
+        found.expect("deadline_extended event missing");
+    assert_eq!(old_deadline, 5_000);
+    assert_eq!(new_deadline, 10_000);
+    assert_eq!(c.get_invoice(&id).deadline, 10_000);
+}
+
+// ---------------------------------------------------------------------------
+// Issue #689 — recipient_whitelist_updated event
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_recipient_whitelist_updated_event_on_enable_and_add() {
+    use soroban_sdk::TryIntoVal;
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let whitelisted = Address::generate(&env);
+
+    env.ledger().set_timestamp(1_000);
+
+    let mut recipients = Vec::new(&env);
+    recipients.push_back(recipient.clone());
+    let mut amounts = Vec::new(&env);
+    amounts.push_back(100_i128);
+    let id = c.create_invoice(
+        &creator,
+        &recipients,
+        &amounts,
+        &token_id,
+        &9_999_u64,
+        &InvoiceOptions {
+            ext: types::InvoiceOptions2 {
+                recipient_whitelist_enabled: true,
+                ..default_options(&env).ext
+            },
+            ..default_options(&env)
+        },
+    );
+
+    c.add_to_recipient_whitelist(&creator, &id, &whitelisted);
+
+    let mut found: Option<(bool, Vec<Address>, Vec<Address>, u64)> = None;
+    for (_contract, topics, data) in env.events().all().iter() {
+        if topic1_is(&env, &topics, "rcp_wl_up") {
+            found = Some(data.try_into_val(&env).unwrap());
+        }
+    }
+    let (enabled, added, removed, _seq) =
+        found.expect("recipient_whitelist_updated event missing");
+    assert!(enabled, "invoice was created with the whitelist enabled");
+    assert_eq!(added.len(), 1);
+    assert_eq!(added.get(0).unwrap(), whitelisted);
+    assert_eq!(removed.len(), 0);
+}
+
+#[test]
+fn test_recipient_whitelist_updated_event_on_remove() {
+    use soroban_sdk::TryIntoVal;
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let whitelisted = Address::generate(&env);
+
+    env.ledger().set_timestamp(1_000);
+    let id = make_invoice(&env, &c, &creator, &recipient, 100, &token_id, 9_999);
+
+    c.add_to_recipient_whitelist(&creator, &id, &whitelisted);
+    c.remove_from_recipient_whitelist(&creator, &id, &whitelisted);
+
+    let mut last_removed: Option<Vec<Address>> = None;
+    for (_contract, topics, data) in env.events().all().iter() {
+        if topic1_is(&env, &topics, "rcp_wl_up") {
+            let (_enabled, _added, removed, _seq): (bool, Vec<Address>, Vec<Address>, u64) =
+                data.try_into_val(&env).unwrap();
+            last_removed = Some(removed);
+        }
+    }
+    let removed = last_removed.expect("recipient_whitelist_updated event missing on remove");
+    assert_eq!(removed.len(), 1);
+    assert_eq!(removed.get(0).unwrap(), whitelisted);
 }
