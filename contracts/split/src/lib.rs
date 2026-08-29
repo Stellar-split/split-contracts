@@ -1947,6 +1947,22 @@ fn load_invoice(env: &Env, id: u64) -> Invoice {
     invoice
 }
 
+/// Guard: return `Err(ContractError::InvalidStatus)` unless the invoice is
+/// still in the `Pending` state.  Calling this at the top of any mutating
+/// function replaces the repeated inline pattern:
+///
+/// ```rust,ignore
+/// if invoice.status != InvoiceStatus::Pending {
+///     return Err(ContractError::InvalidStatus);
+/// }
+/// ```
+fn assert_invoice_pending(invoice: &Invoice) -> Result<(), ContractError> {
+    if invoice.status != InvoiceStatus::Pending {
+        return Err(ContractError::InvalidStatus);
+    }
+    Ok(())
+}
+
 /// Estimates the serialised size (in bytes) of an invoice's persisted
 /// representation (issue #425). Sums the XDR-encoded length of the three
 /// pieces `save_invoice` actually writes to storage (`InvoiceCore`,
@@ -3041,9 +3057,7 @@ impl SplitContract {
         let mut invoice = load_invoice(&env, invoice_id);
 
         // Only allow withdrawal while invoice is in Pending (Open) status.
-        if invoice.status != InvoiceStatus::Pending {
-            return Err(ContractError::InvalidStatus);
-        }
+        assert_invoice_pending(&invoice)?;
 
         let contrib_key = contribution_key(invoice_id, &payer);
         let amount: i128 = env
@@ -9152,7 +9166,7 @@ impl SplitContract {
         let fee = if is_waived {
             0
         } else {
-            (proportional as u128 * platform_fee_bps as u128 / 10_000u128) as i128
+            calc_platform_fee(proportional, platform_fee_bps).expect("ArithmeticOverflow")
         };
         let tax = (proportional as u128 * invoice.tax_bps as u128 / 10_000u128) as i128;
         let payout = proportional - fee - tax;
@@ -9716,7 +9730,7 @@ impl SplitContract {
                 let fee = if is_waived {
                     0
                 } else {
-                    (payout_raw as u128 * platform_fee_bps as u128 / 10_000u128) as i128
+                    calc_platform_fee(payout_raw, platform_fee_bps).expect("ArithmeticOverflow")
                 };
                 let tax = (payout_raw as u128 * invoice.tax_bps as u128 / 10_000u128) as i128;
                 let payout = payout_raw - fee - tax;
@@ -10446,8 +10460,8 @@ impl SplitContract {
                                 (amount as u128 * member_funded as u128 / member_total as u128)
                                     as i128
                             };
-                            let fee = (proportional as u128 * platform_fee_bps as u128 / 10_000u128)
-                                as i128;
+                            let fee = calc_platform_fee(proportional, platform_fee_bps)
+                                .expect("ArithmeticOverflow");
                             let tax = (proportional as u128 * member.tax_bps as u128 / 10_000u128)
                                 as i128;
                             let payout = proportional - fee - tax;
@@ -13100,7 +13114,7 @@ impl SplitContract {
 
         env.storage().persistent().remove(&delegate_key(invoice_id));
 
-        events::delegate_revoked(&env, invoice_id);
+        events::delegate_revoked(&env, invoice_id, &invoice.creator);
         append_audit_entry(&env, invoice_id, symbol_short!("rvk_del"), &invoice.creator);
     }
 

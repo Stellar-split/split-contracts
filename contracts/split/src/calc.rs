@@ -307,4 +307,34 @@ mod tests {
             assert_exact(&env, total, ratios, denom);
         }
     }
+
+    // -----------------------------------------------------------------------
+    // calc_platform_fee tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_calc_platform_fee_normal() {
+        // 1_000_000 funded at 250 bps (2.5%) → fee = 25_000
+        let fee = calc_platform_fee(1_000_000, 250).unwrap();
+        assert_eq!(fee, 25_000);
+    }
+
+    #[test]
+    fn test_calc_platform_fee_zero_bps() {
+        // Zero fee rate → always zero fee regardless of funded amount
+        assert_eq!(calc_platform_fee(999_999_999, 0).unwrap(), 0);
+    }
+
+    #[test]
+    fn test_calc_platform_fee_max_bps() {
+        // 10_000 bps = 100% → fee equals funded
+        assert_eq!(calc_platform_fee(500, 10_000).unwrap(), 500);
+    }
+
+    #[test]
+    fn test_calc_platform_fee_overflow() {
+        // i128::MAX * any fee_bps > 0 will overflow the intermediate multiplication
+        let result = calc_platform_fee(i128::MAX, 1);
+        assert_eq!(result, Err(crate::error::ContractError::ArithmeticOverflow));
+    }
 }
