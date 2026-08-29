@@ -118,6 +118,8 @@ pub enum ContractError {
     RecipientNotFound = 62,
     /// Issue #522: Parent chain depth exceeds the allowed maximum.
     ParentChainTooDeep = 63,
-    /// Issue #526: Invoice has fewer recipients than the contract minimum.
-    TooFewRecipients = 64,
+    /// Issue #564: Checkpoint index does not match stored value during payout recovery.
+    CheckpointMismatch = 64,
+    /// Issue #564: Recipient at this index has already been paid in a prior payout attempt.
+    AlreadyPaid = 65,
 }
