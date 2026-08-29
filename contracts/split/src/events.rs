@@ -182,12 +182,6 @@ pub fn invoice_expired(env: &Env, invoice_id: u64, deadline: u64, funded: i128, 
             invoice_id,
         ),
         (deadline, funded, creator.clone()),
-/// Data: (deadline, funded)
-pub fn invoice_expired(env: &Env, invoice_id: u64, deadline: u64, funded: i128) {
-    let event_seq = next_seq(env, invoice_id);
-    env.events().publish(
-        (symbol_short!("split"), symbol_short!("expired"), invoice_id),
-        (deadline, funded, event_seq),
     );
 }
 
