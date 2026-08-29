@@ -8,6 +8,8 @@
 use crate::types::BASIS_POINTS_TOTAL;
 use soroban_sdk::{Env, Vec};
 
+use crate::error::ContractError;
+
 /// Distribute `total` among recipients according to their `ratios` out of
 /// `denom`, using the largest-remainder method to handle rounding.
 ///
@@ -35,9 +37,13 @@ pub fn distribute_with_remainder(
     total: i128,
     ratios: &Vec<i128>,
     denom: i128,
-) -> Vec<i128> {
-    assert!(!ratios.is_empty(), "ratios must not be empty");
-    assert!(denom > 0, "denom must be positive");
+) -> Result<Vec<i128>, ContractError> {
+    if ratios.is_empty() {
+        return Err(ContractError::InvalidAmount);
+    }
+    if denom <= 0 {
+        return Err(ContractError::InvalidAmount);
+    }
 
     let n = ratios.len() as usize;
 
@@ -59,7 +65,9 @@ pub fn distribute_with_remainder(
     // Contracts with more than 64 recipients would need a larger cap, but
     // 64 is a reasonable upper bound for on-chain use.
     const MAX_RECIPIENTS: usize = 64;
-    assert!(n <= MAX_RECIPIENTS, "too many recipients (max 64)");
+    if n > MAX_RECIPIENTS {
+        return Err(ContractError::InvalidAmount);
+    }
 
     let mut indices = [0usize; MAX_RECIPIENTS];
     for i in 0..n {
@@ -95,7 +103,7 @@ pub fn distribute_with_remainder(
         shares_mut.set(idx, current + 1);
     }
 
-    shares_mut
+    Ok(shares_mut)
 }
 
 // ---------------------------------------------------------------------------
@@ -169,7 +177,8 @@ mod tests {
     /// Assert sum equals total and return shares.
     fn assert_exact(env: &Env, total: i128, ratios: &[i128], denom: i128) -> Vec<i128> {
         let r_vec = make_ratios(env, ratios);
-        let result = distribute_with_remainder(env, total, &r_vec, denom);
+        let result = distribute_with_remainder(env, total, &r_vec, denom)
+            .expect("distribute_with_remainder should not fail for valid inputs");
         let sum: i128 = result.iter().sum();
         assert_eq!(
             sum, total,

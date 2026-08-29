@@ -457,7 +457,17 @@ where
     let mut score = get_rep_internal(env, address);
     update_fn(&mut score);
     env.storage().persistent().set(&rep_key(address), &score);
-    events::rep_updated(env, address, &score);
+    // Compute the derived score integer before emitting the event.
+    // Formula: (paid_on_time * 10 + invoices_released * 5)
+    //          .saturating_sub(late_pays * 5 + invoices_refunded * 2)
+    let base = (score.paid_on_time as u32)
+        .saturating_mul(10)
+        .saturating_add((score.invoices_released as u32).saturating_mul(5));
+    let deductions = (score.late_pays as u32)
+        .saturating_mul(5)
+        .saturating_add((score.invoices_refunded as u32).saturating_mul(2));
+    let computed_score = base.saturating_sub(deductions);
+    events::rep_updated(env, address, &score, computed_score);
     score
 }
 
