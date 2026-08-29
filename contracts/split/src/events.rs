@@ -66,6 +66,17 @@ pub fn invoice_created(
     );
 }
 
+/// Emitted at invoice creation when `forward_to` is configured, making
+/// surplus-forwarding visible to indexers without waiting for a release.
+/// Topics: (split, fwd_cfg, invoice_id)
+/// Data: forward_to
+pub fn forward_configured(env: &Env, invoice_id: u64, forward_to: &Address) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("fwd_cfg"), invoice_id),
+        forward_to.clone(),
+    );
+}
+
 /// Emitted when a payment is received toward an invoice.
 /// Topics: (split, paid, invoice_id)
 /// Data: (payer, amount, token, event_seq)
@@ -395,6 +406,18 @@ pub fn invoice_resumed(env: &Env, invoice_id: u64, creator: &Address) {
     );
 }
 
+/// Emitted when a paused invoice is automatically resumed because
+/// `auto_resume_at` has passed (checked lazily on the next `pay()` call).
+/// Distinct from `invoice_resumed`, which is only for manual `resume_invoice`.
+/// Topics: (split, auto_res, invoice_id)
+/// Data: auto_resume_at
+pub fn invoice_auto_resumed(env: &Env, invoice_id: u64, auto_resume_at: u64) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("auto_res"), invoice_id),
+        auto_resume_at,
+    );
+}
+
 /// Emitted when an invoice is force resumed.
 /// Topics: (split, forced, invoice_id)
 /// Data: admin_addr
@@ -402,6 +425,18 @@ pub fn invoice_force_resumed(env: &Env, invoice_id: u64, admin_addr: &Address) {
     env.events().publish(
         (symbol_short!("split"), symbol_short!("forced"), invoice_id),
         admin_addr.clone(),
+    );
+}
+
+/// Emitted when the per-invoice contributor allowlist gating is toggled on
+/// (first entry added, list goes None -> Some) or off (last entry removed,
+/// list goes Some -> None).
+/// Topics: (split, al_tog, invoice_id)
+/// Data: (creator, enabled)
+pub fn contributor_allowlist_toggled(env: &Env, invoice_id: u64, creator: &Address, enabled: bool) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("al_tog"), invoice_id),
+        (creator.clone(), enabled),
     );
 }
 

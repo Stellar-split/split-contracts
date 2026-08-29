@@ -5886,6 +5886,9 @@ impl SplitContract {
         }
 
         events::invoice_created(env, id, &creator, total, &invoice.cross_chain_ref);
+        if let Some(ref addr) = invoice.forward_to {
+            events::forward_configured(env, id, addr);
+        }
         maybe_record_created(env, &creator, total);
         update_creator_stats_on_creation(env, &creator);
 
@@ -7023,6 +7026,7 @@ impl SplitContract {
                     invoice.pause_reason = None;
                     invoice.auto_resume_at = None;
                     save_invoice(env, invoice_id, &invoice);
+                    events::invoice_auto_resumed(env, invoice_id, auto_at);
                 }
             }
         }
@@ -8480,6 +8484,7 @@ impl SplitContract {
             invoice.creator == creator || invoice.co_creators.contains(&creator),
             "NotAuthorized"
         );
+        let was_disabled = invoice.contributor_allowlist.is_none();
         let mut list = invoice
             .contributor_allowlist
             .unwrap_or_else(|| Vec::new(&env));
@@ -8489,6 +8494,9 @@ impl SplitContract {
         invoice.contributor_allowlist = Some(list);
         save_invoice(&env, invoice_id, &invoice);
         append_audit_entry(&env, invoice_id, symbol_short!("al_add"), &creator);
+        if was_disabled {
+            events::contributor_allowlist_toggled(&env, invoice_id, &creator, true);
+        }
     }
 
     /// Remove `contributor` from the per-invoice contributor allowlist.
@@ -8507,6 +8515,7 @@ impl SplitContract {
             invoice.creator == creator || invoice.co_creators.contains(&creator),
             "NotAuthorized"
         );
+        let mut became_disabled = false;
         if let Some(old_list) = invoice.contributor_allowlist {
             let mut new_list: Vec<Address> = Vec::new(&env);
             for addr in old_list.iter() {
@@ -8514,6 +8523,7 @@ impl SplitContract {
                     new_list.push_back(addr);
                 }
             }
+            became_disabled = new_list.is_empty();
             invoice.contributor_allowlist = if new_list.is_empty() {
                 None
             } else {
@@ -8522,6 +8532,9 @@ impl SplitContract {
         }
         save_invoice(&env, invoice_id, &invoice);
         append_audit_entry(&env, invoice_id, symbol_short!("al_rm"), &creator);
+        if became_disabled {
+            events::contributor_allowlist_toggled(&env, invoice_id, &creator, false);
+        }
     }
 
     // -----------------------------------------------------------------------
