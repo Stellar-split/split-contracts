@@ -14,8 +14,14 @@ pub struct AssetPair {
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub enum OverflowBehavior {
+    /// Reject the payment outright. The payer receives an error and the
+    /// transaction does not credit the invoice.
     Reject,
+    /// Accept the full payment and mark the surplus for refund to the payer
+    /// at release time.
     Refund,
+    /// Accept the full payment and treat the surplus as a protocol donation;
+    /// no refund is issued.
     Donate,
 }
 
@@ -26,10 +32,19 @@ pub enum OverflowBehavior {
 /// default, and the value legacy invoices are migrated to — preserves the
 /// historical behaviour by delegating to the per-invoice [`OverflowBehavior`]
 /// setting, so invoices created before this field existed are unaffected.
+///
+/// # Relationship
+///
+/// `OverfundingPolicy` is the *outer* policy selector stored on the invoice.
+/// When it is `Cap`, the contract falls back to the per-invoice
+/// [`OverflowBehavior`] value to decide the exact outcome. The other two
+/// variants (`AcceptAll`, `ReturnSurplus`) bypass `OverflowBehavior` entirely
+/// and implement their own semantics directly in `_pay`.
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub enum OverfundingPolicy {
-    /// Reject any payment that would take `funded` past the invoice total.
+    /// Preserve legacy behaviour by delegating to the invoice's
+    /// [`OverflowBehavior`] field.
     Cap,
     /// Accept the payment in full; `funded` is allowed to exceed the total and
     /// the surplus is distributed pro-rata to recipients at release time.
@@ -151,6 +166,8 @@ pub enum InvoiceStatus {
     Finalised,
     /// Soft-deleted invoice — tombstone record preserved for audit trail.
     Deleted,
+    /// Issue #564: Payout in progress — intermediate state during release_funds.
+    PayoutInProgress,
 }
 
 // ---------------------------------------------------------------------------
@@ -1225,7 +1242,7 @@ impl Invoice {
         }
 
         // Unpack status (1 byte)
-        let status_byte = bytes.get(0).unwrap();
+        let status_byte = bytes.get(0).expect("from_compact: byte 0 (status) missing");
         let status = match status_byte {
             0 => InvoiceStatus::Pending,
             1 => InvoiceStatus::Released,
@@ -1242,14 +1259,18 @@ impl Invoice {
         // Unpack funded (16 bytes)
         let mut funded_bytes = [0u8; 16];
         for (i, byte) in funded_bytes.iter_mut().enumerate() {
-            *byte = bytes.get((1 + i) as u32).unwrap();
+            *byte = bytes
+                .get((1 + i) as u32)
+                .expect("from_compact: funded byte missing");
         }
         let funded = i128::from_be_bytes(funded_bytes);
 
         // Unpack deadline (8 bytes)
         let mut deadline_bytes = [0u8; 8];
         for (i, byte) in deadline_bytes.iter_mut().enumerate() {
-            *byte = bytes.get((17 + i) as u32).unwrap();
+            *byte = bytes
+                .get((17 + i) as u32)
+                .expect("from_compact: deadline byte missing");
         }
         let deadline = u64::from_be_bytes(deadline_bytes);
 
@@ -1667,5 +1688,14 @@ pub struct RecipientAddress(pub u64, pub Address);
 pub struct RecipientShare {
     pub address: Address,
     pub locked: bool,
+}
+
+/// Issue #527: A single payment record stored in a contributor's persistent history.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct PaymentRecord {
+    pub invoice_id: u64,
+    pub amount: i128,
+    pub ledger: u32,
 }
 

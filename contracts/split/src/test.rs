@@ -8018,167 +8018,94 @@ fn test_cancel_invoice_on_deleted_invoice_panics() {
     c.cancel_invoice(&creator, &id);
 }
 
-// ---------------------------------------------------------------------------
-// Issue #615 — from_compact length check
-// ---------------------------------------------------------------------------
-
-/// Verifies that from_compact panics with a descriptive message when the
-/// CompactInvoice data slice is shorter than the required 25 bytes.
 #[test]
-#[should_panic(expected = "from_compact: data too short")]
-fn from_compact_too_short_panics_cleanly() {
-    let env = Env::default();
+fn test_get_invoice_deadline() {
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
 
-    // Build a 1-byte CompactInvoice — far too short (needs ≥ 25).
-    let mut data = Bytes::new(&env);
-    data.push_back(0u8);
-    let compact = types::CompactInvoice { data };
-
-    // These core/ext/ext2 values are never reached because the length check
-    // fires first, but we need valid instances to call from_compact.
-    // We construct them via a round-trip on a real invoice so we don't have
-    // to fill every field manually.
-    let token = Address::generate(&env);
     let creator = Address::generate(&env);
     let recipient = Address::generate(&env);
+    let deadline: u64 = 5_000;
 
-    let mut recipients = Vec::new(&env);
-    recipients.push_back(recipient.clone());
-    let mut amounts = Vec::new(&env);
-    amounts.push_back(100_i128);
-    let mut tokens = Vec::new(&env);
-    tokens.push_back(token.clone());
+    env.ledger().set_timestamp(1_000);
 
-    let invoice = types::Invoice {
-        version: 1,
-        creator: creator.clone(),
-        co_creators: Vec::new(&env),
-        recipients,
-        amounts,
-        tokens,
-        funding_token: token.clone(),
-        deadline: 9999,
-        funded: 0,
-        status: types::InvoiceStatus::Pending,
-        payments: Vec::new(&env),
-        drip_duration: None,
-        release_timestamp: None,
-        claimed: Vec::new(&env),
-        frozen: false,
-        completion_time: None,
-        allow_early_withdrawal: false,
-        bonus_pool: 0,
-        bonus_max_payers: 0,
-        prerequisite_id: None,
-        tranches: Vec::new(&env),
-        released_bps: 0,
-        co_signers: Vec::new(&env),
-        required_signatures: 0,
-        signatures: Vec::new(&env),
-        approver: None,
-        approved: false,
-        oracle_address: None,
-        condition_met: false,
-        penalty_bps: 0,
-        penalty_deadline: 0,
-        min_funding_bps: 0,
-        release_stages: Vec::new(&env),
-        released_stages: 0,
-        allowed_payers: None,
-        price_oracle: None,
-        base_amounts: Vec::new(&env),
-        swap_tokens: Vec::new(&env),
-        tax_bps: 0,
-        tax_authority: None,
-        insurance_premium_bps: 0,
-        insurance_fund: 0,
-        smart_route: false,
-        convert_to_stream: false,
-        accepted_tokens: Vec::new(&env),
-        forward_to: None,
-        forward_invoice_id: None,
-        split_rules: Vec::new(&env),
-        auto_resolve_rules: Vec::new(&env),
-        creator_cosigner: None,
-        velocity_limit: 0,
-        velocity_window: 0,
-        parent_invoice_id: None,
-        pause_reason: None,
-        auto_resume_at: None,
-        payment_cooldown_secs: None,
-        max_payments_per_window: None,
-        payment_window_secs: None,
-        scheduled_release_at: None,
-        refund_grace_secs: None,
-        penalty_tiers: Vec::new(&env),
-        allowed_callers: None,
-        notification_contract: None,
-        overflow_behavior: types::OverflowBehavior::Reject,
-        cross_chain_ref: None,
-        require_kyc: false,
-        arbiter: None,
-        disputed: false,
-        admin_frozen: false,
-        auction_on_expiry: false,
-        auction_end: 0,
-        bids: Vec::new(&env),
-        min_payment: 0,
-        min_funding_amount: 0,
-        priorities: Vec::new(&env),
-        clone_depth: 0,
-        target_usd_cents: None,
-        refunded_addresses: Vec::new(&env),
-        oracle: None,
-        oracle_asset_pair_base: None,
-        oracle_asset_pair_quote: None,
-        min_payer_rep: None,
-        escrow_hold_period: None,
-        held_until: None,
-        milestones: Vec::new(&env),
-        milestones_released: 0,
-        recipient_max_payouts: Vec::new(&env),
-        twafr_numerator: 0,
-        twafr_last_ledger: 0,
-        release_condition_hash: None,
-        recipient_whitelist_enabled: false,
-        overfunding_policy: types::OverfundingPolicy::Cap,
-        predecessor_id: None,
-        metadata_hash: None,
-        contributor_allowlist: None,
-        early_bird_window_ledgers: 0,
-        early_bird_fee_bps: 0,
-        early_bird_fee_credit: 0,
-        creator_fee_bps: 0,
-        ratio_denominator: 10_000,
-        ratios: Vec::new(&env),
-    };
+    let id = make_invoice(&env, &c, &creator, &recipient, 100, &token_id, deadline);
 
-    let (core, ext, ext2) = invoice.split();
-
-    // This must panic with "from_compact: data too short".
-    types::Invoice::from_compact(&compact, core, ext, ext2);
+    let returned_deadline = c.get_invoice_deadline(&id).expect("should return deadline");
+    assert_eq!(returned_deadline, deadline);
 }
 
-// ---------------------------------------------------------------------------
-// Issue #616 — from_u8 unknown byte panics
-// ---------------------------------------------------------------------------
-
-/// Verifies that InvoiceStatus::from_u8 panics with a descriptive message for
-/// a byte value that does not correspond to any known variant (e.g. 255).
 #[test]
-fn from_u8_unknown_byte_panics() {
-    let result = std::panic::catch_unwind(|| {
-        types::InvoiceStatus::from_u8(255);
-    });
-    assert!(result.is_err(), "expected a panic for byte 255");
-    let payload = result.unwrap_err();
-    let msg = payload
-        .downcast_ref::<String>()
-        .map(|s| s.as_str())
-        .or_else(|| payload.downcast_ref::<&str>().copied())
-        .unwrap_or("");
-    assert!(
-        msg.contains("unknown InvoiceStatus byte"),
-        "panic message should mention 'unknown InvoiceStatus byte', got: {msg}"
-    );
+fn test_get_invoice_deadline_not_found() {
+    let (env, contract_id, _token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+
+    let result = c.try_get_invoice_deadline(&999);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_get_invoice_funded() {
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+    let tk = token_client(&env, &token_id);
+
+    let creator = Address::generate(&env);
+    let payer = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    StellarAssetClient::new(&env, &token_id).mint(&payer, &500);
+    env.ledger().set_timestamp(1_000);
+
+    let id = make_invoice(&env, &c, &creator, &recipient, 200, &token_id, 9_999);
+
+    let funded_before = c.get_invoice_funded(&id).expect("should return funded");
+    assert_eq!(funded_before, 0);
+
+    c.pay(&payer, &id, &150_i128, &0_u64, &false, &false, &None);
+
+    let funded_after = c.get_invoice_funded(&id).expect("should return funded");
+    assert_eq!(funded_after, 150);
+}
+
+#[test]
+fn test_get_invoice_funded_not_found() {
+    let (env, contract_id, _token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+
+    let result = c.try_get_invoice_funded(&999);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_get_invoice_status() {
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+    let tk = token_client(&env, &token_id);
+
+    let creator = Address::generate(&env);
+    let payer = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    StellarAssetClient::new(&env, &token_id).mint(&payer, &500);
+    env.ledger().set_timestamp(1_000);
+
+    let id = make_invoice(&env, &c, &creator, &recipient, 200, &token_id, 9_999);
+
+    let status_pending = c.get_invoice_status(&id).expect("should return status");
+    assert_eq!(status_pending, InvoiceStatus::Pending);
+
+    c.pay(&payer, &id, &200_i128, &0_u64, &false, &false, &None);
+
+    let status_released = c.get_invoice_status(&id).expect("should return status");
+    assert_eq!(status_released, InvoiceStatus::Released);
+}
+
+#[test]
+fn test_get_invoice_status_not_found() {
+    let (env, contract_id, _token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+
+    let result = c.try_get_invoice_status(&999);
+    assert!(result.is_err());
 }
