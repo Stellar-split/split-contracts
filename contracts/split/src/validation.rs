@@ -97,6 +97,25 @@ pub fn assert_bps_total(total: u32) -> Result<(), ContractError> {
     Ok(())
 }
 
+/// Issue #704: Validate that a single basis-point value is within the legal
+/// range `[0, BASIS_POINTS_TOTAL]` (i.e. `0..=10_000`).
+///
+/// Per-invoice options such as `penalty_bps`, `tax_bps`, and
+/// `insurance_premium_bps` are stored as `u32` basis points and must never
+/// exceed 100%. Callers invoke this guard before writing storage so an
+/// out-of-range value is rejected atomically. The three existing call sites
+/// use `.expect("… must be ≤ 10000")`, so this returns a `Result` and lets the
+/// caller choose how to surface the failure.
+///
+/// # Errors
+/// Returns `Err(ContractError::InvalidRatio)` when `bps > BASIS_POINTS_TOTAL`.
+pub fn assert_valid_bps(bps: u32) -> Result<(), ContractError> {
+    if bps > BASIS_POINTS_TOTAL {
+        return Err(ContractError::InvalidRatio);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -71,8 +71,6 @@ mod storage_keys;
 
 mod migrations;
 
-mod validation;
-
 use error::ContractError;
 use validation::assert_valid_bps;
 use soroban_sdk::crypto::bls12_381::{Fr, G1Affine};
