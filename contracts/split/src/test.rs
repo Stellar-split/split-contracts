@@ -8019,99 +8019,93 @@ fn test_cancel_invoice_on_deleted_invoice_panics() {
 }
 
 #[test]
-fn test_get_invoice_creator() {
+fn test_get_invoice_deadline() {
     let (env, contract_id, token_id) = setup_initialized();
     let c = client(&env, &contract_id);
 
     let creator = Address::generate(&env);
     let recipient = Address::generate(&env);
+    let deadline: u64 = 5_000;
 
     env.ledger().set_timestamp(1_000);
 
-    let id = make_invoice(&env, &c, &creator, &recipient, 100, &token_id, 2_000);
-    assert_eq!(c.get_invoice_creator(&id), creator);
+    let id = make_invoice(&env, &c, &creator, &recipient, 100, &token_id, deadline);
+
+    let returned_deadline = c.get_invoice_deadline(&id).expect("should return deadline");
+    assert_eq!(returned_deadline, deadline);
 }
 
 #[test]
-fn test_get_invoice_recipients() {
-    let (env, contract_id, token_id) = setup_initialized();
+fn test_get_invoice_deadline_not_found() {
+    let (env, contract_id, _token_id) = setup_initialized();
     let c = client(&env, &contract_id);
 
-    let creator = Address::generate(&env);
-    let recipient1 = Address::generate(&env);
-    let recipient2 = Address::generate(&env);
-
-    env.ledger().set_timestamp(1_000);
-
-    let mut recipients = Vec::new(&env);
-    recipients.push_back(recipient1.clone());
-    recipients.push_back(recipient2.clone());
-    let mut amounts = Vec::new(&env);
-    amounts.push_back(100);
-    amounts.push_back(200);
-
-    let id = c.create_invoice(&creator, &recipients, &amounts, &token_id, &2_000, &default_options(&env));
-
-    let retrieved_recipients = c.get_invoice_recipients(&id);
-    assert_eq!(retrieved_recipients.len(), 2);
-    assert_eq!(retrieved_recipients.get(0), recipient1);
-    assert_eq!(retrieved_recipients.get(1), recipient2);
+    let result = c.try_get_invoice_deadline(&999);
+    assert!(result.is_err());
 }
 
 #[test]
-fn test_get_invoice_payment_count() {
+fn test_get_invoice_funded() {
     let (env, contract_id, token_id) = setup_initialized();
     let c = client(&env, &contract_id);
     let tk = token_client(&env, &token_id);
 
     let creator = Address::generate(&env);
-    let payer1 = Address::generate(&env);
-    let payer2 = Address::generate(&env);
+    let payer = Address::generate(&env);
     let recipient = Address::generate(&env);
 
-    StellarAssetClient::new(&env, &token_id).mint(&payer1, &500);
-    StellarAssetClient::new(&env, &token_id).mint(&payer2, &500);
-
+    StellarAssetClient::new(&env, &token_id).mint(&payer, &500);
     env.ledger().set_timestamp(1_000);
 
     let id = make_invoice(&env, &c, &creator, &recipient, 200, &token_id, 9_999);
 
-    // Fresh invoice should have 0 payments
-    assert_eq!(c.get_invoice_payment_count(&id), 0);
+    let funded_before = c.get_invoice_funded(&id).expect("should return funded");
+    assert_eq!(funded_before, 0);
 
-    // After first payment, count should be 1
-    c.pay(&payer1, &id, &100_i128, &0_u64, &false, &false, &None);
-    assert_eq!(c.get_invoice_payment_count(&id), 1);
+    c.pay(&payer, &id, &150_i128, &0_u64, &false, &false, &None);
 
-    // After second payment, count should be 2
-    c.pay(&payer2, &id, &100_i128, &0_u64, &false, &false, &None);
-    assert_eq!(c.get_invoice_payment_count(&id), 2);
+    let funded_after = c.get_invoice_funded(&id).expect("should return funded");
+    assert_eq!(funded_after, 150);
 }
 
 #[test]
-fn test_get_invoice_funding_percentage() {
+fn test_get_invoice_funded_not_found() {
+    let (env, contract_id, _token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+
+    let result = c.try_get_invoice_funded(&999);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_get_invoice_status() {
     let (env, contract_id, token_id) = setup_initialized();
     let c = client(&env, &contract_id);
+    let tk = token_client(&env, &token_id);
 
     let creator = Address::generate(&env);
     let payer = Address::generate(&env);
     let recipient = Address::generate(&env);
 
-    StellarAssetClient::new(&env, &token_id).mint(&payer, &1000);
-
+    StellarAssetClient::new(&env, &token_id).mint(&payer, &500);
     env.ledger().set_timestamp(1_000);
 
-    let id = make_invoice(&env, &c, &creator, &recipient, 100, &token_id, 9_999);
+    let id = make_invoice(&env, &c, &creator, &recipient, 200, &token_id, 9_999);
 
-    // 0% funded
-    assert_eq!(c.get_invoice_funding_percentage(&id), 0);
+    let status_pending = c.get_invoice_status(&id).expect("should return status");
+    assert_eq!(status_pending, InvoiceStatus::Pending);
 
-    // 50% funded
-    c.pay(&payer, &id, &50_i128, &0_u64, &false, &false, &None);
-    assert_eq!(c.get_invoice_funding_percentage(&id), 5000);
+    c.pay(&payer, &id, &200_i128, &0_u64, &false, &false, &None);
 
-    // Create new invoice for 100% test
-    let id2 = make_invoice(&env, &c, &creator, &recipient, 200, &token_id, 9_999);
-    c.pay(&payer, &id2, &200_i128, &0_u64, &false, &false, &None);
-    assert_eq!(c.get_invoice_funding_percentage(&id2), 10000);
+    let status_released = c.get_invoice_status(&id).expect("should return status");
+    assert_eq!(status_released, InvoiceStatus::Released);
+}
+
+#[test]
+fn test_get_invoice_status_not_found() {
+    let (env, contract_id, _token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+
+    let result = c.try_get_invoice_status(&999);
+    assert!(result.is_err());
 }
