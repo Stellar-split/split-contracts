@@ -3,6 +3,34 @@
 //! Implements the **largest-remainder method** to distribute an integer `total`
 //! across recipients proportionally, ensuring every stroop is accounted for
 //! (i.e. `sum(result) == total` always holds).
+//!
+//! # Why largest-remainder?
+//!
+//! Splitting an integer `total` proportionally by ratios almost never divides evenly.
+//! A naive implementation would compute each recipient's share with floor division
+//! (`total * ratio / denom`) and stop there, but floor division systematically discards
+//! the fractional part of every share. With `n` recipients that can leave up to `n - 1`
+//! stroops undistributed — money that was paid in but never assigned to anyone, silently
+//! stuck in the contract and breaking the `sum(result) == total` invariant the rest of the
+//! contract relies on (e.g. reconciling `funded` against amounts actually paid out).
+//!
+//! The largest-remainder method fixes this without abandoning integer (floor) division:
+//! 1. Compute each recipient's floor share (`total * ratio / denom`) and remainder
+//!    (`total * ratio % denom`).
+//! 2. Sum the floor shares; the difference between `total` and that sum is the number of
+//!    leftover stroops still owed (always `< n`).
+//! 3. Sort recipients by remainder descending and hand out one extra stroop each, in that
+//!    order, until the leftover is exhausted.
+//!
+//! This guarantees `sum(result) == total` exactly, while keeping the discrepancy from
+//! true proportionality to at most one stroop per recipient — the smallest error possible
+//! for integer division — and it deterministically favors the recipients whose exact
+//! (real-valued) share was closest to rounding up.
+//!
+//! **Example:** distributing `10` stroops among 3 recipients with equal ratios (`1:1:1`,
+//! `denom = 3`) gives floor shares of `[3, 3, 3]` (sum `9`) with `1` stroop leftover, all
+//! three remainders tied at `1`. The tie-break (first index wins) assigns the leftover
+//! stroop to the first recipient, producing `[4, 3, 3]` — which sums to `10`.
 
 #[allow(unused_imports)]
 use crate::types::BASIS_POINTS_TOTAL;
