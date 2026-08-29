@@ -8017,3 +8017,95 @@ fn test_cancel_invoice_on_deleted_invoice_panics() {
     c.delete_invoice(&creator, &id);
     c.cancel_invoice(&creator, &id);
 }
+
+#[test]
+fn test_get_invoice_deadline() {
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let deadline: u64 = 5_000;
+
+    env.ledger().set_timestamp(1_000);
+
+    let id = make_invoice(&env, &c, &creator, &recipient, 100, &token_id, deadline);
+
+    let returned_deadline = c.get_invoice_deadline(&id).expect("should return deadline");
+    assert_eq!(returned_deadline, deadline);
+}
+
+#[test]
+fn test_get_invoice_deadline_not_found() {
+    let (env, contract_id, _token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+
+    let result = c.try_get_invoice_deadline(&999);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_get_invoice_funded() {
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+    let tk = token_client(&env, &token_id);
+
+    let creator = Address::generate(&env);
+    let payer = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    StellarAssetClient::new(&env, &token_id).mint(&payer, &500);
+    env.ledger().set_timestamp(1_000);
+
+    let id = make_invoice(&env, &c, &creator, &recipient, 200, &token_id, 9_999);
+
+    let funded_before = c.get_invoice_funded(&id).expect("should return funded");
+    assert_eq!(funded_before, 0);
+
+    c.pay(&payer, &id, &150_i128, &0_u64, &false, &false, &None);
+
+    let funded_after = c.get_invoice_funded(&id).expect("should return funded");
+    assert_eq!(funded_after, 150);
+}
+
+#[test]
+fn test_get_invoice_funded_not_found() {
+    let (env, contract_id, _token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+
+    let result = c.try_get_invoice_funded(&999);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_get_invoice_status() {
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+    let tk = token_client(&env, &token_id);
+
+    let creator = Address::generate(&env);
+    let payer = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    StellarAssetClient::new(&env, &token_id).mint(&payer, &500);
+    env.ledger().set_timestamp(1_000);
+
+    let id = make_invoice(&env, &c, &creator, &recipient, 200, &token_id, 9_999);
+
+    let status_pending = c.get_invoice_status(&id).expect("should return status");
+    assert_eq!(status_pending, InvoiceStatus::Pending);
+
+    c.pay(&payer, &id, &200_i128, &0_u64, &false, &false, &None);
+
+    let status_released = c.get_invoice_status(&id).expect("should return status");
+    assert_eq!(status_released, InvoiceStatus::Released);
+}
+
+#[test]
+fn test_get_invoice_status_not_found() {
+    let (env, contract_id, _token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+
+    let result = c.try_get_invoice_status(&999);
+    assert!(result.is_err());
+}
