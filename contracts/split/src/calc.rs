@@ -25,6 +25,11 @@ use soroban_sdk::{Env, Vec};
 /// # Panics
 /// * if `ratios` is empty
 /// * if `denom` is zero
+// NOTE: if you call this function and ignore its return value the Rust
+// compiler will emit a `#[must_use]` warning:
+//   warning: unused return value of `distribute_with_remainder` that must be used
+// This ensures callers never silently drop the distribution result.
+#[must_use = "the distribution result must be applied to recipients"]
 pub fn distribute_with_remainder(
     env: &Env,
     total: i128,
