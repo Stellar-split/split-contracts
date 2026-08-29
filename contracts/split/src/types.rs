@@ -1655,11 +1655,13 @@ impl InvoiceStatus {
             InvoiceStatus::PartiallyReleased => 6,
             InvoiceStatus::Finalised => 7,
             InvoiceStatus::Deleted => 8,
+            InvoiceStatus::PayoutInProgress => 9,
         }
     }
 
-    /// Decode from a single byte.  Unknown byte values panic to prevent
-    /// silent data corruption from masked migration errors (#616).
+    /// Decode from a single byte.  Unknown byte values fall back to
+    /// `InvoiceStatus::Pending` so that forward-compatibility reads and
+    /// corrupt/out-of-range bytes never produce an invalid variant.
     pub fn from_u8(v: u8) -> Self {
         match v {
             0 => InvoiceStatus::Pending,
@@ -1671,7 +1673,8 @@ impl InvoiceStatus {
             6 => InvoiceStatus::PartiallyReleased,
             7 => InvoiceStatus::Finalised,
             8 => InvoiceStatus::Deleted,
-            _ => panic!("unknown InvoiceStatus byte: {v}"),
+            9 => InvoiceStatus::PayoutInProgress,
+            _ => InvoiceStatus::Pending,
         }
     }
 }
@@ -1789,3 +1792,74 @@ pub struct PaymentRecord {
     pub ledger: u32,
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::InvoiceStatus;
+
+    /// All ten variants must survive a to_u8 → from_u8 round-trip unchanged.
+    #[test]
+    fn invoice_status_round_trip_all_variants() {
+        let variants = [
+            InvoiceStatus::Pending,
+            InvoiceStatus::Released,
+            InvoiceStatus::Refunded,
+            InvoiceStatus::Expired,
+            InvoiceStatus::Cancelled,
+            InvoiceStatus::Disputed,
+            InvoiceStatus::PartiallyReleased,
+            InvoiceStatus::Finalised,
+            InvoiceStatus::Deleted,
+            InvoiceStatus::PayoutInProgress,
+        ];
+
+        for variant in &variants {
+            let byte = variant.to_u8();
+            let restored = InvoiceStatus::from_u8(byte);
+            assert_eq!(
+                restored, *variant,
+                "round-trip failed for variant {:?}: to_u8()={} decoded back to {:?}",
+                variant, byte, restored
+            );
+        }
+    }
+
+    /// Each variant's discriminant must be unique — no two variants may map to
+    /// the same byte, which would cause silent data corruption in compact storage.
+    #[test]
+    fn invoice_status_discriminants_are_unique() {
+        let variants = [
+            InvoiceStatus::Pending,
+            InvoiceStatus::Released,
+            InvoiceStatus::Refunded,
+            InvoiceStatus::Expired,
+            InvoiceStatus::Cancelled,
+            InvoiceStatus::Disputed,
+            InvoiceStatus::PartiallyReleased,
+            InvoiceStatus::Finalised,
+            InvoiceStatus::Deleted,
+            InvoiceStatus::PayoutInProgress,
+        ];
+
+        let mut seen = std::collections::HashSet::new();
+        for variant in &variants {
+            let byte = variant.to_u8();
+            assert!(
+                seen.insert(byte),
+                "discriminant collision: byte {} is used by more than one variant",
+                byte
+            );
+        }
+    }
+
+    /// An unknown byte value (e.g. 255) must map to InvoiceStatus::Pending
+    /// rather than panicking, so that future schema extensions and corrupt reads
+    /// degrade gracefully.
+    #[test]
+    fn invoice_status_unknown_byte_falls_back_to_pending() {
+        assert_eq!(InvoiceStatus::from_u8(255), InvoiceStatus::Pending);
+        // A few other out-of-range values for good measure.
+        assert_eq!(InvoiceStatus::from_u8(10), InvoiceStatus::Pending);
+        assert_eq!(InvoiceStatus::from_u8(100), InvoiceStatus::Pending);
+    }
+}
