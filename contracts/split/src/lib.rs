@@ -12356,6 +12356,41 @@ impl SplitContract {
         get_audit_log(&env, invoice_id)
     }
 
+    /// Issue #681: Return how much `recipient` has already withdrawn from
+    /// `invoice_id`. Returns 0 if `recipient` is not in the invoice's
+    /// recipient list.
+    pub fn get_recipient_claimed(env: Env, invoice_id: u64, recipient: Address) -> i128 {
+        let invoice = load_invoice(&env, invoice_id);
+        for i in 0..invoice.recipients.len() {
+            if invoice.recipients.get(i).unwrap() == recipient {
+                return invoice.claimed.get(i).unwrap_or(0);
+            }
+        }
+        0
+    }
+
+    /// Issue #680: Partition `invoice_id`'s tranches into those already
+    /// released and those still pending, based on `released_bps` accumulated
+    /// so far. Returns (empty, empty) for invoices without tranches.
+    pub fn get_invoice_tranche_status(
+        env: Env,
+        invoice_id: u64,
+    ) -> (Vec<Tranche>, Vec<Tranche>) {
+        let invoice = load_invoice(&env, invoice_id);
+        let mut released = Vec::new(&env);
+        let mut pending = Vec::new(&env);
+        let mut cumulative_bps: u32 = 0;
+        for tranche in invoice.tranches.iter() {
+            cumulative_bps = cumulative_bps.saturating_add(tranche.basis_points);
+            if cumulative_bps <= invoice.released_bps {
+                released.push_back(tranche);
+            } else {
+                pending.push_back(tranche);
+            }
+        }
+        (released, pending)
+    }
+
     /// Return the total amount contributed by `payer` toward `invoice_id`.
     pub fn get_payer_total(env: Env, invoice_id: u64, payer: Address) -> i128 {
         let invoice = load_invoice(&env, invoice_id);
@@ -14036,8 +14071,109 @@ impl SplitContract {
         Self::_release(&env, invoice_id, &mut invoice, &actor);
     }
 
+    /// Issue #678: Return whether `invoice_id` can be released right now,
+    /// without simulating a release or panicking. Mirrors the gating checks
+    /// in `release_invoice` (status, funding, prerequisite, approver,
+    /// co-signers, escrow hold, dispute, and time-lock delay) but reports
+    /// `false` instead of reverting when a gate is not satisfied.
+    pub fn is_invoice_releasable(env: Env, invoice_id: u64) -> bool {
+        let invoice = load_invoice(&env, invoice_id);
+
+        if invoice.frozen || invoice.admin_frozen {
+            return false;
+        }
+        if invoice.status != InvoiceStatus::Pending {
+            return false;
+        }
+        if invoice.disputed {
+            match env
+                .storage()
+                .persistent()
+                .get::<(Symbol, u64), DisputeRecord>(&dispute_record_key(invoice_id))
+            {
+                Some(record) if record.status != DisputeStatus::Active => {}
+                _ => return false,
+            }
+        }
+        if let Some(held_until) = invoice.held_until {
+            if env.ledger().sequence() < held_until {
+                return false;
+            }
+        }
+
+        let total: i128 = invoice.amounts.iter().sum();
+        let min_required = if invoice.min_funding_bps > 0 {
+            (total as u128 * invoice.min_funding_bps as u128 / 10_000u128) as i128
+        } else {
+            total
+        };
+        if invoice.funded < min_required {
+            return false;
+        }
+
+        // Issue #327: time-lock delay set by the creator.
+        if let Some(delay_ledgers) = env
+            .storage()
+            .persistent()
+            .get::<_, u32>(&release_delay_key(invoice_id))
+        {
+            if let Some(funded_at) = env
+                .storage()
+                .persistent()
+                .get::<_, u32>(&funded_at_ledger_key(invoice_id))
+            {
+                let unlock_at = funded_at.saturating_add(delay_ledgers);
+                if env.ledger().sequence() < unlock_at {
+                    return false;
+                }
+            }
+        }
+
+        if invoice.approver.is_some() && !invoice.approved {
+            return false;
+        }
+
+        if let Some(prereq_id) = invoice.prerequisite_id {
+            let prereq = load_invoice(&env, prereq_id);
+            if prereq.status != InvoiceStatus::Released {
+                return false;
+            }
+        }
+
+        if !invoice.co_signers.is_empty() && invoice.signatures.len() < invoice.required_signatures
+        {
+            return false;
+        }
+
+        if let Some(threshold) = env
+            .storage()
+            .persistent()
+            .get::<_, u32>(&cosigner_thresh_key(invoice_id))
+        {
+            let approvals: Vec<Address> = env
+                .storage()
+                .persistent()
+                .get(&cosign_key(invoice_id))
+                .unwrap_or_else(|| Vec::new(&env));
+            if approvals.len() < threshold {
+                return false;
+            }
+        }
+
+        true
+    }
+
     /// Return the dispute record for an invoice, or None if no dispute exists.
     pub fn get_dispute(env: Env, invoice_id: u64) -> Option<DisputeRecord> {
+        env.storage()
+            .persistent()
+            .get(&dispute_record_key(invoice_id))
+    }
+
+    /// Issue #679: Return the dispute record for an invoice, or None if no
+    /// dispute exists. Equivalent to `get_dispute`, named to match the
+    /// `DisputeRecord` type it returns.
+    pub fn get_dispute_record(env: Env, invoice_id: u64) -> Option<DisputeRecord> {
         env.storage()
             .persistent()
             .get(&dispute_record_key(invoice_id))
