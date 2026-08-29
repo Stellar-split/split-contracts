@@ -200,6 +200,7 @@ pub enum InvoiceKey {
     Group(u64),
     GroupTreasury(u64),
     TimelockAction(u64),
+    PayoutCheckpoint(u64),
 }
 
 // ---------------------------------------------------------------------------

@@ -151,6 +151,8 @@ pub enum InvoiceStatus {
     Finalised,
     /// Soft-deleted invoice — tombstone record preserved for audit trail.
     Deleted,
+    /// Issue #564: Payout in progress — intermediate state during release_funds.
+    PayoutInProgress,
 }
 
 // ---------------------------------------------------------------------------
