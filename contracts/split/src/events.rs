@@ -162,6 +162,15 @@ pub fn condition_verified(env: &Env, invoice_id: u64, preimage_hash: &BytesN<32>
 
 /// Emitted when an invoice expires.
 /// Topics: (split, expired, invoice_id)
+/// Data: (deadline, funded, creator)
+pub fn invoice_expired(env: &Env, invoice_id: u64, deadline: u64, funded: i128, creator: &Address) {
+    env.events().publish(
+        (
+            symbol_short!("split"),
+            symbol_short!("expired"),
+            invoice_id,
+        ),
+        (deadline, funded, creator.clone()),
 /// Data: (deadline, funded)
 pub fn invoice_expired(env: &Env, invoice_id: u64, deadline: u64, funded: i128) {
     let event_seq = next_seq(env, invoice_id);

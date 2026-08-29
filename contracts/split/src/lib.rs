@@ -3782,7 +3782,7 @@ impl SplitContract {
                 invoice.completion_time = Some(env.ledger().timestamp());
                 save_invoice(&env, invoice_id, &invoice);
                 append_audit_entry(&env, invoice_id, symbol_short!("resolve"), &arbiter);
-                events::invoice_refunded(&env, invoice_id);
+                events::invoice_refunded(&env, invoice_id, total_refunded_amount);
                 events::invoice_state_changed(
                     &env,
                     invoice_id,
@@ -8811,6 +8811,9 @@ impl SplitContract {
             {
                 let unlock_at = funded_at.saturating_add(delay_ledgers);
                 assert!(env.ledger().sequence() >= unlock_at, "FundsLockedUntil");
+                // Issue #327: emit the same unlock event as `release_invoice` so
+                // indexers observe funds_unlocked regardless of which release path is used.
+                events::funds_unlocked(&env, invoice_id, unlock_at);
             }
         }
 
@@ -10853,7 +10856,7 @@ impl SplitContract {
                         save_invoice(&env, invoice_id, &invoice);
                         let actor = env.current_contract_address();
                         append_audit_entry(&env, invoice_id, symbol_short!("auto_ref"), &actor);
-                        events::invoice_refunded(&env, invoice_id);
+                        events::invoice_refunded(&env, invoice_id, total_refunded_amount);
                         events::invoice_state_changed(
                             &env,
                             invoice_id,
@@ -10946,7 +10949,13 @@ impl SplitContract {
 
         invoice.status = InvoiceStatus::Expired;
         save_invoice(&env, invoice_id, &invoice);
-        events::invoice_expired(&env, invoice_id, invoice.deadline, invoice.funded);
+        events::invoice_expired(
+            &env,
+            invoice_id,
+            invoice.deadline,
+            invoice.funded,
+            &invoice.creator,
+        );
         append_audit_entry(
             &env,
             invoice_id,
@@ -11063,7 +11072,7 @@ impl SplitContract {
         save_invoice(&env, invoice_id, &invoice);
         let actor = env.current_contract_address();
         append_audit_entry(&env, invoice_id, symbol_short!("refund"), &actor);
-        events::invoice_refunded(&env, invoice_id);
+        events::invoice_refunded(&env, invoice_id, total_refunded_amount);
         events::invoice_state_changed(
             &env,
             invoice_id,
@@ -14070,8 +14079,10 @@ impl SplitContract {
                     let prev = totals.get(payment.payer.clone()).unwrap_or(0);
                     totals.set(payment.payer.clone(), prev + payment.amount);
                 }
+                let mut total_refunded_amount: i128 = 0;
                 for (payer, amount) in totals.iter() {
                     token_client.transfer(&env.current_contract_address(), &payer, &amount);
+                    total_refunded_amount += amount;
                     events::payer_refunded(&env, invoice_id, &payer, amount);
                 }
 
@@ -14080,7 +14091,7 @@ impl SplitContract {
                 invoice.completion_time = Some(env.ledger().timestamp());
                 save_invoice(&env, invoice_id, &invoice);
                 events::dispute_resolved(&env, invoice_id, &admin_addr, &DisputeOutcome::Refunded);
-                events::invoice_refunded(&env, invoice_id);
+                events::invoice_refunded(&env, invoice_id, total_refunded_amount);
                 events::invoice_state_changed(
                     &env,
                     invoice_id,
