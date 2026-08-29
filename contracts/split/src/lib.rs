@@ -6626,7 +6626,7 @@ impl SplitContract {
                 .set(&cumulative_key, &(cumulative + net_paid));
 
             // In real app we might handle penalty/oracle, but for simplicity:
-            events::payment_received(&env, invoice_id, &payer, net_paid);
+            events::payment_received(&env, invoice_id, &payer, net_paid, &funding_token_for(&invoice));
 
             let total: i128 = invoice.amounts.iter().sum();
             check_and_emit_funding_checkpoints(&env, invoice_id, invoice.funded, total);
@@ -7416,7 +7416,7 @@ impl SplitContract {
             .set(&credit_key(payer), &(credit + 1));
 
         append_audit_entry(env, invoice_id, symbol_short!("pay"), payer);
-        events::payment_received(env, invoice_id, payer, credited_amount);
+        events::payment_received(env, invoice_id, payer, credited_amount, &funding_token_for(&invoice));
         // Issue #333: emit milestone events for any thresholds crossed by this payment.
         {
             let total_for_milestone: i128 = total; // already computed above
@@ -7642,7 +7642,7 @@ impl SplitContract {
             .set(&cumulative_key, &(cumulative + credited_amount));
 
         append_audit_entry(&env, invoice_id, symbol_short!("pay_tok"), &payer);
-        events::payment_received(&env, invoice_id, &payer, credited_amount);
+        events::payment_received(&env, invoice_id, &payer, credited_amount, &funding_token_for(&invoice));
         check_and_emit_funding_checkpoints(&env, invoice_id, invoice.funded, total);
         Self::record_invoice_rate_limit(&env, invoice_id, &payer);
         notify_invoice(
@@ -7749,7 +7749,7 @@ impl SplitContract {
             .set(&cumulative_key, &(cumulative + converted));
 
         append_audit_entry(&env, invoice_id, symbol_short!("brdg_pay"), &payer);
-        events::payment_received(&env, invoice_id, &payer, converted);
+        events::payment_received(&env, invoice_id, &payer, converted, &invoice_token);
         check_and_emit_funding_checkpoints(&env, invoice_id, invoice.funded, total);
         Self::record_invoice_rate_limit(&env, invoice_id, &payer);
         notify_invoice(
@@ -7867,7 +7867,7 @@ impl SplitContract {
                 .set(&cumulative_key, &(cumulative + p.amount));
 
             append_audit_entry(&env, p.invoice_id, symbol_short!("pool_pay"), &payer);
-            events::payment_received(&env, p.invoice_id, &payer, p.amount);
+            events::payment_received(&env, p.invoice_id, &payer, p.amount, &shared_token);
 
             let inv_total: i128 = inv.amounts.iter().sum();
             if inv.funded >= inv_total {
@@ -8560,6 +8560,7 @@ impl SplitContract {
         save_invoice(&env, invoice_id, &invoice);
 
         append_audit_entry(&env, invoice_id, symbol_short!("paused"), &creator);
+        events::invoice_frozen(&env, invoice_id, &creator);
         events::invoice_paused(&env, invoice_id, &creator, &reason, &auto_resume_at);
     }
 
@@ -8648,6 +8649,29 @@ impl SplitContract {
                 // Issue #309: emit AllowlistUpdated event
                 events::allowlist_updated(&env, invoice_id, &creator, &payer, true);
             }
+        }
+    }
+
+    /// Remove the invoice's entire payer allowlist, reopening it to any payer.
+    ///
+    /// Only the creator (or a co-creator) may call this. Sets `allowed_payers`
+    /// to `None`. If the invoice is already open, this is a no-op and does not
+    /// emit an event.
+    pub fn remove_allowlist(env: Env, creator: Address, invoice_id: u64) {
+        require_not_paused(&env);
+        creator.require_auth();
+
+        let mut invoice = load_invoice(&env, invoice_id);
+        assert!(
+            invoice.creator == creator || invoice.co_creators.iter().any(|c| c == creator),
+            "only creator can modify allowlist"
+        );
+
+        if invoice.allowed_payers.is_some() {
+            invoice.allowed_payers = None;
+            save_invoice(&env, invoice_id, &invoice);
+            append_audit_entry(&env, invoice_id, symbol_short!("al_open"), &creator);
+            events::allowlist_removed(&env, invoice_id, &creator);
         }
     }
 
@@ -13211,7 +13235,7 @@ impl SplitContract {
             .set(&cumulative_key, &(cumulative + amount));
 
         append_audit_entry(&env, invoice_id, symbol_short!("del_pay"), &delegate);
-        events::payment_received(&env, invoice_id, &beneficiary, amount);
+        events::payment_received(&env, invoice_id, &beneficiary, amount, &funding_token_for(&invoice));
         check_and_emit_funding_checkpoints(&env, invoice_id, invoice.funded, total);
         Self::record_invoice_rate_limit(&env, invoice_id, &beneficiary);
         notify_invoice(
@@ -13917,7 +13941,7 @@ impl SplitContract {
             .set(&cumulative_key, &(cumulative + amount));
 
         events::delegated_payment(&env, invoice_id, &on_behalf_of, &executor, amount);
-        events::payment_received(&env, invoice_id, &on_behalf_of, amount);
+        events::payment_received(&env, invoice_id, &on_behalf_of, amount, &funding_token_for(&invoice));
         check_and_emit_funding_checkpoints(&env, invoice_id, invoice.funded, total);
         Self::record_invoice_rate_limit(&env, invoice_id, &on_behalf_of);
         append_audit_entry(&env, invoice_id, symbol_short!("dlgt_pay"), &executor);

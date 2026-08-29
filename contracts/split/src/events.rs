@@ -68,12 +68,12 @@ pub fn invoice_created(
 
 /// Emitted when a payment is received toward an invoice.
 /// Topics: (split, paid, invoice_id)
-/// Data: (payer, amount, event_seq)
-pub fn payment_received(env: &Env, invoice_id: u64, payer: &Address, amount: i128) {
+/// Data: (payer, amount, token, event_seq)
+pub fn payment_received(env: &Env, invoice_id: u64, payer: &Address, amount: i128, token: &Address) {
     let event_seq = next_seq(env, invoice_id);
     env.events().publish(
         (symbol_short!("split"), symbol_short!("paid"), invoice_id),
-        (payer.clone(), amount, event_seq),
+        (payer.clone(), amount, token.clone(), event_seq),
     );
 }
 
@@ -342,10 +342,12 @@ pub fn payment_matched(env: &Env, invoice_id: u64, memo: u64, payer: &Address) {
 
 /// Emitted when an invoice is cloned.
 /// Topics: (cloned, source_id, new_id)
-/// Data: ()
+/// Data: ledger_sequence
 pub fn invoice_cloned(env: &Env, source_id: u64, new_id: u64) {
-    env.events()
-        .publish((symbol_short!("cloned"), source_id, new_id), ());
+    env.events().publish(
+        (symbol_short!("cloned"), source_id, new_id),
+        (env.ledger().sequence(),),
+    );
 }
 
 /// Emitted when an invoice is paused.
@@ -361,6 +363,16 @@ pub fn invoice_paused(
     env.events().publish(
         (symbol_short!("split"), symbol_short!("paused"), invoice_id),
         (creator.clone(), reason.clone(), *auto_resume_at),
+    );
+}
+
+/// Emitted whenever an invoice's `frozen` flag transitions to true.
+/// Topics: (split, frozen, invoice_id)
+/// Data: (creator, ledger)
+pub fn invoice_frozen(env: &Env, invoice_id: u64, creator: &Address) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("frozen"), invoice_id),
+        (creator.clone(), env.ledger().sequence()),
     );
 }
 
@@ -698,6 +710,17 @@ pub fn allowlist_updated(
     env.events().publish(
         (symbol_short!("split"), symbol_short!("al_upd"), invoice_id),
         (creator.clone(), payer.clone(), added),
+    );
+}
+
+/// Emitted when a creator clears an invoice's entire payer allowlist,
+/// transitioning it from restricted to open (allowed_payers set to None).
+/// Topics: (split, al_open, invoice_id)
+/// Data: (creator, ledger)
+pub fn allowlist_removed(env: &Env, invoice_id: u64, creator: &Address) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("al_open"), invoice_id),
+        (creator.clone(), env.ledger().sequence()),
     );
 }
 
