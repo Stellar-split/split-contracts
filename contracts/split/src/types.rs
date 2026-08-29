@@ -544,6 +544,51 @@ pub struct InvoiceOptions2 {
     pub ratio_denominator: u64,
 }
 
+impl Default for InvoiceOptions2 {
+    /// Returns an `InvoiceOptions2` with every optional field set to `None`,
+    /// every boolean to `false`, every numeric to `0`, and
+    /// `overfunding_policy` to [`OverfundingPolicy::Cap`] (the historical
+    /// behaviour).  `ratio_denominator` is `10_000` to match
+    /// [`InvoiceExt2::default`].
+    ///
+    /// Tests that only care about one or two fields can use this as a
+    /// starting point and override just those fields:
+    /// ```
+    /// let opts = InvoiceOptions2 {
+    ///     payment_cooldown_secs: Some(60),
+    ///     ..Default::default()
+    /// };
+    /// ```
+    fn default() -> Self {
+        InvoiceOptions2 {
+            target_usd_cents: None,
+            payment_token: None,
+            release_delay_ledgers: None,
+            metadata_hash: None,
+            payment_cooldown_secs: None,
+            max_payments_per_window: None,
+            payment_window_secs: None,
+            oracle: None,
+            oracle_asset_pair_base: None,
+            oracle_asset_pair_quote: None,
+            min_payer_rep: None,
+            payment_open_at: None,
+            payment_close_at: None,
+            milestones: None,
+            recipient_max_payouts: None,
+            release_condition_hash: None,
+            recipient_whitelist_enabled: false,
+            escrow_hold_period: None,
+            overfunding_policy: OverfundingPolicy::Cap,
+            early_bird_window_ledgers: 0,
+            early_bird_fee_bps: 0,
+            creator_fee_bps: 0,
+            early_bird_fee_credit: 0,
+            ratio_denominator: 10_000,
+        }
+    }
+}
+
 /// Legacy invoice layout used by stored invoices created before the `version`
 /// field was added. Kept for on-chain migration so old data can be
 /// deserialised and re-saved in the current schema.
