@@ -1,4 +1,4 @@
-use crate::types::{DisputeOutcome, FeeSplit, InvoiceStatus, RepScore, TimelockAction};
+use crate::types::{DisputeOutcome, FeeSplit, InvoicePhase, InvoiceStatus, RepScore, TimelockAction};
 use soroban_sdk::{contracttype, symbol_short, Address, BytesN, Env, String, Vec};
 
 // ---------------------------------------------------------------------------
@@ -1448,15 +1448,15 @@ pub fn invoice_dispute_raised(
 
 /// Emitted on every individual cosigner approval recorded via `approve_release`.
 /// Topics: (split, CosignerApproved, invoice_id)
-/// Data: (cosigner, ledger)
-pub fn cosigner_approved(env: &Env, invoice_id: u64, cosigner: &Address) {
+/// Data: (cosigner, approvals_so_far, ledger)
+pub fn cosigner_approved(env: &Env, invoice_id: u64, cosigner: &Address, approvals_so_far: u32) {
     env.events().publish(
         (
             symbol_short!("split"),
             soroban_sdk::Symbol::new(env, "CosignerApproved"),
             invoice_id,
         ),
-        (cosigner.clone(), env.ledger().sequence()),
+        (cosigner.clone(), approvals_so_far, env.ledger().sequence()),
     );
 }
 
@@ -1573,6 +1573,22 @@ pub fn creator_fee_paid(env: &Env, invoice_id: u64, creator: &Address, fee_amoun
     );
 }
 
+/// Issue #685: Emitted when a creator-declared fee (`creator_fee_bps`) is
+/// deducted from recipient payouts at release time.
+///
+/// Topics: (split, creator_fee_collected, invoice_id)
+/// Data:   (creator, fee_amount)
+pub fn creator_fee_collected(env: &Env, invoice_id: u64, creator: &Address, fee_amount: i128) {
+    env.events().publish(
+        (
+            symbol_short!("split"),
+            soroban_sdk::Symbol::new(env, "creator_fee_collected"),
+            invoice_id,
+        ),
+        (creator.clone(), fee_amount),
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Issue #560: Creator Migration
 // ---------------------------------------------------------------------------
@@ -1649,6 +1665,29 @@ pub fn recipient_share_locked(
     env.events().publish(
         (symbol_short!("split"), symbol_short!("sh_lock"), invoice_id),
         (recipient.clone(), admin.clone()),
+    );
+}
+
+/// Issue #684: Emitted at every `InvoicePhase` transition (Draft -> Active ->
+/// Locked -> Released).
+/// Topics: (split, phase_chg, invoice_id)
+/// Data: (old_phase, new_phase, event_seq)
+pub fn invoice_phase_changed(
+    env: &Env,
+    invoice_id: u64,
+    old_phase: &InvoicePhase,
+    new_phase: &InvoicePhase,
+) {
+    let phase_sym = |phase: &InvoicePhase| match phase {
+        InvoicePhase::Draft => symbol_short!("draft"),
+        InvoicePhase::Active => symbol_short!("active"),
+        InvoicePhase::Locked => symbol_short!("locked"),
+        InvoicePhase::Released => symbol_short!("released"),
+    };
+    let event_seq = next_seq(env, invoice_id);
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("phase_chg"), invoice_id),
+        (phase_sym(old_phase), phase_sym(new_phase), event_seq),
     );
 }
 
