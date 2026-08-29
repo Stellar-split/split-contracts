@@ -51,10 +51,11 @@ const ORACLE_RATE_SCALE: i128 = 1_000_000;
 /// growth; admins can tighten it via `set_invoice_storage_quota`.
 const DEFAULT_INVOICE_STORAGE_QUOTA: u64 = 65_536;
 
+mod constants;
 mod error;
 mod events;
 pub mod types;
-mod calc;
+mod validation;
 
 #[cfg(test)]
 mod test;
@@ -65,12 +66,15 @@ mod fuzz_tests;
 #[cfg(test)]
 mod storage_snapshot;
 
+mod storage;
 mod storage_keys;
 
 mod migrations;
 
+mod validation;
+
 use error::ContractError;
-use calc::calc_platform_fee;
+use validation::assert_valid_bps;
 use soroban_sdk::crypto::bls12_381::{Fr, G1Affine};
 use soroban_sdk::xdr::ToXdr;
 use soroban_sdk::{
@@ -89,8 +93,8 @@ use types::{
     Invoice, InvoiceCore, InvoiceExt, InvoiceExt2, InvoiceExt3, InvoiceHot, InvoiceOptions,
     InvoiceOptions2, InvoicePayment, InvoiceStats, InvoiceStatus, InvoiceTemplate,
     InvoiceTemplateRecord, LegacyInvoice, OverflowBehavior, OverfundingPolicy, Payment,
-    PaymentCertificate, PaymentCommitment, PaymentProof, PendingAdminAction, ProtocolFeeConfig,
-    QueuedAction, RebateTier, Recipient, RepScore, ResolveAction,
+    PaymentCertificate, PaymentCommitment, PaymentProof, PaymentRecord, PendingAdminAction,
+    ProtocolFeeConfig, QueuedAction, RebateTier, Recipient, RepScore, ResolveAction,
     ResolveRule, Role, SimulateReleaseResult, SplitRule, SubscriptionParams, TimelockAction,
     Tombstone, Tranche, TransferRecord, TreasuryRecord, UpgradeProposal,
 };
@@ -845,6 +849,16 @@ fn fee_tiers_key() -> Symbol {
 
 fn pending_admin_key() -> Symbol {
     symbol_short!("pend_adm")
+}
+
+/// Issue #526: Minimum recipient count per invoice — instance storage.
+fn min_recipients_key() -> Symbol {
+    symbol_short!("min_recip")
+}
+
+/// Issue #527: Per-payer payment history — persistent storage.
+fn payer_history_key(payer: &Address) -> (Symbol, Address) {
+    (symbol_short!("pay_hist"), payer.clone())
 }
 
 /// Issue #310: pending upgrade proposal — instance storage.
@@ -1609,7 +1623,7 @@ fn archive_invoice_storage(env: &Env, id: u64, core: &InvoiceCore) {
             signatures: Vec::new(env),
             approver: None,
             approved: false,
-            oracle_address: None,
+            condition_oracle: None,
             condition_met: false,
             penalty_bps: 0,
             penalty_deadline: 0,
@@ -1826,7 +1840,7 @@ fn load_invoice(env: &Env, id: u64) -> Invoice {
             signatures: Vec::new(env),
             approver: None,
             approved: false,
-            oracle_address: None,
+            condition_oracle: None,
             condition_met: false,
             penalty_bps: 0,
             penalty_deadline: 0,
@@ -2187,29 +2201,39 @@ fn is_paused(env: &Env) -> bool {
         })
 }
 
-fn require_not_paused(env: &Env) {
-    migrations::require_schema_current(env);
-    assert!(!is_paused(env), "contract is paused");
-    // Issue #297: also check circuit breaker
-    let cb_active: bool = env
-        .storage()
-        .persistent()
-        .get(&circuit_breaker_key())
-        .unwrap_or(false);
-    assert!(!cb_active, "ContractPaused");
-}
-
-fn check_not_paused(env: &Env) {
-    migrations::require_schema_current(env);
+/// Issue #626: Reusable pause guard.
+///
+/// Returns `Err(ContractError::ContractPaused)` when:
+/// - the instance-level `Paused` flag is `true`, or
+/// - the circuit-breaker persistent flag (issue #297) is `true`.
+///
+/// Does **not** check the schema version; callers that also need a version
+/// guard should call `migrations::require_schema_current` first (see
+/// `require_not_paused` below).
+fn assert_not_paused(env: &Env) -> Result<(), ContractError> {
     if is_paused(env) {
-        panic!("ContractPaused");
+        return Err(ContractError::ContractPaused);
     }
+    // Issue #297: also check circuit breaker.
     let cb_active: bool = env
         .storage()
         .persistent()
         .get(&circuit_breaker_key())
         .unwrap_or(false);
     if cb_active {
+        return Err(ContractError::ContractPaused);
+    }
+    Ok(())
+}
+
+fn require_not_paused(env: &Env) {
+    migrations::require_schema_current(env);
+    assert_not_paused(env).expect("contract is paused");
+}
+
+fn check_not_paused(env: &Env) {
+    migrations::require_schema_current(env);
+    if assert_not_paused(env).is_err() {
         panic!("ContractPaused");
     }
 }
@@ -3000,6 +3024,20 @@ impl SplitContract {
             }
 
             save_invoice(&env, invoice_id, &invoice);
+
+            // Issue #527: append to payer payment history.
+            let hist_key = payer_history_key(&payer);
+            let mut history: Vec<PaymentRecord> = env
+                .storage()
+                .persistent()
+                .get(&hist_key)
+                .unwrap_or_else(|| Vec::new(&env));
+            history.push_back(PaymentRecord {
+                invoice_id,
+                amount: amount_applied,
+                ledger: env.ledger().sequence(),
+            });
+            env.storage().persistent().set(&hist_key, &history);
         }
 
         ContributionResult {
@@ -3387,6 +3425,7 @@ impl SplitContract {
         env.storage()
             .instance()
             .set(&pending_admin_key(), &new_admin);
+        events::admin_transfer_proposed(&env, &admin, &new_admin);
     }
 
     /// Accept the admin role. Requires the proposed admin to authenticate.
@@ -3399,6 +3438,50 @@ impl SplitContract {
         pending.require_auth();
         env.storage().instance().set(&admin_key(), &pending);
         env.storage().instance().remove(&pending_admin_key());
+        events::admin_transfer_completed(&env, &pending);
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #526: Minimum recipient count
+    // -----------------------------------------------------------------------
+
+    /// Set the minimum number of recipients required per invoice. Requires admin auth.
+    pub fn set_min_recipients(env: Env, admin: Address, min: u32) {
+        require_admin(&env);
+        let _ = admin;
+        env.storage()
+            .instance()
+            .set(&min_recipients_key(), &min);
+    }
+
+    /// Get the minimum number of recipients required per invoice. Default is 2.
+    pub fn get_min_recipients(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&min_recipients_key())
+            .unwrap_or(2u32)
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #527: Payer history query
+    // -----------------------------------------------------------------------
+
+    /// Return a paginated slice of payment records for the given payer.
+    pub fn get_payer_history(env: Env, payer: Address, offset: u32, limit: u32) -> Vec<PaymentRecord> {
+        let hist_key = payer_history_key(&payer);
+        let history: Vec<PaymentRecord> = env
+            .storage()
+            .persistent()
+            .get(&hist_key)
+            .unwrap_or_else(|| Vec::new(&env));
+        let total = history.len();
+        let start = offset.min(total);
+        let end = (start + limit).min(total);
+        let mut result = Vec::new(&env);
+        for i in start..end {
+            result.push_back(history.get(i).unwrap());
+        }
+        result
     }
 
     // -----------------------------------------------------------------------
@@ -4048,6 +4131,40 @@ impl SplitContract {
         }
     }
 
+    pub fn get_invoice_deadline(env: Env, invoice_id: u64) -> Result<u64, ContractError> {
+        if let Some(core) = env.storage().persistent().get(&invoice_key(invoice_id)) {
+            Ok(core.deadline)
+        } else if let Some(core) = env.storage().instance().get(&invoice_key(invoice_id)) {
+            Ok(core.deadline)
+        } else {
+            Err(ContractError::InvoiceNotFound)
+        }
+    }
+
+    pub fn get_invoice_funded(env: Env, invoice_id: u64) -> Result<i128, ContractError> {
+        if let Some(hot) = env.storage().instance().get(&invoice_hot_key(invoice_id)) {
+            Ok(hot.funded)
+        } else if let Some(core) = env.storage().persistent().get(&invoice_key(invoice_id)) {
+            Ok(core.funded)
+        } else if let Some(core) = env.storage().instance().get(&invoice_key(invoice_id)) {
+            Ok(core.funded)
+        } else {
+            Err(ContractError::InvoiceNotFound)
+        }
+    }
+
+    pub fn get_invoice_status(env: Env, invoice_id: u64) -> Result<InvoiceStatus, ContractError> {
+        if let Some(hot) = env.storage().instance().get(&invoice_hot_key(invoice_id)) {
+            Ok(hot.status)
+        } else if let Some(core) = env.storage().persistent().get(&invoice_key(invoice_id)) {
+            Ok(core.status)
+        } else if let Some(core) = env.storage().instance().get(&invoice_key(invoice_id)) {
+            Ok(core.status)
+        } else {
+            Err(ContractError::InvoiceNotFound)
+        }
+    }
+
     /// Get a consolidated invoice snapshot for off-chain audit.
     pub fn get_invoice_snapshot(env: Env, invoice_id: u64) -> types::InvoiceSnapshot {
         let core: types::InvoiceCore = env
@@ -4074,7 +4191,7 @@ impl SplitContract {
                         signatures: Vec::new(&env),
                         approver: None,
                         approved: false,
-                        oracle_address: None,
+                        condition_oracle: None,
                         condition_met: false,
                         penalty_bps: 0,
                         penalty_deadline: 0,
@@ -4247,8 +4364,9 @@ impl SplitContract {
         admin.require_auth();
 
         assert!(!fee_recipients.is_empty(), "fee_recipients must not be empty");
-        let sum: u32 = fee_recipients.iter().map(|r| r.basis_points).sum();
-        assert!(sum == 10_000, "fee_recipients basis points must sum to 10000");
+        let sum: u32 = fee_recipients.iter().map(|r| r.basis_points).fold(0u32, |a, b| a.saturating_add(b));
+        validation::assert_bps_total(sum)
+            .expect("fee_recipients basis points must sum to 10000");
 
         env.storage()
             .instance()
@@ -4260,6 +4378,25 @@ impl SplitContract {
     /// Return the registered fee recipients, if any.
     pub fn get_fee_recipients(env: Env) -> Option<Vec<FeeSplit>> {
         env.storage().instance().get(&fee_recipients_key())
+    }
+
+    /// Issue #596: Query whether the contract is currently paused.
+    /// Returns false if no pause state has been set.
+    pub fn get_contract_paused(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&storage_keys::StorageKey::Paused)
+            .unwrap_or(false)
+    }
+
+    /// Issue #597: Query the per-recipient amounts for an invoice without retrieving the full invoice.
+    /// Throws ContractError::InvoiceNotFound if the invoice does not exist.
+    pub fn get_invoice_amounts(env: Env, invoice_id: u64) -> Vec<i128> {
+        env.storage()
+            .persistent()
+            .get(&storage_keys::InvoiceKey::AmountsList(invoice_id))
+            .ok_or(ContractError::InvoiceNotFound)
+            .unwrap()
     }
 
     /// Preview the next invoice id that will be assigned by create_invoice.
@@ -4949,7 +5086,7 @@ impl SplitContract {
             options.release_stages,
             options.price_oracle,
             options.swap_tokens,
-            options.oracle_address,
+            options.condition_oracle,
             options.tax_bps.unwrap_or(0),
             options.tax_authority,
             options.insurance_premium_bps.unwrap_or(0),
@@ -5082,7 +5219,7 @@ impl SplitContract {
             options.release_stages,
             options.price_oracle,
             options.swap_tokens,
-            options.oracle_address,
+            options.condition_oracle,
             options.tax_bps.unwrap_or(0),
             options.tax_authority,
             options.insurance_premium_bps.unwrap_or(0),
@@ -5156,7 +5293,7 @@ impl SplitContract {
         release_stages: Vec<u32>,
         price_oracle: Option<Address>,
         swap_tokens: Vec<Option<Address>>,
-        oracle_address: Option<Address>,
+        condition_oracle: Option<Address>,
         tax_bps: u32,
         tax_authority: Option<Address>,
         insurance_premium_bps: u32,
@@ -5209,6 +5346,17 @@ impl SplitContract {
         );
 
         assert!(!recipients.is_empty(), "must have at least one recipient");
+        // Issue #526: enforce minimum recipient count.
+        {
+            let min_recipients: u32 = env
+                .storage()
+                .instance()
+                .get(&min_recipients_key())
+                .unwrap_or(2u32);
+            if (recipients.len() as u32) < min_recipients {
+                panic_with_error!(env, ContractError::TooFewRecipients);
+            }
+        }
         // Issue #483: reject zero or negative amounts at entry point.
         for amt in amounts.iter() {
             guard_nonzero_amount(amt).expect("ZeroAmountNotAllowed");
@@ -5231,13 +5379,10 @@ impl SplitContract {
             );
         }
         assert!(bonus_pool >= 0, "bonus_pool must be non-negative");
-        assert!(penalty_bps <= 10_000, "penalty_bps must be ≤ 10000");
+        assert_valid_bps(penalty_bps).expect("penalty_bps must be ≤ 10000");
         assert!(min_funding_bps <= 10_000, "min_funding_bps must be ≤ 10000");
-        assert!(tax_bps <= 10_000, "tax_bps must be ≤ 10000");
-        assert!(
-            insurance_premium_bps <= 10_000,
-            "insurance_premium_bps must be ≤ 10000"
-        );
+        assert_valid_bps(tax_bps).expect("tax_bps must be ≤ 10000");
+        assert_valid_bps(insurance_premium_bps).expect("insurance_premium_bps must be ≤ 10000");
         // Issue #489: early-bird discounted platform fee must not exceed the
         // standard fee in effect for this creator at creation time.
         assert!(
@@ -5331,19 +5476,15 @@ impl SplitContract {
         }
 
         if !tranches.is_empty() {
-            let total_bps: u32 = tranches.iter().map(|t| t.basis_points).sum();
-            assert!(
-                total_bps == 10_000,
-                "tranches must sum to 10000 basis points"
-            );
+            let total_bps: u32 = tranches.iter().map(|t| t.basis_points).fold(0u32, |a, b| a.saturating_add(b));
+            validation::assert_bps_total(total_bps)
+                .expect("tranches must sum to 10000 basis points");
         }
 
         if !release_stages.is_empty() {
-            let total_bps: u32 = release_stages.iter().sum();
-            assert!(
-                total_bps == 10_000,
-                "release_stages must sum to 10000 basis points"
-            );
+            let total_bps: u32 = release_stages.iter().fold(0u32, |a, b| a.saturating_add(b));
+            validation::assert_bps_total(total_bps)
+                .expect("release_stages must sum to 10000 basis points");
         }
         let milestones = milestones.unwrap_or_else(|| Vec::new(env));
         validate_milestones(env, &milestones);
@@ -5650,7 +5791,7 @@ impl SplitContract {
             tax_authority,
             insurance_premium_bps,
             insurance_fund: 0,
-            oracle_address,
+            condition_oracle,
             condition_met: false,
             smart_route,
             overflow_behavior,
@@ -5953,7 +6094,7 @@ impl SplitContract {
                 Vec::new(&env), // release_stages
                 None,           // price_oracle
                 Vec::new(&env), // swap_tokens
-                None,           // oracle_address
+                None,           // condition_oracle
                 0_u32,          // tax_bps
                 None,           // tax_authority
                 0_u32,          // insurance_premium_bps
@@ -6222,7 +6363,7 @@ impl SplitContract {
             signatures: source.signatures.clone(),
             approver: source.approver.clone(),
             approved: source.approved,
-            oracle_address: source.oracle_address.clone(),
+            condition_oracle: source.condition_oracle.clone(),
             condition_met: source.condition_met,
             penalty_bps: source.penalty_bps,
             penalty_deadline: source.penalty_deadline,
@@ -6501,7 +6642,7 @@ impl SplitContract {
                     || in_group
                     || !invoice.co_signers.is_empty()
                     || env.storage().persistent().has(&cosigners_key(invoice_id))
-                    || (invoice.oracle_address.is_some() && !invoice.condition_met)
+                    || (invoice.condition_oracle.is_some() && !invoice.condition_met)
                     || (invoice.min_funding_bps > 0
                         && invoice.funded
                             < (invoice.amounts.iter().sum::<i128>()
@@ -6695,7 +6836,7 @@ impl SplitContract {
                 || in_group
                 || !invoice.co_signers.is_empty()
                 || env.storage().persistent().has(&cosigners_key(invoice_id))
-                || (invoice.oracle_address.is_some() && !invoice.condition_met)
+                || (invoice.condition_oracle.is_some() && !invoice.condition_met)
                 || (invoice.min_funding_bps > 0
                     && invoice.funded
                         < (invoice.amounts.iter().sum::<i128>() * invoice.min_funding_bps as i128
@@ -7357,7 +7498,7 @@ impl SplitContract {
                 || in_group
                 || !invoice.co_signers.is_empty()
                 || env.storage().persistent().has(&cosigners_key(invoice_id))
-                || (invoice.oracle_address.is_some() && !invoice.condition_met)
+                || (invoice.condition_oracle.is_some() && !invoice.condition_met)
                 || (invoice.min_funding_bps > 0
                     && invoice.funded
                         < (invoice.amounts.iter().sum::<i128>() * invoice.min_funding_bps as i128
@@ -7629,7 +7770,7 @@ impl SplitContract {
                 || in_group
                 || !invoice.co_signers.is_empty()
                 || env.storage().persistent().has(&cosigners_key(invoice_id))
-                || (invoice.oracle_address.is_some() && !invoice.condition_met)
+                || (invoice.condition_oracle.is_some() && !invoice.condition_met)
                 || (invoice.min_funding_bps > 0
                     && invoice.funded
                         < (invoice.amounts.iter().sum::<i128>() * invoice.min_funding_bps as i128
@@ -7740,7 +7881,7 @@ impl SplitContract {
                     || in_group
                     || !inv.co_signers.is_empty()
                     || env.storage().persistent().has(&cosigners_key(p.invoice_id))
-                    || (inv.oracle_address.is_some() && !inv.condition_met)
+                    || (inv.condition_oracle.is_some() && !inv.condition_met)
                     || (inv.min_funding_bps > 0
                         && inv.funded
                             < (inv.amounts.iter().sum::<i128>() * inv.min_funding_bps as i128
@@ -8781,7 +8922,7 @@ impl SplitContract {
         let mut invoice = load_invoice(&env, invoice_id);
         assert!(!invoice.disputed, "invoice is disputed");
         let oracle = invoice
-            .oracle_address
+            .condition_oracle
             .as_ref()
             .expect("no oracle set for invoice");
         oracle.require_auth();
@@ -11047,7 +11188,7 @@ impl SplitContract {
             signatures: Vec::new(&env),
             approver: None,
             approved: false,
-            oracle_address: old_invoice.oracle_address.clone(),
+            condition_oracle: old_invoice.condition_oracle.clone(),
             condition_met: false,
             penalty_bps: old_invoice.penalty_bps,
             penalty_deadline: old_invoice.penalty_deadline,
@@ -11684,7 +11825,7 @@ impl SplitContract {
             old_invoice.release_stages.clone(),
             old_invoice.price_oracle.clone(),
             old_invoice.swap_tokens.clone(),
-            old_invoice.oracle_address.clone(),
+            old_invoice.condition_oracle.clone(),
             old_invoice.tax_bps,
             old_invoice.tax_authority.clone(),
             old_invoice.insurance_premium_bps,
@@ -12721,7 +12862,7 @@ impl SplitContract {
                 signatures: Vec::new(&env),
                 approver: None,
                 approved: false,
-                oracle_address: None,
+                condition_oracle: None,
                 condition_met: false,
                 penalty_bps: 0,
                 penalty_deadline: 0,
@@ -12847,7 +12988,7 @@ impl SplitContract {
                         signatures: Vec::new(&env),
                         approver: None,
                         approved: false,
-                        oracle_address: None,
+                        condition_oracle: None,
                         condition_met: false,
                         penalty_bps: 0,
                         penalty_deadline: 0,
@@ -13793,7 +13934,7 @@ impl SplitContract {
                 || in_group
                 || !invoice.co_signers.is_empty()
                 || env.storage().persistent().has(&cosigners_key(invoice_id))
-                || (invoice.oracle_address.is_some() && !invoice.condition_met);
+                || (invoice.condition_oracle.is_some() && !invoice.condition_met);
             if guarded {
                 save_invoice(&env, invoice_id, &invoice);
             } else {
@@ -15063,8 +15204,9 @@ impl SplitContract {
         );
 
         // Ratios must sum to exactly 10 000 bps.
-        let ratio_sum: u32 = ratios.iter().sum();
-        assert!(ratio_sum == 10_000, "ratios must sum to 10000 basis points");
+        let ratio_sum: u32 = ratios.iter().fold(0u32, |a, b| a.saturating_add(b));
+        validation::assert_bps_total(ratio_sum)
+            .expect("ratios must sum to 10000 basis points");
 
         // Assign the next template ID for this creator.
         let next_id: u64 = env
@@ -15215,7 +15357,7 @@ impl SplitContract {
             Vec::new(&env),       // release_stages
             None,                 // price_oracle
             Vec::new(&env),       // swap_tokens
-            None,                 // oracle_address
+            None,                 // condition_oracle
             0,                    // tax_bps
             None,                 // tax_authority
             0,                    // insurance_premium_bps
@@ -15274,6 +15416,35 @@ impl SplitContract {
             .expect("template not found")
     }
 
+    /// Issue #563: Extend the TTL of a live invoice.
+    ///
+    /// Callable by any address. Bumps the TTL of all DataKey entries associated
+    /// with the invoice to the maximum allowed duration, preventing silent
+    /// expiration during long-running campaigns or dispute periods.
+    pub fn bump_invoice_ttl(env: Env, invoice_id: u64) {
+        let _invoice = load_invoice(&env, invoice_id);
+
+        // Bump TTL for all known invoice keys
+        let min_ttl = constants::MIN_INVOICE_TTL_LEDGERS;
+        let max_ttl = constants::MAX_INVOICE_TTL_LEDGERS;
+
+        use storage_keys::InvoiceKey;
+        let keys = [
+            InvoiceKey::Invoice(invoice_id),
+            InvoiceKey::InvoiceExt(invoice_id),
+            InvoiceKey::InvoiceExt2(invoice_id),
+            InvoiceKey::RecipientsList(invoice_id),
+            InvoiceKey::AmountsList(invoice_id),
+            InvoiceKey::PaidFlags(invoice_id),
+        ];
+
+        for key in &keys {
+            env.storage()
+                .persistent()
+                .bump(key, min_ttl, max_ttl);
+        }
+    }
+
     /// #522 — Walk the parent chain and verify:
     /// 1. The chain depth does not exceed `MAX_PARENT_DEPTH`.
     /// 2. Each referenced invoice exists.
@@ -15290,6 +15461,36 @@ impl SplitContract {
         // Recurse if this parent also has a parent.
         if let Some(grandparent_id) = parent.parent_invoice_id {
             Self::_validate_parent(env, grandparent_id, depth + 1);
+        }
+    }
+
+    /// Get the creator address for an invoice.
+    pub fn get_invoice_creator(env: Env, invoice_id: u64) -> Address {
+        let invoice = load_invoice(&env, invoice_id);
+        invoice.creator
+    }
+
+    /// Get the list of recipient addresses for an invoice.
+    pub fn get_invoice_recipients(env: Env, invoice_id: u64) -> Vec<Address> {
+        let invoice = load_invoice(&env, invoice_id);
+        invoice.recipients
+    }
+
+    /// Get the number of payments made toward an invoice.
+    pub fn get_invoice_payment_count(env: Env, invoice_id: u64) -> u32 {
+        let invoice = load_invoice(&env, invoice_id);
+        invoice.payments.len() as u32
+    }
+
+    /// Get the funding percentage of an invoice as basis points.
+    /// Returns (funded * 10_000 / total) as u32, or 0 if total is 0.
+    pub fn get_invoice_funding_percentage(env: Env, invoice_id: u64) -> u32 {
+        let invoice = load_invoice(&env, invoice_id);
+        let total: i128 = invoice.amounts.iter().sum();
+        if total == 0 {
+            0
+        } else {
+            ((invoice.funded * 10_000) / total) as u32
         }
     }
 }

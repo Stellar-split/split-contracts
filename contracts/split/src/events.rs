@@ -1,3 +1,30 @@
+//! # Event naming convention
+//!
+//! All split-contracts events follow a consistent topic layout:
+//! `(symbol_short!("split"), <action>, invoice_id?)`.
+//!
+//! - `<action>` is an 8-char symbol identifying the lifecycle stage
+//!   (`created`, `paid`, `released`, `refunded`, `st_chg`, …).
+//! - `invoice_id` is included as the third topic for per-invoice events
+//!   so indexers can filter by invoice without inspecting event data.
+//!
+//! ## When to call `next_seq`
+//!
+//! Events that represent discrete, countable occurrences on a single invoice
+//! should include an auto-incrementing `event_seq` (fetched via `next_seq`)
+//! as the last field in the event data. This gives indexers a stable,
+//! per-invoice ordering key. Do **not** call `next_seq` for:
+//! - global/contract-level events with no `invoice_id`
+//! - events that already contain a unique identifier (e.g. `action_id`,
+//!   `milestone_number`, `new_id`)
+//!
+//! ## `symbol_short!` vs `Symbol::new`
+//!
+//! Prefer `symbol_short!("abbr")` for event action topics because they are
+//! short, fixed strings. Use `Symbol::new(env, "LongName")` only when the
+//! symbol exceeds the short-macro length limit or must be constructed
+//! dynamically.
+
 use crate::types::{DisputeOutcome, FeeSplit, InvoiceStatus, RepScore, TimelockAction};
 use soroban_sdk::{contracttype, symbol_short, Address, BytesN, Env, String, Vec};
 
@@ -109,7 +136,7 @@ pub fn invoice_released(env: &Env, invoice_id: u64, recipients: &Vec<Address>) {
 
 /// Emitted when an invoice is refunded after deadline.
 /// Topics: (split, refunded, invoice_id)
-/// Data: (event_seq)
+/// Data: (invoice_id, event_seq)
 pub fn invoice_refunded(env: &Env, invoice_id: u64) {
     let event_seq = next_seq(env, invoice_id);
     env.events().publish(
@@ -118,7 +145,7 @@ pub fn invoice_refunded(env: &Env, invoice_id: u64) {
             symbol_short!("refunded"),
             invoice_id,
         ),
-        (event_seq,),
+        (invoice_id, event_seq),
     );
 }
 
@@ -236,7 +263,7 @@ pub fn recipients_rebalanced(
 
 /// Emitted when an invoice is archived to instance storage.
 /// Topics: (split, archived, invoice_id)
-/// Data: ()
+/// Data: (invoice_id, event_seq)
 pub fn invoice_archived(env: &Env, invoice_id: u64) {
     let event_seq = next_seq(env, invoice_id);
     env.events().publish(
@@ -245,7 +272,7 @@ pub fn invoice_archived(env: &Env, invoice_id: u64) {
             symbol_short!("archived"),
             invoice_id,
         ),
-        (event_seq,),
+        (invoice_id, event_seq),
     );
 }
 
@@ -276,15 +303,16 @@ pub fn delegate_revoked(env: &Env, invoice_id: u64, revoker: &Address) {
 
 /// Emitted when an invoice is partially released.
 /// Topics: (split, part_rel, invoice_id)
-/// Data: recipients
+/// Data: (recipients, event_seq)
 pub fn invoice_partially_released(env: &Env, invoice_id: u64, recipients: &Vec<Address>) {
+    let event_seq = next_seq(env, invoice_id);
     env.events().publish(
         (
             symbol_short!("split"),
             symbol_short!("part_rel"),
             invoice_id,
         ),
-        recipients.clone(),
+        (recipients.clone(), event_seq),
     );
 }
 
@@ -1663,5 +1691,25 @@ pub fn recipient_share_unlocked(
     env.events().publish(
         (symbol_short!("split"), symbol_short!("sh_unlk"), invoice_id),
         (recipient.clone(), admin.clone()),
+    );
+}
+
+/// Issue #528: Emitted when an admin transfer is proposed.
+/// Topics: (split, adm_prop)
+/// Data: (current_admin, proposed_admin)
+pub fn admin_transfer_proposed(env: &Env, current_admin: &Address, proposed_admin: &Address) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("adm_prop")),
+        (current_admin.clone(), proposed_admin.clone()),
+    );
+}
+
+/// Issue #528: Emitted when an admin transfer is completed.
+/// Topics: (split, adm_done)
+/// Data: new_admin
+pub fn admin_transfer_completed(env: &Env, new_admin: &Address) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("adm_done")),
+        new_admin.clone(),
     );
 }

@@ -4,31 +4,9 @@
 //! across recipients proportionally, ensuring every stroop is accounted for
 //! (i.e. `sum(result) == total` always holds).
 
-use soroban_sdk::{Address, BytesN, Env, Vec};
-
-use crate::error::ContractError;
-
-// ---------------------------------------------------------------------------
-// Platform fee calculation
-// ---------------------------------------------------------------------------
-
-/// Calculate the platform fee for a given funded amount and fee rate in
-/// basis points (1 bps = 0.01%).
-///
-/// # Formula
-/// `fee = funded * fee_bps / 10_000`
-///
-/// Uses checked arithmetic to prevent silent overflow on large amounts.
-///
-/// # Errors
-/// Returns [`ContractError::ArithmeticOverflow`] if the intermediate
-/// multiplication `funded * fee_bps` overflows `i128`.
-pub fn calc_platform_fee(funded: i128, fee_bps: u32) -> Result<i128, ContractError> {
-    let numerator = funded
-        .checked_mul(fee_bps as i128)
-        .ok_or(ContractError::ArithmeticOverflow)?;
-    Ok(numerator / 10_000)
-}
+#[allow(unused_imports)]
+use crate::types::BASIS_POINTS_TOTAL;
+use soroban_sdk::{Env, Vec};
 
 /// Distribute `total` among recipients according to their `ratios` out of
 /// `denom`, using the largest-remainder method to handle rounding.
@@ -37,7 +15,7 @@ pub fn calc_platform_fee(funded: i128, fee_bps: u32) -> Result<i128, ContractErr
 /// * `env`    – Soroban environment (needed to allocate the result `Vec`)
 /// * `total`  – total amount to distribute (stroops); must be ≥ 0
 /// * `ratios` – relative weight of each recipient (must be non-empty, all ≥ 0)
-/// * `denom`  – sum of all ratios (must be > 0)
+/// * `denom`  – sum of all ratios (must be > 0); typically [`BASIS_POINTS_TOTAL`]
 ///
 /// # Guarantees
 /// * `result.iter().sum::<i128>() == total` always
@@ -47,6 +25,11 @@ pub fn calc_platform_fee(funded: i128, fee_bps: u32) -> Result<i128, ContractErr
 /// # Panics
 /// * if `ratios` is empty
 /// * if `denom` is zero
+// NOTE: if you call this function and ignore its return value the Rust
+// compiler will emit a `#[must_use]` warning:
+//   warning: unused return value of `distribute_with_remainder` that must be used
+// This ensures callers never silently drop the distribution result.
+#[must_use = "the distribution result must be applied to recipients"]
 pub fn distribute_with_remainder(
     env: &Env,
     total: i128,
@@ -273,6 +256,34 @@ mod tests {
         let env = Env::default();
         // Real invoice: 1_000_000_000 stroops split 100_000:200_000:300_000
         assert_exact(&env, 1_000_000_000, &[100_000, 200_000, 300_000], 600_000);
+    }
+
+    #[test]
+    fn single_recipient_gets_full_amount() {
+        let env = Env::default();
+        let r = distribute_with_remainder(&env, 12345, &make_ratios(&env, &[1]), 1);
+        assert_eq!(r.len(), 1);
+        assert_eq!(r.get(0), Some(12345));
+    }
+
+    #[test]
+    fn sum_invariant_holds_with_unequal_ratios() {
+        let env = Env::default();
+        // Case 1: 3 recipients with ratios [1, 1, 1] and total=10
+        // Total is not evenly divisible by denom (10 % 3 != 0)
+        let r1 = distribute_with_remainder(&env, 10, &make_ratios(&env, &[1, 1, 1]), 3);
+        let sum1: i128 = r1.iter().sum();
+        assert_eq!(sum1, 10);
+
+        // Case 2: 4 recipients with ratios [2, 3, 1, 4] and total=100
+        let r2 = distribute_with_remainder(&env, 100, &make_ratios(&env, &[2, 3, 1, 4]), 10);
+        let sum2: i128 = r2.iter().sum();
+        assert_eq!(sum2, 100);
+
+        // Case 3: 2 recipients with ratios [1, 3] and total=999
+        let r3 = distribute_with_remainder(&env, 999, &make_ratios(&env, &[1, 3]), 4);
+        let sum3: i128 = r3.iter().sum();
+        assert_eq!(sum3, 999);
     }
 
     /// Property-based style test: exhaustively verify sum == total for many inputs.
