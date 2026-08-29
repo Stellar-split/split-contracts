@@ -9,23 +9,10 @@ wasm32-unknown-unknown/
 .env.local
 .env.*.local
 
-# OS files
+# OS / Editor files
 .DS_Store
 Thumbs.db
 desktop.ini
-.vscode/
-.idea/
-*.log
-*.tmp
-*.bak
-test_snapshots/
-snapshots/
-**/snapshots/
-*.swp
-*.swo
-*~
-
-# Editor/IDE
 .vscode/
 .idea/
 *.swp
@@ -34,12 +21,11 @@ snapshots/
 *.sublime-project
 *.sublime-workspace
 
-# Test snapshots
+# Test snapshots and generated artifacts
 **/__snapshots__/
 *.snap
-**/test_snapshots/
+*.snap.orig
 *.snapshot
-**/snapshots/
 *.snap.bak
 tests/snapshots/
 tests/fixtures/
@@ -72,7 +58,7 @@ profdata/
 .*.swp
 .*.swo
 
-# Node / JS tooling (if any frontend tooling is added)
+# Node / JS tooling
 node_modules/
 dist/
 .pnp
