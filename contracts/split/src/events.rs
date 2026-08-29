@@ -263,7 +263,7 @@ pub fn recipients_rebalanced(
 
 /// Emitted when an invoice is archived to instance storage.
 /// Topics: (split, archived, invoice_id)
-/// Data: ()
+/// Data: (invoice_id, event_seq)
 pub fn invoice_archived(env: &Env, invoice_id: u64) {
     let event_seq = next_seq(env, invoice_id);
     env.events().publish(
@@ -272,7 +272,7 @@ pub fn invoice_archived(env: &Env, invoice_id: u64) {
             symbol_short!("archived"),
             invoice_id,
         ),
-        (event_seq,),
+        (invoice_id, event_seq),
     );
 }
 
@@ -302,15 +302,16 @@ pub fn delegate_revoked(env: &Env, invoice_id: u64) {
 
 /// Emitted when an invoice is partially released.
 /// Topics: (split, part_rel, invoice_id)
-/// Data: recipients
+/// Data: (recipients, event_seq)
 pub fn invoice_partially_released(env: &Env, invoice_id: u64, recipients: &Vec<Address>) {
+    let event_seq = next_seq(env, invoice_id);
     env.events().publish(
         (
             symbol_short!("split"),
             symbol_short!("part_rel"),
             invoice_id,
         ),
-        recipients.clone(),
+        (recipients.clone(), event_seq),
     );
 }
 

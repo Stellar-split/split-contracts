@@ -1236,6 +1236,11 @@ impl Invoice {
     ) -> Self {
         let bytes = &compact.data;
 
+        // Guard: require at least 25 bytes (1 status + 16 funded + 8 deadline).
+        if bytes.len() < 25 {
+            panic!("from_compact: data too short");
+        }
+
         // Unpack status (1 byte)
         let status_byte = bytes.get(0).expect("from_compact: byte 0 (status) missing");
         let status = match status_byte {
@@ -1563,9 +1568,11 @@ impl InvoiceStatus {
         }
     }
 
-    /// Decode from a single byte.  Unknown values map to Pending.
+    /// Decode from a single byte.  Unknown byte values panic to prevent
+    /// silent data corruption from masked migration errors (#616).
     pub fn from_u8(v: u8) -> Self {
         match v {
+            0 => InvoiceStatus::Pending,
             1 => InvoiceStatus::Released,
             2 => InvoiceStatus::Refunded,
             3 => InvoiceStatus::Cancelled,
@@ -1574,7 +1581,7 @@ impl InvoiceStatus {
             6 => InvoiceStatus::PartiallyReleased,
             7 => InvoiceStatus::Finalised,
             8 => InvoiceStatus::Deleted,
-            _ => InvoiceStatus::Pending,
+            _ => panic!("unknown InvoiceStatus byte: {v}"),
         }
     }
 }
