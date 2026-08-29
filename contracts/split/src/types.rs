@@ -14,8 +14,14 @@ pub struct AssetPair {
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub enum OverflowBehavior {
+    /// Reject the payment outright. The payer receives an error and the
+    /// transaction does not credit the invoice.
     Reject,
+    /// Accept the full payment and mark the surplus for refund to the payer
+    /// at release time.
     Refund,
+    /// Accept the full payment and treat the surplus as a protocol donation;
+    /// no refund is issued.
     Donate,
 }
 
@@ -26,10 +32,19 @@ pub enum OverflowBehavior {
 /// default, and the value legacy invoices are migrated to — preserves the
 /// historical behaviour by delegating to the per-invoice [`OverflowBehavior`]
 /// setting, so invoices created before this field existed are unaffected.
+///
+/// # Relationship
+///
+/// `OverfundingPolicy` is the *outer* policy selector stored on the invoice.
+/// When it is `Cap`, the contract falls back to the per-invoice
+/// [`OverflowBehavior`] value to decide the exact outcome. The other two
+/// variants (`AcceptAll`, `ReturnSurplus`) bypass `OverflowBehavior` entirely
+/// and implement their own semantics directly in `_pay`.
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub enum OverfundingPolicy {
-    /// Reject any payment that would take `funded` past the invoice total.
+    /// Preserve legacy behaviour by delegating to the invoice's
+    /// [`OverflowBehavior`] field.
     Cap,
     /// Accept the payment in full; `funded` is allowed to exceed the total and
     /// the surplus is distributed pro-rata to recipients at release time.
@@ -151,6 +166,8 @@ pub enum InvoiceStatus {
     Finalised,
     /// Soft-deleted invoice — tombstone record preserved for audit trail.
     Deleted,
+    /// Issue #564: Payout in progress — intermediate state during release_funds.
+    PayoutInProgress,
 }
 
 // ---------------------------------------------------------------------------
@@ -414,7 +431,7 @@ pub struct InvoiceOptions {
     /// Issue: pre-agreed auto-resolution rules evaluated in order when auto_resolve() is called.
     pub auto_resolve_rules: Vec<ResolveRule>,
     /// Optional oracle address that must confirm the condition before release.
-    pub oracle_address: Option<Address>,
+    pub condition_oracle: Option<Address>,
     /// Optional cross-chain reference carried through invoice creation.
     pub cross_chain_ref: Option<String>,
     /// Issue #98: restrict payments to this allowlist; None = open.
@@ -584,7 +601,7 @@ pub struct InvoiceExt {
     pub signatures: Vec<Address>,
     pub approver: Option<Address>,
     pub approved: bool,
-    pub oracle_address: Option<Address>,
+    pub condition_oracle: Option<Address>,
     pub condition_met: bool,
     pub penalty_bps: u32,
     pub penalty_deadline: u64,
@@ -619,6 +636,56 @@ pub struct InvoiceExt {
     pub penalty_tiers: Vec<PenaltyTier>,
     pub allowed_callers: Option<Vec<Address>>,
     pub refund_grace_secs: Option<u64>,
+}
+
+impl InvoiceExt {
+    /// Issue #629: Return an InvoiceExt with all fields set to their zero /
+    /// empty / None defaults.  Use this as a starting point when constructing
+    /// a new InvoiceExt so that new fields are never accidentally omitted.
+    pub fn default(env: &Env) -> Self {
+        InvoiceExt {
+            co_signers: Vec::new(env),
+            required_signatures: 0,
+            signatures: Vec::new(env),
+            approver: None,
+            approved: false,
+            condition_oracle: None,
+            condition_met: false,
+            penalty_bps: 0,
+            penalty_deadline: 0,
+            min_funding_bps: 0,
+            release_stages: Vec::new(env),
+            released_stages: 0,
+            allowed_payers: None,
+            price_oracle: None,
+            base_amounts: Vec::new(env),
+            swap_tokens: Vec::new(env),
+            tax_bps: 0,
+            tax_authority: None,
+            insurance_premium_bps: 0,
+            insurance_fund: 0,
+            smart_route: false,
+            convert_to_stream: false,
+            accepted_tokens: Vec::new(env),
+            forward_to: None,
+            forward_invoice_id: None,
+            split_rules: Vec::new(env),
+            auto_resolve_rules: Vec::new(env),
+            creator_cosigner: None,
+            velocity_limit: 0,
+            velocity_window: 0,
+            parent_invoice_id: None,
+            pause_reason: None,
+            auto_resume_at: None,
+            payment_cooldown_secs: None,
+            max_payments_per_window: None,
+            payment_window_secs: None,
+            scheduled_release_at: None,
+            penalty_tiers: Vec::new(env),
+            allowed_callers: None,
+            refund_grace_secs: None,
+        }
+    }
 }
 
 #[contracttype]
@@ -686,6 +753,54 @@ pub struct InvoiceExt2 {
     pub ratio_denominator: u64,
     /// Issue #518: per-recipient split ratios (parallel to recipients vec).
     pub ratios: Vec<u32>,
+}
+
+impl InvoiceExt2 {
+    /// Issue #629: Return an InvoiceExt2 with all fields set to their zero /
+    /// empty / None defaults.  Use this as a starting point when constructing
+    /// a new InvoiceExt2 so that new fields are never accidentally omitted.
+    pub fn default(env: &Env) -> Self {
+        InvoiceExt2 {
+            notification_contract: None,
+            overflow_behavior: OverflowBehavior::Reject,
+            cross_chain_ref: None,
+            require_kyc: false,
+            arbiter: None,
+            disputed: false,
+            admin_frozen: false,
+            auction_on_expiry: false,
+            auction_end: 0,
+            bids: Vec::new(env),
+            min_payment: 0,
+            min_funding_amount: 0,
+            priorities: Vec::new(env),
+            target_usd_cents: None,
+            refunded_addresses: Vec::new(env),
+            oracle: None,
+            oracle_asset_pair_base: None,
+            oracle_asset_pair_quote: None,
+            min_payer_rep: None,
+            escrow_hold_period: None,
+            held_until: None,
+            milestones: Vec::new(env),
+            milestones_released: 0,
+            recipient_max_payouts: Vec::new(env),
+            twafr_numerator: 0,
+            twafr_last_ledger: 0,
+            release_condition_hash: None,
+            recipient_whitelist_enabled: false,
+            // Issue #420: Cap delegates to overflow_behavior and preserves
+            // historical semantics for invoices created before this field existed.
+            overfunding_policy: OverfundingPolicy::Cap,
+            contributor_allowlist: None,
+            early_bird_window_ledgers: 0,
+            early_bird_fee_bps: 0,
+            early_bird_fee_credit: 0,
+            creator_fee_bps: 0,
+            ratio_denominator: 10_000,
+            ratios: Vec::new(env),
+        }
+    }
 }
 
 /// Issue #211: A single escalating penalty tier (seconds_after_deadline, bps).
@@ -787,7 +902,7 @@ pub struct Invoice {
     pub signatures: Vec<Address>,
     pub approver: Option<Address>,
     pub approved: bool,
-    pub oracle_address: Option<Address>,
+    pub condition_oracle: Option<Address>,
     pub condition_met: bool,
     pub penalty_bps: u32,
     pub penalty_deadline: u64,
@@ -924,7 +1039,7 @@ impl Invoice {
                 signatures: self.signatures,
                 approver: self.approver,
                 approved: self.approved,
-                oracle_address: self.oracle_address,
+                condition_oracle: self.condition_oracle,
                 condition_met: self.condition_met,
                 penalty_bps: self.penalty_bps,
                 penalty_deadline: self.penalty_deadline,
@@ -1033,7 +1148,7 @@ impl Invoice {
             signatures: ext.signatures,
             approver: ext.approver,
             approved: ext.approved,
-            oracle_address: ext.oracle_address,
+            condition_oracle: ext.condition_oracle,
             condition_met: ext.condition_met,
             penalty_bps: ext.penalty_bps,
             penalty_deadline: ext.penalty_deadline,
@@ -1219,8 +1334,13 @@ impl Invoice {
     ) -> Self {
         let bytes = &compact.data;
 
+        // Guard: require at least 25 bytes (1 status + 16 funded + 8 deadline).
+        if bytes.len() < 25 {
+            panic!("from_compact: data too short");
+        }
+
         // Unpack status (1 byte)
-        let status_byte = bytes.get(0).unwrap();
+        let status_byte = bytes.get(0).expect("from_compact: byte 0 (status) missing");
         let status = match status_byte {
             0 => InvoiceStatus::Pending,
             1 => InvoiceStatus::Released,
@@ -1237,14 +1357,18 @@ impl Invoice {
         // Unpack funded (16 bytes)
         let mut funded_bytes = [0u8; 16];
         for (i, byte) in funded_bytes.iter_mut().enumerate() {
-            *byte = bytes.get((1 + i) as u32).unwrap();
+            *byte = bytes
+                .get((1 + i) as u32)
+                .expect("from_compact: funded byte missing");
         }
         let funded = i128::from_be_bytes(funded_bytes);
 
         // Unpack deadline (8 bytes)
         let mut deadline_bytes = [0u8; 8];
         for (i, byte) in deadline_bytes.iter_mut().enumerate() {
-            *byte = bytes.get((17 + i) as u32).unwrap();
+            *byte = bytes
+                .get((17 + i) as u32)
+                .expect("from_compact: deadline byte missing");
         }
         let deadline = u64::from_be_bytes(deadline_bytes);
 
@@ -1260,12 +1384,24 @@ impl Invoice {
     /// New fields are filled with their default (empty / zero) values.
     pub fn from_legacy(old: LegacyInvoice, env: &Env) -> Self {
         let funding_token = old.tokens.get(0).expect("no token").clone();
-        Invoice {
+
+        // Issue #629: start from defaults and override only the fields that
+        // LegacyInvoice carries, so that new fields are never accidentally
+        // omitted when the schema grows.
+        let mut ext = InvoiceExt::default(env);
+        ext.base_amounts = old.amounts.clone();
+
+        let mut ext2 = InvoiceExt2::default(env);
+        // Issue #420: legacy invoices predate the policy field; `Cap`
+        // delegates to `overflow_behavior` and so preserves their
+        // original overfunding semantics exactly.
+        ext2.overfunding_policy = OverfundingPolicy::Cap;
+
+        let core = InvoiceCore {
             version: 2,
             creator: old.creator,
             co_creators: old.co_creators,
             recipients: old.recipients,
-            base_amounts: old.amounts.clone(),
             amounts: old.amounts,
             tokens: old.tokens,
             funding_token,
@@ -1284,88 +1420,12 @@ impl Invoice {
             prerequisite_id: old.prerequisite_id,
             tranches: old.tranches,
             released_bps: old.released_bps,
-            co_signers: Vec::new(env),
-            required_signatures: 0,
-            signatures: Vec::new(env),
-            approver: None,
-            approved: false,
-            oracle_address: None,
-            condition_met: false,
-            penalty_bps: 0,
-            penalty_deadline: 0,
-            min_funding_bps: 0,
-            release_stages: Vec::new(env),
-            released_stages: 0,
-            allowed_payers: None,
-            price_oracle: None,
-            swap_tokens: Vec::new(env),
-            tax_bps: 0,
-            tax_authority: None,
-            insurance_premium_bps: 0,
-            insurance_fund: 0,
-            smart_route: false,
-            convert_to_stream: false,
-            accepted_tokens: Vec::new(env),
-            require_kyc: false,
-            arbiter: None,
-            disputed: false,
-            admin_frozen: false,
-            auction_on_expiry: false,
-            auction_end: 0,
-            bids: Vec::new(env),
-            min_payment: 0,
-            min_funding_amount: 0,
-            split_rules: Vec::new(env),
-            auto_resolve_rules: Vec::new(env),
-            creator_cosigner: None,
-            velocity_limit: 0,
-            velocity_window: 0,
-            pause_reason: None,
-            auto_resume_at: None,
-            payment_cooldown_secs: None,
-            max_payments_per_window: None,
-            payment_window_secs: None,
-            scheduled_release_at: None,
-            refund_grace_secs: None,
-            penalty_tiers: Vec::<PenaltyTier>::new(env),
-            allowed_callers: None,
-            forward_to: None,
-            forward_invoice_id: None,
-            notification_contract: None,
-            overflow_behavior: OverflowBehavior::Reject,
-            cross_chain_ref: None,
             clone_depth: 0,
-            parent_invoice_id: None,
-            priorities: Vec::new(env),
-            target_usd_cents: None,
-            refunded_addresses: Vec::new(env),
-            oracle: None,
-            oracle_asset_pair_base: None,
-            oracle_asset_pair_quote: None,
-            min_payer_rep: None,
-            escrow_hold_period: None,
-            held_until: None,
-            milestones: Vec::new(env),
-            milestones_released: 0,
-            recipient_max_payouts: Vec::new(env),
-            twafr_numerator: 0,
-            twafr_last_ledger: 0,
-            release_condition_hash: None,
-            recipient_whitelist_enabled: false,
-            // Issue #420: legacy invoices predate the policy field; `Cap`
-            // delegates to `overflow_behavior` and so preserves their
-            // original overfunding semantics exactly.
-            overfunding_policy: OverfundingPolicy::Cap,
             predecessor_id: None,
             metadata_hash: None,
-            contributor_allowlist: None,
-            early_bird_window_ledgers: 0,
-            early_bird_fee_bps: 0,
-            early_bird_fee_credit: 0,
-            creator_fee_bps: 0,
-            ratio_denominator: 10_000,
-            ratios: Vec::new(env),
-        }
+        };
+
+        Invoice::assemble(core, ext, ext2)
     }
 }
 
@@ -1542,9 +1602,11 @@ impl InvoiceStatus {
         }
     }
 
-    /// Decode from a single byte.  Unknown values map to Pending.
+    /// Decode from a single byte.  Unknown byte values panic to prevent
+    /// silent data corruption from masked migration errors (#616).
     pub fn from_u8(v: u8) -> Self {
         match v {
+            0 => InvoiceStatus::Pending,
             1 => InvoiceStatus::Released,
             2 => InvoiceStatus::Refunded,
             3 => InvoiceStatus::Cancelled,
@@ -1553,7 +1615,7 @@ impl InvoiceStatus {
             6 => InvoiceStatus::PartiallyReleased,
             7 => InvoiceStatus::Finalised,
             8 => InvoiceStatus::Deleted,
-            _ => InvoiceStatus::Pending,
+            _ => panic!("unknown InvoiceStatus byte: {v}"),
         }
     }
 }
@@ -1660,5 +1722,14 @@ pub struct RecipientAddress(pub u64, pub Address);
 pub struct RecipientShare {
     pub address: Address,
     pub locked: bool,
+}
+
+/// Issue #527: A single payment record stored in a contributor's persistent history.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct PaymentRecord {
+    pub invoice_id: u64,
+    pub amount: i128,
+    pub ledger: u32,
 }
 

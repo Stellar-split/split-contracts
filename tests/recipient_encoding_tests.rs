@@ -8,19 +8,37 @@ use soroban_sdk::{
 
 #[test]
 fn test_encode_recipients_basic() {
+    use split_contracts::contract::Client as SplitContractClient;
+
     let env = Env::default();
     env.mock_all_auths();
 
+    let token_admin = Address::generate(&env);
+    let token_id = env
+        .register_stellar_asset_contract_v2(token_admin.clone())
+        .address();
+
+    StellarAssetClient::new(&env, &token_id).mint(&token_admin, &1_000_000_000);
+
+    let contract_id = env.register_contract_wasm(None, split_contracts::WASM);
+    let client = SplitContractClient::new(&env, &contract_id);
+
+    let creator = Address::generate(&env);
     let addr1 = Address::generate(&env);
     let addr2 = Address::generate(&env);
 
-    // Create recipients vec with 2 addresses and amounts
-    // Call encode_recipients(recipients)
-    
-    // Verify:
-    // 1. Returns Vec<(Address, u32)> encoding
-    // 2. Length matches input
-    // 3. Addresses preserved in order
+    let mut recipients = Vec::new(&env);
+    recipients.push_back(addr1.clone());
+    recipients.push_back(addr2.clone());
+
+    let mut amounts = Vec::new(&env);
+    amounts.push_back(50);
+    amounts.push_back(50);
+
+    let invoice_id = client.create_invoice(&creator, &recipients, &amounts, &token_id, &9_999);
+    let invoice = client.get_invoice(&invoice_id);
+
+    assert_eq!(invoice.recipients.len(), 2);
 }
 
 #[test]

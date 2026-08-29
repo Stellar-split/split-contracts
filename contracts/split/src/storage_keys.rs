@@ -44,51 +44,117 @@ use soroban_sdk::{contracttype, symbol_short, Address, Env, IntoVal, Symbol, Try
 #[contracttype]
 #[derive(Clone)]
 pub enum StorageKey {
+    // --- Admin ---
+    /// Primary super-admin address.
     Admin,
+    /// Role map: Address → AdminRole for RBAC.
     Admins,
-    Paused,
-    PausedFns,
-    Treasury,
-    UsdcToken,
-    CreationFee,
-    PlatformFeeBps,
-    PlatformFeeWaiverList,
-    CreatorFeeWaiver,
-    Counter,
-    GlobalPayerLimit,
-    GlobalPayerWindow,
-    StreamContract,
-    CreatorWhitelist,
-    Compliance,
-    KycContract,
-    RateLimit,
-    RateWindow,
-    MaxCancelBps,
-    ReceiptFactory,
-    DashboardContract,
-    NftGate,
-    TimelockSecs,
-    TimelockActionCounter,
-    FeeTiers,
+    /// Pending admin address for two-step admin transfer.
     PendingAdmin,
+    /// Governance contract address.
     GovernanceContract,
+    /// Registered factory contracts.
     Factories,
-    DexContract,
-    TotalInvoices,
-    TotalVolume,
-    TotalReleased,
-    TotalRefunded,
-    TreasuryGroupCounter,
-    ContractVersion,
-    ArchiveAfterLedgers,
+
+    // --- Pause / Circuit breaker ---
+    /// Global pause flag (true = all write entry-points blocked).
+    Paused,
+    /// Set of individual function names that are selectively paused.
+    PausedFns,
+    /// Circuit-breaker active flag (issue #297).
     CircuitBreaker,
+    /// Human-readable reason string set when the circuit breaker fires.
     CircuitBreakerReason,
-    PlatformVolThresh,
-    PlatformVolMile,
-    CreatorVolThresh,
-    UpgradeProposal,
+
+    // --- Fees ---
+    /// One-time invoice creation fee (in stroops / token units).
+    CreationFee,
+    /// Platform fee in basis points charged on release.
+    PlatformFeeBps,
+    /// Addresses exempt from the platform fee.
+    PlatformFeeWaiverList,
+    /// Addresses exempt from the creation fee.
+    CreatorFeeWaiver,
+    /// Tiered fee schedule (Vec<FeeTier>).
+    FeeTiers,
+    /// Underlying protocol / network fee (issue #559 extension).
     ProtocolFee,
+
+    // --- Tokens / Treasury ---
+    /// Default USDC token contract address.
+    UsdcToken,
+    /// Primary treasury address for fee collection.
+    Treasury,
+    /// DEX router contract used for token swaps.
+    DexContract,
+
+    // --- Invoice limits / config ---
+    /// Global cap on the number of active payers per invoice.
+    GlobalPayerLimit,
+    /// Rolling-window length (in ledgers) for the global payer rate limit.
+    GlobalPayerWindow,
+    /// Generic monotonic counter used by various features.
+    Counter,
+    /// Maximum cancel-rate threshold in basis points.
+    MaxCancelBps,
+    /// Minimum invoice-volume before a platform milestone is triggered.
+    PlatformVolThresh,
+    /// Last platform-volume milestone that was recorded.
+    PlatformVolMile,
+    /// Per-creator volume threshold for milestone events.
+    CreatorVolThresh,
+    /// Number of ledgers after which a released/refunded invoice is archived.
+    ArchiveAfterLedgers,
+
+    // --- Contract config ---
+    /// Timelock duration in seconds for governance-gated actions.
+    TimelockSecs,
+    /// Monotonically increasing counter for timelock action IDs.
+    TimelockActionCounter,
+    /// Rate-limit cap: max calls per window for protected entry-points.
+    RateLimit,
+    /// Rolling-window length (in ledgers) for rate-limit tracking.
+    RateWindow,
+
+    // --- Integrations ---
+    /// Streaming payment contract address.
+    StreamContract,
+    /// Receipt-NFT factory contract address.
+    ReceiptFactory,
+    /// Dashboard analytics contract address.
+    DashboardContract,
+    /// NFT gate contract address (token-gated access).
+    NftGate,
+    /// KYC / compliance oracle contract address.
+    KycContract,
+    /// Compliance module contract address.
+    Compliance,
+    /// Creator allowlist for restricted-deployment mode.
+    CreatorWhitelist,
+
+    // --- Stats ---
+    /// Cumulative count of all invoices ever created.
+    TotalInvoices,
+    /// Cumulative payment volume across all invoices.
+    TotalVolume,
+    /// Cumulative amount successfully released to recipients.
+    TotalReleased,
+    /// Cumulative amount refunded to payers.
+    TotalRefunded,
+    /// Counter of treasury-group invoices.
+    TreasuryGroupCounter,
+
+    // --- Upgrade / versioning ---
+    /// Deployed contract schema/version number.
+    ContractVersion,
+    /// Pending WASM-upgrade proposal hash and metadata.
+    UpgradeProposal,
+
+    // --- Reentrancy ---
+    /// Reentrancy guard flag (stored in temporary storage; cleared each tx).
     ReentrancyGuard,
+    /// Issue #526: Minimum number of recipients required per invoice.
+    MinRecipients,
 }
 
 // ---------------------------------------------------------------------------
@@ -136,6 +202,7 @@ pub enum InvoiceKey {
     Group(u64),
     GroupTreasury(u64),
     TimelockAction(u64),
+    PayoutCheckpoint(u64),
 }
 
 // ---------------------------------------------------------------------------
@@ -169,6 +236,8 @@ pub enum AddressKey {
     PauseExempt(Address),
     GlobalVelocity(Address),
     CreatorVolMile(Address),
+    /// Issue #527: Payment history for a contributor address.
+    PayerHistory(Address),
 }
 
 // ---------------------------------------------------------------------------
@@ -282,6 +351,7 @@ mod tests {
             StorageKey::PlatformVolThresh, StorageKey::PlatformVolMile,
             StorageKey::CreatorVolThresh, StorageKey::UpgradeProposal,
             StorageKey::ProtocolFee, StorageKey::ReentrancyGuard,
+            StorageKey::MinRecipients,
         ];
         for i in 0..keys.len() {
             for j in (i + 1)..keys.len() {
@@ -349,6 +419,7 @@ mod tests {
             AddressKey::CreatorStatsPayers(addr.clone()),
             AddressKey::GlobalVelocity(addr.clone()),
             AddressKey::PauseExempt(addr.clone()),
+            AddressKey::PayerHistory(addr.clone()),
         ];
         for i in 0..keys.len() {
             for j in (i + 1)..keys.len() {

@@ -1,3 +1,30 @@
+//! # Event naming convention
+//!
+//! All split-contracts events follow a consistent topic layout:
+//! `(symbol_short!("split"), <action>, invoice_id?)`.
+//!
+//! - `<action>` is an 8-char symbol identifying the lifecycle stage
+//!   (`created`, `paid`, `released`, `refunded`, `st_chg`, …).
+//! - `invoice_id` is included as the third topic for per-invoice events
+//!   so indexers can filter by invoice without inspecting event data.
+//!
+//! ## When to call `next_seq`
+//!
+//! Events that represent discrete, countable occurrences on a single invoice
+//! should include an auto-incrementing `event_seq` (fetched via `next_seq`)
+//! as the last field in the event data. This gives indexers a stable,
+//! per-invoice ordering key. Do **not** call `next_seq` for:
+//! - global/contract-level events with no `invoice_id`
+//! - events that already contain a unique identifier (e.g. `action_id`,
+//!   `milestone_number`, `new_id`)
+//!
+//! ## `symbol_short!` vs `Symbol::new`
+//!
+//! Prefer `symbol_short!("abbr")` for event action topics because they are
+//! short, fixed strings. Use `Symbol::new(env, "LongName")` only when the
+//! symbol exceeds the short-macro length limit or must be constructed
+//! dynamically.
+
 use crate::types::{DisputeOutcome, FeeSplit, InvoiceStatus, RepScore, TimelockAction};
 use soroban_sdk::{contracttype, symbol_short, Address, BytesN, Env, String, Vec};
 
@@ -41,12 +68,12 @@ pub fn invoice_created(
 
 /// Emitted when a payment is received toward an invoice.
 /// Topics: (split, paid, invoice_id)
-/// Data: (payer, amount, event_seq)
-pub fn payment_received(env: &Env, invoice_id: u64, payer: &Address, amount: i128) {
+/// Data: (payer, amount, token, event_seq)
+pub fn payment_received(env: &Env, invoice_id: u64, payer: &Address, amount: i128, token: &Address) {
     let event_seq = next_seq(env, invoice_id);
     env.events().publish(
         (symbol_short!("split"), symbol_short!("paid"), invoice_id),
-        (payer.clone(), amount, event_seq),
+        (payer.clone(), amount, token.clone(), event_seq),
     );
 }
 
@@ -109,9 +136,7 @@ pub fn invoice_released(env: &Env, invoice_id: u64, recipients: &Vec<Address>) {
 
 /// Emitted when an invoice is refunded after deadline.
 /// Topics: (split, refunded, invoice_id)
-/// Data: total_amount (sum returned to all payers, excluding any creator payout)
-pub fn invoice_refunded(env: &Env, invoice_id: u64, total_amount: i128) {
-/// Data: (event_seq)
+/// Data: (invoice_id, event_seq)
 pub fn invoice_refunded(env: &Env, invoice_id: u64) {
     let event_seq = next_seq(env, invoice_id);
     env.events().publish(
@@ -120,8 +145,7 @@ pub fn invoice_refunded(env: &Env, invoice_id: u64) {
             symbol_short!("refunded"),
             invoice_id,
         ),
-        total_amount,
-        (event_seq,),
+        (invoice_id, event_seq),
     );
 }
 
@@ -248,7 +272,7 @@ pub fn recipients_rebalanced(
 
 /// Emitted when an invoice is archived to instance storage.
 /// Topics: (split, archived, invoice_id)
-/// Data: ()
+/// Data: (invoice_id, event_seq)
 pub fn invoice_archived(env: &Env, invoice_id: u64) {
     let event_seq = next_seq(env, invoice_id);
     env.events().publish(
@@ -257,45 +281,47 @@ pub fn invoice_archived(env: &Env, invoice_id: u64) {
             symbol_short!("archived"),
             invoice_id,
         ),
-        (event_seq,),
+        (invoice_id, event_seq),
     );
 }
 
 /// Emitted when a delegate is assigned to an invoice.
 /// Topics: (split, delegated, invoice_id)
-/// Data: delegate
+/// Data: (delegate, event_seq)
 pub fn delegate_set(env: &Env, invoice_id: u64, delegate: &Address) {
+    let event_seq = next_seq(env, invoice_id);
     env.events().publish(
         (
             symbol_short!("split"),
             symbol_short!("delegated"),
             invoice_id,
         ),
-        delegate.clone(),
+        (delegate.clone(), event_seq),
     );
 }
 
 /// Emitted when a delegate is revoked from an invoice.
 /// Topics: (split, revoked, invoice_id)
-/// Data: ()
-pub fn delegate_revoked(env: &Env, invoice_id: u64) {
+/// Data: (revoker, ledger_sequence)
+pub fn delegate_revoked(env: &Env, invoice_id: u64, revoker: &Address) {
     env.events().publish(
         (symbol_short!("split"), symbol_short!("revoked"), invoice_id),
-        (),
+        (revoker.clone(), env.ledger().sequence()),
     );
 }
 
 /// Emitted when an invoice is partially released.
 /// Topics: (split, part_rel, invoice_id)
-/// Data: recipients
+/// Data: (recipients, event_seq)
 pub fn invoice_partially_released(env: &Env, invoice_id: u64, recipients: &Vec<Address>) {
+    let event_seq = next_seq(env, invoice_id);
     env.events().publish(
         (
             symbol_short!("split"),
             symbol_short!("part_rel"),
             invoice_id,
         ),
-        recipients.clone(),
+        (recipients.clone(), event_seq),
     );
 }
 
@@ -325,10 +351,12 @@ pub fn payment_matched(env: &Env, invoice_id: u64, memo: u64, payer: &Address) {
 
 /// Emitted when an invoice is cloned.
 /// Topics: (cloned, source_id, new_id)
-/// Data: ()
+/// Data: ledger_sequence
 pub fn invoice_cloned(env: &Env, source_id: u64, new_id: u64) {
-    env.events()
-        .publish((symbol_short!("cloned"), source_id, new_id), ());
+    env.events().publish(
+        (symbol_short!("cloned"), source_id, new_id),
+        (env.ledger().sequence(),),
+    );
 }
 
 /// Emitted when an invoice is paused.
@@ -344,6 +372,16 @@ pub fn invoice_paused(
     env.events().publish(
         (symbol_short!("split"), symbol_short!("paused"), invoice_id),
         (creator.clone(), reason.clone(), *auto_resume_at),
+    );
+}
+
+/// Emitted whenever an invoice's `frozen` flag transitions to true.
+/// Topics: (split, frozen, invoice_id)
+/// Data: (creator, ledger)
+pub fn invoice_frozen(env: &Env, invoice_id: u64, creator: &Address) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("frozen"), invoice_id),
+        (creator.clone(), env.ledger().sequence()),
     );
 }
 
@@ -681,6 +719,17 @@ pub fn allowlist_updated(
     env.events().publish(
         (symbol_short!("split"), symbol_short!("al_upd"), invoice_id),
         (creator.clone(), payer.clone(), added),
+    );
+}
+
+/// Emitted when a creator clears an invoice's entire payer allowlist,
+/// transitioning it from restricted to open (allowed_payers set to None).
+/// Topics: (split, al_open, invoice_id)
+/// Data: (creator, ledger)
+pub fn allowlist_removed(env: &Env, invoice_id: u64, creator: &Address) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("al_open"), invoice_id),
+        (creator.clone(), env.ledger().sequence()),
     );
 }
 
@@ -1674,5 +1723,25 @@ pub fn recipient_share_unlocked(
     env.events().publish(
         (symbol_short!("split"), symbol_short!("sh_unlk"), invoice_id),
         (recipient.clone(), admin.clone()),
+    );
+}
+
+/// Issue #528: Emitted when an admin transfer is proposed.
+/// Topics: (split, adm_prop)
+/// Data: (current_admin, proposed_admin)
+pub fn admin_transfer_proposed(env: &Env, current_admin: &Address, proposed_admin: &Address) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("adm_prop")),
+        (current_admin.clone(), proposed_admin.clone()),
+    );
+}
+
+/// Issue #528: Emitted when an admin transfer is completed.
+/// Topics: (split, adm_done)
+/// Data: new_admin
+pub fn admin_transfer_completed(env: &Env, new_admin: &Address) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("adm_done")),
+        new_admin.clone(),
     );
 }
