@@ -69,12 +69,29 @@ pub struct CloneOverrides {
 #[contracttype]
 #[derive(Clone, Debug)]
 pub enum SplitRule {
-    /// Pay this exact amount regardless of funded total.
+    /// Pay this exact amount regardless of the invoice's funded total.
+    ///
+    /// # Example
+    ///
+    /// `Fixed(2_500)` always pays out `2_500`, whether `funded` is `2_500`,
+    /// `10_000`, or anything else.
     Fixed(i128),
-    /// Pay `funded * bps / 10_000` to the recipient.
+    /// Pay `funded * bps / 10_000` to the recipient, where `bps` is basis
+    /// points (10_000 = 100%).
+    ///
+    /// # Example
+    ///
+    /// `Percentage(3_000)` (30%) on `funded = 10_000` yields
+    /// `10_000 * 3_000 / 10_000 = 3_000`.
     Percentage(u32),
-    /// Pay `funded * bps / 10_000` only when `funded > threshold`; else 0.
-    /// Encoded as (threshold, bps).
+    /// Pay `funded * bps / 10_000` only once `funded` strictly exceeds
+    /// `threshold`; otherwise pay `0`. Encoded as `(threshold, bps)`.
+    ///
+    /// # Example
+    ///
+    /// `Tiered(5_000, 2_000)` (20% once past 5_000) on `funded = 8_000`
+    /// yields `8_000 * 2_000 / 10_000 = 1_600`, because `8_000 > 5_000`.
+    /// On `funded = 4_000` it yields `0`, because `4_000 <= 5_000`.
     Tiered(i128, u32),
 }
 
@@ -1562,13 +1579,23 @@ pub struct UpgradeProposal {
 
 /// Hot invoice fields stored in instance storage for TTL-efficient reads.
 ///
-/// These four fields are read on every `pay()` call. Keeping them in the
-/// contract *instance* bucket means their TTL is extended by a single
-/// `extend_ttl` call that covers all active invoices simultaneously —
-/// O(1) per payment rather than one persistent-rent charge per invoice entry.
+/// These four fields are read on every `pay()` call.
 ///
-/// Cold creation params and audit metadata stay in persistent storage
-/// (`InvoiceCore` / `InvoiceExt` / `InvoiceExt2`).
+/// # Design
+///
+/// Soroban charges rent independently per storage entry, and each entry's
+/// TTL must be extended on its own. Keeping these hot fields in the
+/// contract's *instance* bucket — rather than one persistent entry per
+/// invoice — means a single `extend_ttl` call on the instance covers every
+/// active invoice's hot data simultaneously: O(1) per payment rather than
+/// one persistent-rent `extend_ttl` charge per invoice entry.
+///
+/// This is a trade-off: instance storage is wiped on contract upgrade unless
+/// explicitly preserved, and it grows with every invoice ever created (there
+/// is no per-key eviction). Cold creation params and audit metadata that are
+/// not needed on the payment hot path stay in persistent storage instead
+/// (`InvoiceCore` / `InvoiceExt` / `InvoiceExt2`), where they can expire and
+/// be restored independently per invoice.
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct InvoiceHot {
@@ -1588,6 +1615,14 @@ pub struct InvoiceHot {
 
 impl InvoiceStatus {
     /// Encode as a single byte — saves XDR overhead vs. the full enum variant.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use split::types::InvoiceStatus;
+    ///
+    /// assert_eq!(InvoiceStatus::Released.to_u8(), 1);
+    /// ```
     pub fn to_u8(&self) -> u8 {
         match self {
             InvoiceStatus::Pending => 0,

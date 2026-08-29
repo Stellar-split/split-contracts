@@ -41,6 +41,16 @@ use soroban_sdk::{contracttype, symbol_short, Address, Env, IntoVal, Symbol, Try
 ///
 /// All variants are unit (carry no data). Instance storage is wiped on
 /// upgrade unless explicitly preserved, so these represent live config.
+///
+/// Soroban's XDR spec caps a `#[contracttype]` enum at **50 variants**, so
+/// this enum must never grow past that limit — it is already one of four
+/// enums the key registry is split across for exactly this reason (see the
+/// module-level docs above). When adding a new instance-storage key, always
+/// **append** a new variant at the end; never reorder or remove an existing
+/// variant, since XDR encodes variants positionally and reordering would
+/// silently corrupt every value already written under the old positions. If
+/// this enum is at or near 50 variants, add the new key to a fifth enum
+/// instead of extending this one.
 #[contracttype]
 #[derive(Clone)]
 pub enum StorageKey {
