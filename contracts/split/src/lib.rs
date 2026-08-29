@@ -4141,6 +4141,35 @@ impl SplitContract {
         }
     }
 
+    /// Issue #674: Funding progress of an invoice expressed in basis points.
+    ///
+    /// Returns `funded * 10_000 / total` clamped to `[0, 10_000]`, where `total`
+    /// is the sum of the invoice `amounts`. Overfunded invoices therefore report
+    /// exactly `10_000` rather than a value above the denominator. Returns `0`
+    /// when `total` is zero (nothing to fund) or when `funded` is non-positive.
+    ///
+    /// Errors with [`ContractError::InvoiceNotFound`] for unknown `invoice_id`.
+    pub fn get_invoice_funding_progress(env: Env, invoice_id: u64) -> Result<u32, ContractError> {
+        let core = Self::load_invoice_opt(&env, invoice_id)?;
+        // `funded` is mirrored into the hot instance entry for migrated invoices;
+        // prefer it so the progress matches `get_invoice_funded`.
+        let funded: i128 = env
+            .storage()
+            .instance()
+            .get::<_, InvoiceHot>(&invoice_hot_key(invoice_id))
+            .map_or(core.funded, |hot| hot.funded);
+        let total: i128 = core.amounts.iter().sum();
+
+        if total <= 0 || funded <= 0 {
+            return Ok(0);
+        }
+        if funded >= total {
+            return Ok(10_000);
+        }
+        let bps = checked_proportion(funded as u128, 10_000u128, total as u128)?;
+        Ok(bps as u32)
+    }
+
     pub fn get_invoice_deadline(env: Env, invoice_id: u64) -> Result<u64, ContractError> {
         if let Some(core) = env.storage().persistent().get(&invoice_key(invoice_id)) {
             Ok(core.deadline)
@@ -12623,12 +12652,53 @@ impl SplitContract {
             .set(&invoice_phase_key(invoice_id), &new_phase);
     }
 
-    /// Issue #449: Get invoice phase.
-    pub fn get_invoice_phase(env: Env, invoice_id: u64) -> types::InvoicePhase {
-        env.storage()
+    /// Issue #449 / #676: Get the current phase of an invoice.
+    ///
+    /// An explicit phase written by [`SplitContract::set_invoice_phase`] is
+    /// authoritative. When no phase has ever been set the phase is derived from
+    /// the invoice's own state fields so callers never have to reconstruct it:
+    ///
+    /// * `Released`  — the invoice has been released or finalised.
+    /// * `Locked`    — the invoice is frozen, disputed, or partially released,
+    ///                 so its balance can no longer be freely funded or refunded.
+    /// * `Active`    — funding has started (`funded > 0`).
+    /// * `Draft`     — nothing has been funded yet.
+    ///
+    /// Errors with [`ContractError::InvoiceNotFound`] for unknown `invoice_id`.
+    pub fn get_invoice_phase(
+        env: Env,
+        invoice_id: u64,
+    ) -> Result<types::InvoicePhase, ContractError> {
+        let core = Self::load_invoice_opt(&env, invoice_id)?;
+
+        if let Some(phase) = env
+            .storage()
             .persistent()
-            .get(&invoice_phase_key(invoice_id))
-            .unwrap_or(types::InvoicePhase::Draft)
+            .get::<_, types::InvoicePhase>(&invoice_phase_key(invoice_id))
+        {
+            return Ok(phase);
+        }
+
+        // Prefer the hot entry for status/funded — it is the copy `pay()` mutates.
+        let (status, funded) = env
+            .storage()
+            .instance()
+            .get::<_, InvoiceHot>(&invoice_hot_key(invoice_id))
+            .map_or_else(
+                || (core.status.clone(), core.funded),
+                |hot| (hot.status, hot.funded),
+            );
+
+        let phase = match status {
+            InvoiceStatus::Released | InvoiceStatus::Finalised => types::InvoicePhase::Released,
+            InvoiceStatus::PartiallyReleased | InvoiceStatus::Disputed => {
+                types::InvoicePhase::Locked
+            }
+            _ if core.frozen => types::InvoicePhase::Locked,
+            _ if funded > 0 => types::InvoicePhase::Active,
+            _ => types::InvoicePhase::Draft,
+        };
+        Ok(phase)
     }
 
     pub fn get_creator_rating(env: Env, creator: Address) -> (u32, u32) {
