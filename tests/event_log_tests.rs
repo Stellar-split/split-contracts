@@ -1,10 +1,12 @@
 #![cfg(test)]
 
 use soroban_sdk::{
-    testutils::{Address as _, Ledger, Events},
+    testutils::{Address as _, Ledger, Events, BytesN as _},
     token::{Client as TokenClient, StellarAssetClient},
-    Address, Env, Symbol, Vec, Map,
+    Address, Env, Symbol, Vec, Map, BytesN,
 };
+use split_contracts::types::InvoiceStatus;
+use split_contracts::events::{invoice_state_changed, allowlist_updated, dispute_raised};
 
 #[test]
 fn test_event_log_stores_creation_event() {
