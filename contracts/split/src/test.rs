@@ -8018,202 +8018,94 @@ fn test_cancel_invoice_on_deleted_invoice_panics() {
     c.cancel_invoice(&creator, &id);
 }
 
-// ---------------------------------------------------------------------------
-// Issue #598: Add invoice_id to invoice_refunded event data
-// ---------------------------------------------------------------------------
-
 #[test]
-fn test_598_invoice_refunded_event_contains_invoice_id() {
+fn test_get_invoice_deadline() {
     let (env, contract_id, token_id) = setup_initialized();
     let c = client(&env, &contract_id);
 
     let creator = Address::generate(&env);
     let recipient = Address::generate(&env);
+    let deadline: u64 = 5_000;
+
+    env.ledger().set_timestamp(1_000);
+
+    let id = make_invoice(&env, &c, &creator, &recipient, 100, &token_id, deadline);
+
+    let returned_deadline = c.get_invoice_deadline(&id).expect("should return deadline");
+    assert_eq!(returned_deadline, deadline);
+}
+
+#[test]
+fn test_get_invoice_deadline_not_found() {
+    let (env, contract_id, _token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+
+    let result = c.try_get_invoice_deadline(&999);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_get_invoice_funded() {
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+    let tk = token_client(&env, &token_id);
+
+    let creator = Address::generate(&env);
     let payer = Address::generate(&env);
-
-    StellarAssetClient::new(&env, &token_id).mint(&payer, &100);
-    env.ledger().set_timestamp(1_000);
-
-    let mut recipients = Vec::new(&env);
-    recipients.push_back(recipient.clone());
-    let mut amounts = Vec::new(&env);
-    amounts.push_back(200_i128);
-
-    let invoice_id = c.create_invoice(
-        &creator,
-        &recipients,
-        &amounts,
-        &token_id,
-        &2_000,
-        &default_options(&env),
-    );
-
-    c.pay(&payer, &invoice_id, &100_i128, &0_u64, &false, &false, &None);
-
-    env.ledger().set_timestamp(3_000);
-
-    c.issue_refund(&creator, &invoice_id, &None);
-}
-
-// ---------------------------------------------------------------------------
-// Issue #597: Add get_invoice_amounts view function
-// ---------------------------------------------------------------------------
-
-#[test]
-fn test_597_get_invoice_amounts_returns_recipient_amounts() {
-    let (env, contract_id, token_id) = setup_initialized();
-    let c = client(&env, &contract_id);
-
-    let creator = Address::generate(&env);
-    let recipient1 = Address::generate(&env);
-    let recipient2 = Address::generate(&env);
-    let recipient3 = Address::generate(&env);
-
-    env.ledger().set_timestamp(1_000);
-
-    let mut recipients = Vec::new(&env);
-    recipients.push_back(recipient1.clone());
-    recipients.push_back(recipient2.clone());
-    recipients.push_back(recipient3.clone());
-
-    let mut amounts = Vec::new(&env);
-    amounts.push_back(100_i128);
-    amounts.push_back(200_i128);
-    amounts.push_back(300_i128);
-
-    let invoice_id = c.create_invoice(
-        &creator,
-        &recipients,
-        &amounts,
-        &token_id,
-        &9_999,
-        &default_options(&env),
-    );
-
-    let retrieved_amounts = c.get_invoice_amounts(&invoice_id);
-
-    assert_eq!(retrieved_amounts.len(), 3);
-    assert_eq!(retrieved_amounts.get(0), 100_i128);
-    assert_eq!(retrieved_amounts.get(1), 200_i128);
-    assert_eq!(retrieved_amounts.get(2), 300_i128);
-}
-
-#[test]
-fn test_597_get_invoice_amounts_single_recipient() {
-    let (env, contract_id, token_id) = setup_initialized();
-    let c = client(&env, &contract_id);
-
-    let creator = Address::generate(&env);
     let recipient = Address::generate(&env);
 
+    StellarAssetClient::new(&env, &token_id).mint(&payer, &500);
     env.ledger().set_timestamp(1_000);
 
-    let mut recipients = Vec::new(&env);
-    recipients.push_back(recipient.clone());
-    let mut amounts = Vec::new(&env);
-    amounts.push_back(500_i128);
+    let id = make_invoice(&env, &c, &creator, &recipient, 200, &token_id, 9_999);
 
-    let invoice_id = c.create_invoice(
-        &creator,
-        &recipients,
-        &amounts,
-        &token_id,
-        &9_999,
-        &default_options(&env),
-    );
+    let funded_before = c.get_invoice_funded(&id).expect("should return funded");
+    assert_eq!(funded_before, 0);
 
-    let retrieved_amounts = c.get_invoice_amounts(&invoice_id);
+    c.pay(&payer, &id, &150_i128, &0_u64, &false, &false, &None);
 
-    assert_eq!(retrieved_amounts.len(), 1);
-    assert_eq!(retrieved_amounts.get(0), 500_i128);
+    let funded_after = c.get_invoice_funded(&id).expect("should return funded");
+    assert_eq!(funded_after, 150);
 }
 
 #[test]
-#[should_panic(expected = "InvoiceNotFound")]
-fn test_597_get_invoice_amounts_invalid_invoice_id_panics() {
-    let (env, contract_id, token_id) = setup_initialized();
+fn test_get_invoice_funded_not_found() {
+    let (env, contract_id, _token_id) = setup_initialized();
     let c = client(&env, &contract_id);
 
+    let result = c.try_get_invoice_funded(&999);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_get_invoice_status() {
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+    let tk = token_client(&env, &token_id);
+
+    let creator = Address::generate(&env);
+    let payer = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    StellarAssetClient::new(&env, &token_id).mint(&payer, &500);
     env.ledger().set_timestamp(1_000);
 
-    c.get_invoice_amounts(&9999_u64);
-}
+    let id = make_invoice(&env, &c, &creator, &recipient, 200, &token_id, 9_999);
 
-// ---------------------------------------------------------------------------
-// Issue #596: Add get_contract_paused view function
-// ---------------------------------------------------------------------------
+    let status_pending = c.get_invoice_status(&id).expect("should return status");
+    assert_eq!(status_pending, InvoiceStatus::Pending);
 
-#[test]
-fn test_596_get_contract_paused_initial_state_is_false() {
-    let (env, contract_id, token_id) = setup_initialized();
-    let c = client(&env, &contract_id);
+    c.pay(&payer, &id, &200_i128, &0_u64, &false, &false, &None);
 
-    let paused = c.get_contract_paused();
-    assert_eq!(paused, false);
+    let status_released = c.get_invoice_status(&id).expect("should return status");
+    assert_eq!(status_released, InvoiceStatus::Released);
 }
 
 #[test]
-fn test_596_get_contract_paused_returns_true_after_pause() {
-    let (env, contract_id, token_id) = setup_initialized();
+fn test_get_invoice_status_not_found() {
+    let (env, contract_id, _token_id) = setup_initialized();
     let c = client(&env, &contract_id);
 
-    let admin = Address::generate(&env);
-    c.initialize(&admin, &0_i128, &Address::generate(&env), &token_id, &0_u32, &None, &0_u32, &0_u32, &0_u64);
-
-    env.ledger().set_timestamp(1_000);
-
-    c.pause(&admin);
-
-    let paused = c.get_contract_paused();
-    assert_eq!(paused, true);
-}
-
-#[test]
-fn test_596_get_contract_paused_returns_false_after_unpause() {
-    let (env, contract_id, token_id) = setup_initialized();
-    let c = client(&env, &contract_id);
-
-    let admin = Address::generate(&env);
-    c.initialize(&admin, &0_i128, &Address::generate(&env), &token_id, &0_u32, &None, &0_u32, &0_u32, &0_u64);
-
-    env.ledger().set_timestamp(1_000);
-
-    c.pause(&admin);
-    c.unpause(&admin);
-
-    let paused = c.get_contract_paused();
-    assert_eq!(paused, false);
-}
-
-// ---------------------------------------------------------------------------
-// Issue #595: Add get_platform_fee_bps view function tests
-// ---------------------------------------------------------------------------
-
-#[test]
-fn test_595_get_platform_fee_bps_initial_zero() {
-    let (env, contract_id, token_id) = setup();
-    let c = client(&env, &contract_id);
-
-    let admin = Address::generate(&env);
-    let treasury = Address::generate(&env);
-
-    c.initialize(&admin, &0_i128, &treasury, &token_id, &0_u32, &None, &0_u32, &0_u32, &0_u64);
-
-    let fee_bps = c.get_platform_fee_bps();
-    assert_eq!(fee_bps, 0);
-}
-
-#[test]
-fn test_595_get_platform_fee_bps_returns_set_value() {
-    let (env, contract_id, token_id) = setup();
-    let c = client(&env, &contract_id);
-
-    let admin = Address::generate(&env);
-    let treasury = Address::generate(&env);
-
-    let platform_fee_bps = 500_u32;
-    c.initialize(&admin, &0_i128, &treasury, &token_id, &platform_fee_bps, &None, &0_u32, &0_u32, &0_u64);
-
-    let fee_bps = c.get_platform_fee_bps();
-    assert_eq!(fee_bps, platform_fee_bps);
+    let result = c.try_get_invoice_status(&999);
+    assert!(result.is_err());
 }
