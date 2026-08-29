@@ -26,6 +26,11 @@ fn total_recipients_paid_key(env: &Env) -> Symbol {
 }
 
 /// Returns all aggregate counters, defaulting missing instance entries to zero.
+///
+/// The returned [`Stats`] tuple is laid out as:
+/// `(total_invoices: u64, total_volume: i128, total_recipients_paid: u64)`.
+///
+/// * `env` — the Soroban environment used to read instance storage.
 pub fn get_stats(env: &Env) -> Stats {
     let storage = env.storage().instance();
 
@@ -45,8 +50,18 @@ pub fn get_stats(env: &Env) -> Stats {
 /// Applies a statistics delta atomically.
 ///
 /// Every new value is calculated before any storage write occurs. If any
-/// checked addition fails, the function returns StatsOverflow and leaves the
+/// checked addition fails, the function returns `StatsOverflow` and leaves the
 /// counters unchanged.
+///
+/// * `env` — the Soroban environment used for storage and events.
+/// * `invoices` — number of invoices to add to the total-invoices counter.
+/// * `volume` — token volume (in canonical units) to add to the total-volume
+///   counter; must be non-negative.
+/// * `recipients_paid` — number of recipients paid to add to the
+///   total-recipients-paid counter.
+///
+/// Returns the updated [`Stats`] tuple, or `Err(ContractError::StatsOverflow)`
+/// if any counter would exceed `u64`/`i128` bounds.
 pub fn increment(
     env: &Env,
     invoices: u64,
@@ -84,11 +99,22 @@ pub fn increment(
 }
 
 /// Records one newly created invoice.
+///
+/// * `env` — the Soroban environment.
+///
+/// Increments the total-invoices counter by 1 and leaves volume and
+/// recipients-paid unchanged. Returns the updated [`Stats`].
 pub fn invoice_created(env: &Env) -> Result<Stats, ContractError> {
     increment(env, 1, 0, 0)
 }
 
 /// Records the volume of a payment received for an invoice.
+///
+/// * `env` — the Soroban environment.
+/// * `amount` — payment volume (in canonical units) to add to the total-volume
+///   counter; must be non-negative, otherwise `InvalidAmount` is returned.
+///
+/// Returns the updated [`Stats`].
 pub fn volume_added(env: &Env, amount: i128) -> Result<Stats, ContractError> {
     if amount < 0 {
         return Err(ContractError::InvalidAmount);
@@ -98,6 +124,12 @@ pub fn volume_added(env: &Env, amount: i128) -> Result<Stats, ContractError> {
 }
 
 /// Records recipients paid when an invoice's funds are released.
+///
+/// * `env` — the Soroban environment.
+/// * `count` — number of recipients paid to add to the total-recipients-paid
+///   counter.
+///
+/// Returns the updated [`Stats`].
 pub fn recipients_paid(env: &Env, count: u64) -> Result<Stats, ContractError> {
     increment(env, 0, 0, count)
 }
