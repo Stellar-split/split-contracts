@@ -68,6 +68,8 @@ mod storage_keys;
 
 mod migrations;
 
+mod validation;
+
 use error::ContractError;
 use soroban_sdk::crypto::bls12_381::{Fr, G1Affine};
 use soroban_sdk::xdr::ToXdr;
@@ -2169,29 +2171,39 @@ fn is_paused(env: &Env) -> bool {
         })
 }
 
-fn require_not_paused(env: &Env) {
-    migrations::require_schema_current(env);
-    assert!(!is_paused(env), "contract is paused");
-    // Issue #297: also check circuit breaker
-    let cb_active: bool = env
-        .storage()
-        .persistent()
-        .get(&circuit_breaker_key())
-        .unwrap_or(false);
-    assert!(!cb_active, "ContractPaused");
-}
-
-fn check_not_paused(env: &Env) {
-    migrations::require_schema_current(env);
+/// Issue #626: Reusable pause guard.
+///
+/// Returns `Err(ContractError::ContractPaused)` when:
+/// - the instance-level `Paused` flag is `true`, or
+/// - the circuit-breaker persistent flag (issue #297) is `true`.
+///
+/// Does **not** check the schema version; callers that also need a version
+/// guard should call `migrations::require_schema_current` first (see
+/// `require_not_paused` below).
+fn assert_not_paused(env: &Env) -> Result<(), ContractError> {
     if is_paused(env) {
-        panic!("ContractPaused");
+        return Err(ContractError::ContractPaused);
     }
+    // Issue #297: also check circuit breaker.
     let cb_active: bool = env
         .storage()
         .persistent()
         .get(&circuit_breaker_key())
         .unwrap_or(false);
     if cb_active {
+        return Err(ContractError::ContractPaused);
+    }
+    Ok(())
+}
+
+fn require_not_paused(env: &Env) {
+    migrations::require_schema_current(env);
+    assert_not_paused(env).expect("contract is paused");
+}
+
+fn check_not_paused(env: &Env) {
+    migrations::require_schema_current(env);
+    if assert_not_paused(env).is_err() {
         panic!("ContractPaused");
     }
 }
@@ -4032,6 +4044,40 @@ impl SplitContract {
         }
     }
 
+    pub fn get_invoice_deadline(env: Env, invoice_id: u64) -> Result<u64, ContractError> {
+        if let Some(core) = env.storage().persistent().get(&invoice_key(invoice_id)) {
+            Ok(core.deadline)
+        } else if let Some(core) = env.storage().instance().get(&invoice_key(invoice_id)) {
+            Ok(core.deadline)
+        } else {
+            Err(ContractError::InvoiceNotFound)
+        }
+    }
+
+    pub fn get_invoice_funded(env: Env, invoice_id: u64) -> Result<i128, ContractError> {
+        if let Some(hot) = env.storage().instance().get(&invoice_hot_key(invoice_id)) {
+            Ok(hot.funded)
+        } else if let Some(core) = env.storage().persistent().get(&invoice_key(invoice_id)) {
+            Ok(core.funded)
+        } else if let Some(core) = env.storage().instance().get(&invoice_key(invoice_id)) {
+            Ok(core.funded)
+        } else {
+            Err(ContractError::InvoiceNotFound)
+        }
+    }
+
+    pub fn get_invoice_status(env: Env, invoice_id: u64) -> Result<InvoiceStatus, ContractError> {
+        if let Some(hot) = env.storage().instance().get(&invoice_hot_key(invoice_id)) {
+            Ok(hot.status)
+        } else if let Some(core) = env.storage().persistent().get(&invoice_key(invoice_id)) {
+            Ok(core.status)
+        } else if let Some(core) = env.storage().instance().get(&invoice_key(invoice_id)) {
+            Ok(core.status)
+        } else {
+            Err(ContractError::InvoiceNotFound)
+        }
+    }
+
     /// Get a consolidated invoice snapshot for off-chain audit.
     pub fn get_invoice_snapshot(env: Env, invoice_id: u64) -> types::InvoiceSnapshot {
         let core: types::InvoiceCore = env
@@ -4231,8 +4277,9 @@ impl SplitContract {
         admin.require_auth();
 
         assert!(!fee_recipients.is_empty(), "fee_recipients must not be empty");
-        let sum: u32 = fee_recipients.iter().map(|r| r.basis_points).sum();
-        assert!(sum == 10_000, "fee_recipients basis points must sum to 10000");
+        let sum: u32 = fee_recipients.iter().map(|r| r.basis_points).fold(0u32, |a, b| a.saturating_add(b));
+        validation::assert_bps_total(sum)
+            .expect("fee_recipients basis points must sum to 10000");
 
         env.storage()
             .instance()
@@ -5315,19 +5362,15 @@ impl SplitContract {
         }
 
         if !tranches.is_empty() {
-            let total_bps: u32 = tranches.iter().map(|t| t.basis_points).sum();
-            assert!(
-                total_bps == 10_000,
-                "tranches must sum to 10000 basis points"
-            );
+            let total_bps: u32 = tranches.iter().map(|t| t.basis_points).fold(0u32, |a, b| a.saturating_add(b));
+            validation::assert_bps_total(total_bps)
+                .expect("tranches must sum to 10000 basis points");
         }
 
         if !release_stages.is_empty() {
-            let total_bps: u32 = release_stages.iter().sum();
-            assert!(
-                total_bps == 10_000,
-                "release_stages must sum to 10000 basis points"
-            );
+            let total_bps: u32 = release_stages.iter().fold(0u32, |a, b| a.saturating_add(b));
+            validation::assert_bps_total(total_bps)
+                .expect("release_stages must sum to 10000 basis points");
         }
         let milestones = milestones.unwrap_or_else(|| Vec::new(env));
         validate_milestones(env, &milestones);
@@ -15047,8 +15090,9 @@ impl SplitContract {
         );
 
         // Ratios must sum to exactly 10 000 bps.
-        let ratio_sum: u32 = ratios.iter().sum();
-        assert!(ratio_sum == 10_000, "ratios must sum to 10000 basis points");
+        let ratio_sum: u32 = ratios.iter().fold(0u32, |a, b| a.saturating_add(b));
+        validation::assert_bps_total(ratio_sum)
+            .expect("ratios must sum to 10000 basis points");
 
         // Assign the next template ID for this creator.
         let next_id: u64 = env
@@ -15274,6 +15318,36 @@ impl SplitContract {
         // Recurse if this parent also has a parent.
         if let Some(grandparent_id) = parent.parent_invoice_id {
             Self::_validate_parent(env, grandparent_id, depth + 1);
+        }
+    }
+
+    /// Get the creator address for an invoice.
+    pub fn get_invoice_creator(env: Env, invoice_id: u64) -> Address {
+        let invoice = load_invoice(&env, invoice_id);
+        invoice.creator
+    }
+
+    /// Get the list of recipient addresses for an invoice.
+    pub fn get_invoice_recipients(env: Env, invoice_id: u64) -> Vec<Address> {
+        let invoice = load_invoice(&env, invoice_id);
+        invoice.recipients
+    }
+
+    /// Get the number of payments made toward an invoice.
+    pub fn get_invoice_payment_count(env: Env, invoice_id: u64) -> u32 {
+        let invoice = load_invoice(&env, invoice_id);
+        invoice.payments.len() as u32
+    }
+
+    /// Get the funding percentage of an invoice as basis points.
+    /// Returns (funded * 10_000 / total) as u32, or 0 if total is 0.
+    pub fn get_invoice_funding_percentage(env: Env, invoice_id: u64) -> u32 {
+        let invoice = load_invoice(&env, invoice_id);
+        let total: i128 = invoice.amounts.iter().sum();
+        if total == 0 {
+            0
+        } else {
+            ((invoice.funded * 10_000) / total) as u32
         }
     }
 }

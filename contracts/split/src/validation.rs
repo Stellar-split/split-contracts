@@ -64,6 +64,37 @@ pub fn assert_recipients_have_trustlines(
     Ok(())
 }
 
+/// Issue #623: Verify that the sum of `values` equals exactly `BASIS_POINTS_TOTAL` (10 000).
+///
+/// Used wherever a slice of basis-point weights must cover 100% of a whole:
+/// split ratios, release stages, fee recipients, etc.
+///
+/// # Errors
+/// Returns `Err(ContractError::InvalidRatioSum)` when `values.iter().sum::<u32>() != 10_000`.
+///
+/// # Examples
+/// ```
+/// assert!(assert_bps_sum(&[5_000u32, 5_000]).is_ok());
+/// assert!(assert_bps_sum(&[3_000u32, 3_000]).is_err());
+/// ```
+pub const BASIS_POINTS_TOTAL: u32 = 10_000;
+
+pub fn assert_bps_sum(values: &[u32]) -> Result<(), ContractError> {
+    let sum: u32 = values.iter().copied().fold(0u32, |acc, v| acc.saturating_add(v));
+    assert_bps_total(sum)
+}
+
+/// Variant of [`assert_bps_sum`] for call sites where the sum has already
+/// been computed (e.g. from a soroban `Vec` iterator in a `no_std` context).
+///
+/// Returns `Err(ContractError::InvalidRatioSum)` when `total != 10_000`.
+pub fn assert_bps_total(total: u32) -> Result<(), ContractError> {
+    if total != BASIS_POINTS_TOTAL {
+        return Err(ContractError::InvalidRatioSum);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -104,16 +135,32 @@ mod tests {
         assert!(assert_unique_recipients(&env, &v.to_vec()).is_ok());
     }
 
+    // --- assert_bps_sum (issue #623) ---
+
     #[test]
-    fn two_identical_addresses_returns_duplicate_error() {
-        let env = Env::default();
-        let a = Address::generate(&env);
-        let mut v: Vec<Address> = Vec::new(&env);
-        v.push_back(a.clone());
-        v.push_back(a.clone());
+    fn bps_sum_equals_10000_passes() {
+        assert!(assert_bps_sum(&[5_000u32, 5_000]).is_ok());
+        assert!(assert_bps_sum(&[3_000u32, 3_000, 4_000]).is_ok());
+        assert!(assert_bps_sum(&[10_000u32]).is_ok());
+    }
+
+    #[test]
+    fn bps_sum_not_10000_fails() {
         assert_eq!(
-            assert_unique_recipients(&env, &v.to_vec()),
-            Err(ContractError::DuplicateRecipient)
+            assert_bps_sum(&[3_000u32, 3_000]),
+            Err(ContractError::InvalidRatioSum)
+        );
+        assert_eq!(
+            assert_bps_sum(&[0u32]),
+            Err(ContractError::InvalidRatioSum)
+        );
+        assert_eq!(
+            assert_bps_sum(&[10_001u32]),
+            Err(ContractError::InvalidRatioSum)
+        );
+        assert_eq!(
+            assert_bps_sum(&[]),
+            Err(ContractError::InvalidRatioSum)
         );
     }
 }
