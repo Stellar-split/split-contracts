@@ -3,8 +3,40 @@
 //! Implements the **largest-remainder method** to distribute an integer `total`
 //! across recipients proportionally, ensuring every stroop is accounted for
 //! (i.e. `sum(result) == total` always holds).
+//!
+//! # Why largest-remainder?
+//!
+//! Splitting an integer `total` proportionally by ratios almost never divides evenly.
+//! A naive implementation would compute each recipient's share with floor division
+//! (`total * ratio / denom`) and stop there, but floor division systematically discards
+//! the fractional part of every share. With `n` recipients that can leave up to `n - 1`
+//! stroops undistributed — money that was paid in but never assigned to anyone, silently
+//! stuck in the contract and breaking the `sum(result) == total` invariant the rest of the
+//! contract relies on (e.g. reconciling `funded` against amounts actually paid out).
+//!
+//! The largest-remainder method fixes this without abandoning integer (floor) division:
+//! 1. Compute each recipient's floor share (`total * ratio / denom`) and remainder
+//!    (`total * ratio % denom`).
+//! 2. Sum the floor shares; the difference between `total` and that sum is the number of
+//!    leftover stroops still owed (always `< n`).
+//! 3. Sort recipients by remainder descending and hand out one extra stroop each, in that
+//!    order, until the leftover is exhausted.
+//!
+//! This guarantees `sum(result) == total` exactly, while keeping the discrepancy from
+//! true proportionality to at most one stroop per recipient — the smallest error possible
+//! for integer division — and it deterministically favors the recipients whose exact
+//! (real-valued) share was closest to rounding up.
+//!
+//! **Example:** distributing `10` stroops among 3 recipients with equal ratios (`1:1:1`,
+//! `denom = 3`) gives floor shares of `[3, 3, 3]` (sum `9`) with `1` stroop leftover, all
+//! three remainders tied at `1`. The tie-break (first index wins) assigns the leftover
+//! stroop to the first recipient, producing `[4, 3, 3]` — which sums to `10`.
 
+#[allow(unused_imports)]
+use crate::types::BASIS_POINTS_TOTAL;
 use soroban_sdk::{Env, Vec};
+
+use crate::error::ContractError;
 
 /// Distribute `total` among recipients according to their `ratios` out of
 /// `denom`, using the largest-remainder method to handle rounding.
@@ -13,7 +45,7 @@ use soroban_sdk::{Env, Vec};
 /// * `env`    – Soroban environment (needed to allocate the result `Vec`)
 /// * `total`  – total amount to distribute (stroops); must be ≥ 0
 /// * `ratios` – relative weight of each recipient (must be non-empty, all ≥ 0)
-/// * `denom`  – sum of all ratios (must be > 0)
+/// * `denom`  – sum of all ratios (must be > 0); typically [`BASIS_POINTS_TOTAL`]
 ///
 /// # Guarantees
 /// * `result.iter().sum::<i128>() == total` always
@@ -23,14 +55,23 @@ use soroban_sdk::{Env, Vec};
 /// # Panics
 /// * if `ratios` is empty
 /// * if `denom` is zero
+// NOTE: if you call this function and ignore its return value the Rust
+// compiler will emit a `#[must_use]` warning:
+//   warning: unused return value of `distribute_with_remainder` that must be used
+// This ensures callers never silently drop the distribution result.
+#[must_use = "the distribution result must be applied to recipients"]
 pub fn distribute_with_remainder(
     env: &Env,
     total: i128,
     ratios: &Vec<i128>,
     denom: i128,
-) -> Vec<i128> {
-    assert!(!ratios.is_empty(), "ratios must not be empty");
-    assert!(denom > 0, "denom must be positive");
+) -> Result<Vec<i128>, ContractError> {
+    if ratios.is_empty() {
+        return Err(ContractError::InvalidAmount);
+    }
+    if denom <= 0 {
+        return Err(ContractError::InvalidAmount);
+    }
 
     let n = ratios.len() as usize;
 
@@ -52,7 +93,9 @@ pub fn distribute_with_remainder(
     // Contracts with more than 64 recipients would need a larger cap, but
     // 64 is a reasonable upper bound for on-chain use.
     const MAX_RECIPIENTS: usize = 64;
-    assert!(n <= MAX_RECIPIENTS, "too many recipients (max 64)");
+    if n > MAX_RECIPIENTS {
+        return Err(ContractError::InvalidAmount);
+    }
 
     let mut indices = [0usize; MAX_RECIPIENTS];
     for i in 0..n {
@@ -88,7 +131,7 @@ pub fn distribute_with_remainder(
         shares_mut.set(idx, current + 1);
     }
 
-    shares_mut
+    Ok(shares_mut)
 }
 
 // ---------------------------------------------------------------------------
@@ -162,7 +205,8 @@ mod tests {
     /// Assert sum equals total and return shares.
     fn assert_exact(env: &Env, total: i128, ratios: &[i128], denom: i128) -> Vec<i128> {
         let r_vec = make_ratios(env, ratios);
-        let result = distribute_with_remainder(env, total, &r_vec, denom);
+        let result = distribute_with_remainder(env, total, &r_vec, denom)
+            .expect("distribute_with_remainder should not fail for valid inputs");
         let sum: i128 = result.iter().sum();
         assert_eq!(
             sum, total,
@@ -251,6 +295,34 @@ mod tests {
         assert_exact(&env, 1_000_000_000, &[100_000, 200_000, 300_000], 600_000);
     }
 
+    #[test]
+    fn single_recipient_gets_full_amount() {
+        let env = Env::default();
+        let r = distribute_with_remainder(&env, 12345, &make_ratios(&env, &[1]), 1);
+        assert_eq!(r.len(), 1);
+        assert_eq!(r.get(0), Some(12345));
+    }
+
+    #[test]
+    fn sum_invariant_holds_with_unequal_ratios() {
+        let env = Env::default();
+        // Case 1: 3 recipients with ratios [1, 1, 1] and total=10
+        // Total is not evenly divisible by denom (10 % 3 != 0)
+        let r1 = distribute_with_remainder(&env, 10, &make_ratios(&env, &[1, 1, 1]), 3);
+        let sum1: i128 = r1.iter().sum();
+        assert_eq!(sum1, 10);
+
+        // Case 2: 4 recipients with ratios [2, 3, 1, 4] and total=100
+        let r2 = distribute_with_remainder(&env, 100, &make_ratios(&env, &[2, 3, 1, 4]), 10);
+        let sum2: i128 = r2.iter().sum();
+        assert_eq!(sum2, 100);
+
+        // Case 3: 2 recipients with ratios [1, 3] and total=999
+        let r3 = distribute_with_remainder(&env, 999, &make_ratios(&env, &[1, 3]), 4);
+        let sum3: i128 = r3.iter().sum();
+        assert_eq!(sum3, 999);
+    }
+
     /// Property-based style test: exhaustively verify sum == total for many inputs.
     #[test]
     fn test_property_sum_equals_total() {
@@ -271,5 +343,35 @@ mod tests {
         for &(total, ratios, denom) in cases {
             assert_exact(&env, total, ratios, denom);
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // calc_platform_fee tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_calc_platform_fee_normal() {
+        // 1_000_000 funded at 250 bps (2.5%) → fee = 25_000
+        let fee = calc_platform_fee(1_000_000, 250).unwrap();
+        assert_eq!(fee, 25_000);
+    }
+
+    #[test]
+    fn test_calc_platform_fee_zero_bps() {
+        // Zero fee rate → always zero fee regardless of funded amount
+        assert_eq!(calc_platform_fee(999_999_999, 0).unwrap(), 0);
+    }
+
+    #[test]
+    fn test_calc_platform_fee_max_bps() {
+        // 10_000 bps = 100% → fee equals funded
+        assert_eq!(calc_platform_fee(500, 10_000).unwrap(), 500);
+    }
+
+    #[test]
+    fn test_calc_platform_fee_overflow() {
+        // i128::MAX * any fee_bps > 0 will overflow the intermediate multiplication
+        let result = calc_platform_fee(i128::MAX, 1);
+        assert_eq!(result, Err(crate::error::ContractError::ArithmeticOverflow));
     }
 }

@@ -41,6 +41,16 @@ use soroban_sdk::{contracttype, symbol_short, Address, Env, IntoVal, Symbol, Try
 ///
 /// All variants are unit (carry no data). Instance storage is wiped on
 /// upgrade unless explicitly preserved, so these represent live config.
+///
+/// Soroban's XDR spec caps a `#[contracttype]` enum at **50 variants**, so
+/// this enum must never grow past that limit — it is already one of four
+/// enums the key registry is split across for exactly this reason (see the
+/// module-level docs above). When adding a new instance-storage key, always
+/// **append** a new variant at the end; never reorder or remove an existing
+/// variant, since XDR encodes variants positionally and reordering would
+/// silently corrupt every value already written under the old positions. If
+/// this enum is at or near 50 variants, add the new key to a fifth enum
+/// instead of extending this one.
 #[contracttype]
 #[derive(Clone)]
 pub enum StorageKey {
@@ -153,6 +163,8 @@ pub enum StorageKey {
     // --- Reentrancy ---
     /// Reentrancy guard flag (stored in temporary storage; cleared each tx).
     ReentrancyGuard,
+    /// Issue #526: Minimum number of recipients required per invoice.
+    MinRecipients,
 }
 
 // ---------------------------------------------------------------------------
@@ -200,6 +212,7 @@ pub enum InvoiceKey {
     Group(u64),
     GroupTreasury(u64),
     TimelockAction(u64),
+    PayoutCheckpoint(u64),
 }
 
 // ---------------------------------------------------------------------------
@@ -233,6 +246,8 @@ pub enum AddressKey {
     PauseExempt(Address),
     GlobalVelocity(Address),
     CreatorVolMile(Address),
+    /// Issue #527: Payment history for a contributor address.
+    PayerHistory(Address),
 }
 
 // ---------------------------------------------------------------------------
@@ -346,6 +361,7 @@ mod tests {
             StorageKey::PlatformVolThresh, StorageKey::PlatformVolMile,
             StorageKey::CreatorVolThresh, StorageKey::UpgradeProposal,
             StorageKey::ProtocolFee, StorageKey::ReentrancyGuard,
+            StorageKey::MinRecipients,
         ];
         for i in 0..keys.len() {
             for j in (i + 1)..keys.len() {
@@ -413,6 +429,7 @@ mod tests {
             AddressKey::CreatorStatsPayers(addr.clone()),
             AddressKey::GlobalVelocity(addr.clone()),
             AddressKey::PauseExempt(addr.clone()),
+            AddressKey::PayerHistory(addr.clone()),
         ];
         for i in 0..keys.len() {
             for j in (i + 1)..keys.len() {
