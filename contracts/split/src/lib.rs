@@ -15320,6 +15320,36 @@ impl SplitContract {
             Self::_validate_parent(env, grandparent_id, depth + 1);
         }
     }
+
+    /// Get the creator address for an invoice.
+    pub fn get_invoice_creator(env: Env, invoice_id: u64) -> Address {
+        let invoice = load_invoice(&env, invoice_id);
+        invoice.creator
+    }
+
+    /// Get the list of recipient addresses for an invoice.
+    pub fn get_invoice_recipients(env: Env, invoice_id: u64) -> Vec<Address> {
+        let invoice = load_invoice(&env, invoice_id);
+        invoice.recipients
+    }
+
+    /// Get the number of payments made toward an invoice.
+    pub fn get_invoice_payment_count(env: Env, invoice_id: u64) -> u32 {
+        let invoice = load_invoice(&env, invoice_id);
+        invoice.payments.len() as u32
+    }
+
+    /// Get the funding percentage of an invoice as basis points.
+    /// Returns (funded * 10_000 / total) as u32, or 0 if total is 0.
+    pub fn get_invoice_funding_percentage(env: Env, invoice_id: u64) -> u32 {
+        let invoice = load_invoice(&env, invoice_id);
+        let total: i128 = invoice.amounts.iter().sum();
+        if total == 0 {
+            0
+        } else {
+            ((invoice.funded * 10_000) / total) as u32
+        }
+    }
 }
 
 /// Move a finalised invoice from hot storage to cold archival storage.
