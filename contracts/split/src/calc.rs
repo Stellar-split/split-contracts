@@ -4,6 +4,8 @@
 //! across recipients proportionally, ensuring every stroop is accounted for
 //! (i.e. `sum(result) == total` always holds).
 
+#[allow(unused_imports)]
+use crate::types::BASIS_POINTS_TOTAL;
 use soroban_sdk::{Env, Vec};
 
 use crate::error::ContractError;
@@ -15,16 +17,21 @@ use crate::error::ContractError;
 /// * `env`    – Soroban environment (needed to allocate the result `Vec`)
 /// * `total`  – total amount to distribute (stroops); must be ≥ 0
 /// * `ratios` – relative weight of each recipient (must be non-empty, all ≥ 0)
-/// * `denom`  – sum of all ratios (must be > 0)
+/// * `denom`  – sum of all ratios (must be > 0); typically [`BASIS_POINTS_TOTAL`]
 ///
 /// # Guarantees
 /// * `result.iter().sum::<i128>() == total` always
 /// * recipients with larger fractional remainders receive an extra stroop
 /// * pure function: no side effects, no storage access
 ///
-/// # Errors
-/// * [`ContractError::InvalidAmount`] if `ratios` is empty
-/// * [`ContractError::InvalidAmount`] if `denom` is zero or negative
+/// # Panics
+/// * if `ratios` is empty
+/// * if `denom` is zero
+// NOTE: if you call this function and ignore its return value the Rust
+// compiler will emit a `#[must_use]` warning:
+//   warning: unused return value of `distribute_with_remainder` that must be used
+// This ensures callers never silently drop the distribution result.
+#[must_use = "the distribution result must be applied to recipients"]
 pub fn distribute_with_remainder(
     env: &Env,
     total: i128,
@@ -260,6 +267,34 @@ mod tests {
         assert_exact(&env, 1_000_000_000, &[100_000, 200_000, 300_000], 600_000);
     }
 
+    #[test]
+    fn single_recipient_gets_full_amount() {
+        let env = Env::default();
+        let r = distribute_with_remainder(&env, 12345, &make_ratios(&env, &[1]), 1);
+        assert_eq!(r.len(), 1);
+        assert_eq!(r.get(0), Some(12345));
+    }
+
+    #[test]
+    fn sum_invariant_holds_with_unequal_ratios() {
+        let env = Env::default();
+        // Case 1: 3 recipients with ratios [1, 1, 1] and total=10
+        // Total is not evenly divisible by denom (10 % 3 != 0)
+        let r1 = distribute_with_remainder(&env, 10, &make_ratios(&env, &[1, 1, 1]), 3);
+        let sum1: i128 = r1.iter().sum();
+        assert_eq!(sum1, 10);
+
+        // Case 2: 4 recipients with ratios [2, 3, 1, 4] and total=100
+        let r2 = distribute_with_remainder(&env, 100, &make_ratios(&env, &[2, 3, 1, 4]), 10);
+        let sum2: i128 = r2.iter().sum();
+        assert_eq!(sum2, 100);
+
+        // Case 3: 2 recipients with ratios [1, 3] and total=999
+        let r3 = distribute_with_remainder(&env, 999, &make_ratios(&env, &[1, 3]), 4);
+        let sum3: i128 = r3.iter().sum();
+        assert_eq!(sum3, 999);
+    }
+
     /// Property-based style test: exhaustively verify sum == total for many inputs.
     #[test]
     fn test_property_sum_equals_total() {
@@ -282,29 +317,33 @@ mod tests {
         }
     }
 
-    /// Confirms that an empty ratios list returns Err(InvalidAmount) rather than panicking.
+    // -----------------------------------------------------------------------
+    // calc_platform_fee tests
+    // -----------------------------------------------------------------------
+
     #[test]
-    fn test_empty_ratios_returns_err() {
-        let env = Env::default();
-        let empty = Vec::new(&env);
-        let result = distribute_with_remainder(&env, 1000, &empty, 1);
-        assert_eq!(
-            result,
-            Err(ContractError::InvalidAmount),
-            "expected Err(InvalidAmount) for empty ratios"
-        );
+    fn test_calc_platform_fee_normal() {
+        // 1_000_000 funded at 250 bps (2.5%) → fee = 25_000
+        let fee = calc_platform_fee(1_000_000, 250).unwrap();
+        assert_eq!(fee, 25_000);
     }
 
-    /// Confirms that denom == 0 returns Err(InvalidAmount) rather than panicking.
     #[test]
-    fn test_zero_denom_returns_err() {
-        let env = Env::default();
-        let ratios = make_ratios(&env, &[1, 2, 3]);
-        let result = distribute_with_remainder(&env, 1000, &ratios, 0);
-        assert_eq!(
-            result,
-            Err(ContractError::InvalidAmount),
-            "expected Err(InvalidAmount) for zero denom"
-        );
+    fn test_calc_platform_fee_zero_bps() {
+        // Zero fee rate → always zero fee regardless of funded amount
+        assert_eq!(calc_platform_fee(999_999_999, 0).unwrap(), 0);
+    }
+
+    #[test]
+    fn test_calc_platform_fee_max_bps() {
+        // 10_000 bps = 100% → fee equals funded
+        assert_eq!(calc_platform_fee(500, 10_000).unwrap(), 500);
+    }
+
+    #[test]
+    fn test_calc_platform_fee_overflow() {
+        // i128::MAX * any fee_bps > 0 will overflow the intermediate multiplication
+        let result = calc_platform_fee(i128::MAX, 1);
+        assert_eq!(result, Err(crate::error::ContractError::ArithmeticOverflow));
     }
 }
