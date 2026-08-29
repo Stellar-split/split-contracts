@@ -1222,7 +1222,7 @@ impl Invoice {
         let bytes = &compact.data;
 
         // Unpack status (1 byte)
-        let status_byte = bytes.get(0).unwrap();
+        let status_byte = bytes.get(0).expect("from_compact: byte 0 (status) missing");
         let status = match status_byte {
             0 => InvoiceStatus::Pending,
             1 => InvoiceStatus::Released,
@@ -1239,14 +1239,18 @@ impl Invoice {
         // Unpack funded (16 bytes)
         let mut funded_bytes = [0u8; 16];
         for (i, byte) in funded_bytes.iter_mut().enumerate() {
-            *byte = bytes.get((1 + i) as u32).unwrap();
+            *byte = bytes
+                .get((1 + i) as u32)
+                .expect("from_compact: funded byte missing");
         }
         let funded = i128::from_be_bytes(funded_bytes);
 
         // Unpack deadline (8 bytes)
         let mut deadline_bytes = [0u8; 8];
         for (i, byte) in deadline_bytes.iter_mut().enumerate() {
-            *byte = bytes.get((17 + i) as u32).unwrap();
+            *byte = bytes
+                .get((17 + i) as u32)
+                .expect("from_compact: deadline byte missing");
         }
         let deadline = u64::from_be_bytes(deadline_bytes);
 

@@ -8018,86 +8018,94 @@ fn test_cancel_invoice_on_deleted_invoice_panics() {
     c.cancel_invoice(&creator, &id);
 }
 
-// ---------------------------------------------------------------------------
-// Issue #564: Checkpoint-Based State Recovery After Failed Payout
-// ---------------------------------------------------------------------------
-
 #[test]
-fn test_checkpoint_recovery_after_failed_payout() {
-    let (env, contract_id, token_id) = setup_initialized();
-    let c = client(&env, &contract_id);
-
-    let creator = Address::generate(&env);
-    let mut recipients = Vec::new(&env);
-    let mut amounts = Vec::new(&env);
-
-    for i in 0..5 {
-        recipients.push_back(Address::generate(&env));
-        amounts.push_back(100_i128);
-    }
-
-    // Mint sufficient funds for full payment
-    let payer = Address::generate(&env);
-    StellarAssetClient::new(&env, &token_id).mint(&payer, &1_000);
-    env.ledger().set_timestamp(1_000);
-
-    let id = c.create_invoice(
-        &creator,
-        &recipients,
-        &amounts,
-        &token_id,
-        &9_999,
-        &default_options(&env),
-    );
-
-    // Pay full amount to trigger release
-    c.pay(&payer, &id, &500_i128, &0_u64, &false, &false, &None);
-
-    // Verify the checkpoint system is designed to track:
-    // 1. DataKey::PayoutCheckpoint(invoice_id) stores last successful index
-    // 2. resume_payout(invoice_id, from_index) resumes from checkpoint
-    // 3. InvoiceStatus transitions: Pending -> PayoutInProgress -> Released
-    //
-    // This test validates the checkpoint mechanism prevents double-payment
-    // when a payout fails mid-loop and must be resumed.
-}
-
-// ---------------------------------------------------------------------------
-// Issue #563: Soroban Storage TTL Bump Management
-// ---------------------------------------------------------------------------
-
-#[test]
-fn test_ttl_bump_on_storage_writes() {
+fn test_get_invoice_deadline() {
     let (env, contract_id, token_id) = setup_initialized();
     let c = client(&env, &contract_id);
 
     let creator = Address::generate(&env);
     let recipient = Address::generate(&env);
-    let payer = Address::generate(&env);
+    let deadline: u64 = 5_000;
 
-    let mut recipients = Vec::new(&env);
-    recipients.push_back(recipient.clone());
-    let mut amounts = Vec::new(&env);
-    amounts.push_back(500_i128);
-
-    StellarAssetClient::new(&env, &token_id).mint(&payer, &1_000);
     env.ledger().set_timestamp(1_000);
 
-    let id = c.create_invoice(
-        &creator,
-        &recipients,
-        &amounts,
-        &token_id,
-        &9_999,
-        &default_options(&env),
-    );
+    let id = make_invoice(&env, &c, &creator, &recipient, 100, &token_id, deadline);
 
-    // Verify TTL bump mechanism:
-    // - Every persistent storage write calls save_invoice/save_recipients/save_contributor
-    // - Each helper immediately calls env.storage().persistent().bump() with MIN/MAX TTL
-    // - MIN_INVOICE_TTL_LEDGERS = 518_400 (60 days)
-    // - MAX_INVOICE_TTL_LEDGERS = 31_536_000 (1 year)
-    //
-    // This test validates that created invoices have their TTL extended
-    // and prevents silent data expiration during long-running campaigns.
+    let returned_deadline = c.get_invoice_deadline(&id).expect("should return deadline");
+    assert_eq!(returned_deadline, deadline);
+}
+
+#[test]
+fn test_get_invoice_deadline_not_found() {
+    let (env, contract_id, _token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+
+    let result = c.try_get_invoice_deadline(&999);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_get_invoice_funded() {
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+    let tk = token_client(&env, &token_id);
+
+    let creator = Address::generate(&env);
+    let payer = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    StellarAssetClient::new(&env, &token_id).mint(&payer, &500);
+    env.ledger().set_timestamp(1_000);
+
+    let id = make_invoice(&env, &c, &creator, &recipient, 200, &token_id, 9_999);
+
+    let funded_before = c.get_invoice_funded(&id).expect("should return funded");
+    assert_eq!(funded_before, 0);
+
+    c.pay(&payer, &id, &150_i128, &0_u64, &false, &false, &None);
+
+    let funded_after = c.get_invoice_funded(&id).expect("should return funded");
+    assert_eq!(funded_after, 150);
+}
+
+#[test]
+fn test_get_invoice_funded_not_found() {
+    let (env, contract_id, _token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+
+    let result = c.try_get_invoice_funded(&999);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_get_invoice_status() {
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+    let tk = token_client(&env, &token_id);
+
+    let creator = Address::generate(&env);
+    let payer = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    StellarAssetClient::new(&env, &token_id).mint(&payer, &500);
+    env.ledger().set_timestamp(1_000);
+
+    let id = make_invoice(&env, &c, &creator, &recipient, 200, &token_id, 9_999);
+
+    let status_pending = c.get_invoice_status(&id).expect("should return status");
+    assert_eq!(status_pending, InvoiceStatus::Pending);
+
+    c.pay(&payer, &id, &200_i128, &0_u64, &false, &false, &None);
+
+    let status_released = c.get_invoice_status(&id).expect("should return status");
+    assert_eq!(status_released, InvoiceStatus::Released);
+}
+
+#[test]
+fn test_get_invoice_status_not_found() {
+    let (env, contract_id, _token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+
+    let result = c.try_get_invoice_status(&999);
+    assert!(result.is_err());
 }
