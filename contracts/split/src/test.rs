@@ -4,6 +4,7 @@ use super::*;
 use soroban_sdk::{
     testutils::{Address as _, Events as _, Ledger},
     token::{Client as TokenClient, StellarAssetClient},
+    Address, Bytes, BytesN, Env, String, Symbol, TryFromVal, Val, Vec,
     Address, Bytes, BytesN, Env, String, Symbol, Vec,
 };
 use types::InvoiceOptions;
@@ -72,7 +73,7 @@ fn default_options(env: &Env) -> InvoiceOptions {
         forward_invoice_id: None,
         split_rules: Vec::new(env),
         auto_resolve_rules: Vec::new(env),
-        oracle_address: None,
+        condition_oracle: None,
         cross_chain_ref: None,
         allowed_payers: None,
         refund_grace_secs: None,
@@ -176,7 +177,7 @@ fn invoice_options(
         forward_invoice_id: None,
         split_rules: Vec::new(env),
         auto_resolve_rules: Vec::new(env),
-        oracle_address: None,
+        condition_oracle: None,
         cross_chain_ref: None,
         allowed_payers: None,
         refund_grace_secs: None,
@@ -4842,6 +4843,28 @@ fn test_pause_blocks_payment_with_reason() {
 }
 
 #[test]
+fn test_pause_invoice_emits_frozen_event() {
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    env.ledger().set_timestamp(1_000);
+    let id = make_invoice(&env, &c, &creator, &recipient, 200, &token_id, 9_999);
+
+    let reason = soroban_sdk::String::from_str(&env, "legal review pending");
+    c.pause_invoice(&creator, &id, &reason, &None);
+
+    let has_frozen_event = env
+        .events()
+        .all()
+        .iter()
+        .any(|(_c, topics, _d)| topic1_is(&env, &topics, "frozen"));
+    assert!(has_frozen_event, "expected an invoice_frozen event on pause");
+}
+
+#[test]
 fn test_auto_resume_allows_payment_after_timestamp() {
     let (env, contract_id, token_id) = setup_initialized();
     let c = client(&env, &contract_id);
@@ -5019,6 +5042,42 @@ fn test_clone_copies_recipients_and_amounts() {
 
     let clone_ext = c.get_invoice_ext(&clone_id);
     assert_eq!(clone_ext.parent_invoice_id, Some(source_id));
+}
+
+#[test]
+fn test_clone_invoice_emits_ledger_sequence_in_event_data() {
+    use soroban_sdk::TryIntoVal;
+
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    env.ledger().set_timestamp(1_000);
+
+    let source_id = make_invoice(&env, &c, &creator, &recipient, 100, &token_id, 9_999);
+
+    env.ledger().set_sequence_number(42);
+    let overrides = types::CloneOverrides {
+        new_deadline: None,
+        new_amounts: None,
+        new_recipients: None,
+        new_overflow_behavior: None,
+        new_metadata_hash: None,
+    };
+    let _clone_id = c.clone_invoice(&creator, &source_id, &overrides);
+
+    let cloned_event = env
+        .events()
+        .all()
+        .iter()
+        .find(|(_c, topics, _d)| topic0_is(&env, topics, "cloned"))
+        .expect("expected an invoice_cloned event");
+
+    let (_contract, _topics, data) = cloned_event;
+    let (ledger_seq,): (u32,) = data.try_into_val(&env).unwrap();
+    assert_eq!(ledger_seq, 42);
 }
 
 #[test]
@@ -7280,6 +7339,42 @@ fn test_309_remove_allowed_payer_emits_event() {
 }
 
 #[test]
+fn test_remove_allowlist_opens_invoice_and_emits_event() {
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+    let tk = token_client(&env, &token_id);
+
+    let creator = Address::generate(&env);
+    let allowed_payer = Address::generate(&env);
+    let other_payer = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    StellarAssetClient::new(&env, &token_id).mint(&other_payer, &300);
+    env.ledger().set_timestamp(1_000);
+
+    let id = make_invoice(&env, &c, &creator, &recipient, 300, &token_id, 9_999);
+    c.add_allowed_payer(&creator, &id, &allowed_payer);
+    assert!(c.get_invoice_ext(&id).allowed_payers.is_some());
+
+    c.remove_allowlist(&creator, &id);
+    assert!(c.get_invoice_ext(&id).allowed_payers.is_none());
+
+    let has_allowlist_removed_event = env
+        .events()
+        .all()
+        .iter()
+        .any(|(_c, topics, _d)| topic1_is(&env, &topics, "al_open"));
+    assert!(
+        has_allowlist_removed_event,
+        "expected an allowlist_removed event"
+    );
+
+    // The invoice is now open — a previously non-allowed payer can pay.
+    c.pay(&other_payer, &id, &300_i128, &0_u64, &false, &false, &None);
+    assert_eq!(tk.balance(&recipient), 300);
+}
+
+#[test]
 fn test_creator_stats_unique_payers() {
     let (env, contract_id, token_id) = setup_initialized();
     let c = client(&env, &contract_id);
@@ -8174,4 +8269,96 @@ fn test_cancel_invoice_on_deleted_invoice_panics() {
 
     c.delete_invoice(&creator, &id);
     c.cancel_invoice(&creator, &id);
+}
+
+#[test]
+fn test_get_invoice_deadline() {
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let deadline: u64 = 5_000;
+
+    env.ledger().set_timestamp(1_000);
+
+    let id = make_invoice(&env, &c, &creator, &recipient, 100, &token_id, deadline);
+
+    let returned_deadline = c.get_invoice_deadline(&id).expect("should return deadline");
+    assert_eq!(returned_deadline, deadline);
+}
+
+#[test]
+fn test_get_invoice_deadline_not_found() {
+    let (env, contract_id, _token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+
+    let result = c.try_get_invoice_deadline(&999);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_get_invoice_funded() {
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+    let tk = token_client(&env, &token_id);
+
+    let creator = Address::generate(&env);
+    let payer = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    StellarAssetClient::new(&env, &token_id).mint(&payer, &500);
+    env.ledger().set_timestamp(1_000);
+
+    let id = make_invoice(&env, &c, &creator, &recipient, 200, &token_id, 9_999);
+
+    let funded_before = c.get_invoice_funded(&id).expect("should return funded");
+    assert_eq!(funded_before, 0);
+
+    c.pay(&payer, &id, &150_i128, &0_u64, &false, &false, &None);
+
+    let funded_after = c.get_invoice_funded(&id).expect("should return funded");
+    assert_eq!(funded_after, 150);
+}
+
+#[test]
+fn test_get_invoice_funded_not_found() {
+    let (env, contract_id, _token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+
+    let result = c.try_get_invoice_funded(&999);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_get_invoice_status() {
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+    let tk = token_client(&env, &token_id);
+
+    let creator = Address::generate(&env);
+    let payer = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    StellarAssetClient::new(&env, &token_id).mint(&payer, &500);
+    env.ledger().set_timestamp(1_000);
+
+    let id = make_invoice(&env, &c, &creator, &recipient, 200, &token_id, 9_999);
+
+    let status_pending = c.get_invoice_status(&id).expect("should return status");
+    assert_eq!(status_pending, InvoiceStatus::Pending);
+
+    c.pay(&payer, &id, &200_i128, &0_u64, &false, &false, &None);
+
+    let status_released = c.get_invoice_status(&id).expect("should return status");
+    assert_eq!(status_released, InvoiceStatus::Released);
+}
+
+#[test]
+fn test_get_invoice_status_not_found() {
+    let (env, contract_id, _token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+
+    let result = c.try_get_invoice_status(&999);
+    assert!(result.is_err());
 }
