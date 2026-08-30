@@ -5428,29 +5428,21 @@ impl SplitContract {
         assert!(min_funding_bps <= 10_000, "min_funding_bps must be ≤ 10000");
         assert_valid_bps(tax_bps).expect("tax_bps must be ≤ 10000");
         assert_valid_bps(insurance_premium_bps).expect("insurance_premium_bps must be ≤ 10000");
-        // Issue #489: early-bird discounted platform fee must not exceed the
-        // standard fee in effect for this creator at creation time.
-        assert!(
-            early_bird_fee_bps <= 10_000,
-            "early_bird_fee_bps must be ≤ 10000"
-        );
-        if early_bird_window_ledgers > 0 {
-            let standard_fee_bps = Self::get_applicable_fee(env.clone(), creator.clone());
-            assert!(
-                early_bird_fee_bps <= standard_fee_bps,
-                "early_bird_fee_bps must not exceed the standard platform fee"
-            );
+        // Issue #489 / #696: early-bird discounted platform fee must not exceed the
+        // platform fee read from contract storage at creation time.
+        let platform_fee_bps: u32 = env
+            .storage()
+            .instance()
+            .get(&platform_fee_bps_key())
+            .unwrap_or(0u32);
+        if early_bird_fee_bps > platform_fee_bps {
+            env.panic_with_error(ContractError::InvalidAmount);
         }
         // Issue #559: creator fee must be within bounds and not exceed cap with platform fee.
         assert!(
             creator_fee_bps <= 10_000,
             "creator_fee_bps must be ≤ 10000"
         );
-        let platform_fee_bps: u32 = env
-            .storage()
-            .instance()
-            .get(&platform_fee_bps_key())
-            .unwrap_or(0u32);
         assert!(
             (creator_fee_bps as u64 + platform_fee_bps as u64) <= 10_000,
             "FeeSumExceedsCap"

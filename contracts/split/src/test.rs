@@ -8495,3 +8495,79 @@ fn test_create_invoice_valid_multisig_setup_ok() {
     let id = c.create_invoice(&creator, &recipients, &amounts, &token_id, &9_999_u64, &opts);
     assert!(id >= 1);
 }
+
+// --- Issue #696: early_bird_fee_bps must not exceed platform fee at creation ---
+
+#[test]
+fn test_create_invoice_early_bird_fee_exceeds_platform_fee_rejected() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    c.initialize(&admin, &0_i128, &treasury, &token_id, &500_u32, &None, &0_u32, &0_u32, &0_u64);
+    env.ledger().set_timestamp(1_000);
+
+    let creator = Address::generate(&env);
+    let (recipients, amounts) = two_recipients(&env);
+
+    let mut opts = default_options(&env);
+    opts.ext.early_bird_fee_bps = 501;
+
+    let res = c.try_create_invoice(&creator, &recipients, &amounts, &token_id, &9_999_u64, &opts);
+    assert_eq!(res, Err(Ok(ContractError::InvalidAmount.into())));
+}
+
+#[test]
+fn test_create_invoice_early_bird_fee_exceeds_default_zero_platform_fee_rejected() {
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+    env.ledger().set_timestamp(1_000);
+
+    let creator = Address::generate(&env);
+    let (recipients, amounts) = two_recipients(&env);
+
+    let mut opts = default_options(&env);
+    opts.ext.early_bird_fee_bps = 100;
+
+    let res = c.try_create_invoice(&creator, &recipients, &amounts, &token_id, &9_999_u64, &opts);
+    assert_eq!(res, Err(Ok(ContractError::InvalidAmount.into())));
+}
+
+#[test]
+fn test_create_invoice_early_bird_fee_equals_platform_fee_ok() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    c.initialize(&admin, &0_i128, &treasury, &token_id, &500_u32, &None, &0_u32, &0_u32, &0_u64);
+    env.ledger().set_timestamp(1_000);
+
+    let creator = Address::generate(&env);
+    let (recipients, amounts) = two_recipients(&env);
+
+    let mut opts = default_options(&env);
+    opts.ext.early_bird_fee_bps = 500;
+
+    let id = c.create_invoice(&creator, &recipients, &amounts, &token_id, &9_999_u64, &opts);
+    assert!(id >= 1);
+}
+
+#[test]
+fn test_create_invoice_early_bird_fee_less_than_platform_fee_ok() {
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    c.initialize(&admin, &0_i128, &treasury, &token_id, &500_u32, &None, &0_u32, &0_u32, &0_u64);
+    env.ledger().set_timestamp(1_000);
+
+    let creator = Address::generate(&env);
+    let (recipients, amounts) = two_recipients(&env);
+
+    let mut opts = default_options(&env);
+    opts.ext.early_bird_fee_bps = 250;
+
+    let id = c.create_invoice(&creator, &recipients, &amounts, &token_id, &9_999_u64, &opts);
+    assert!(id >= 1);
+}
+
