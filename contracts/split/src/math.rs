@@ -8,6 +8,34 @@
 //! The contract normalises every raw amount to a fixed 7-decimal canonical
 //! representation before any split arithmetic, then denormalises back to the
 //! token's native scale before each `token::Client::transfer()` call.
+//!
+//! ## Normalization flow
+//!
+//! Every token amount in the contract moves through the same three-stage
+//! pipeline so that split math is always performed on a single, comparable
+//! scale:
+//!
+//! 1. **Ingest (native scale).** Amounts arrive from callers / the ledger in
+//!    the *token's own* smallest unit (e.g. stroops for XLM at 7 decimals,
+//!    base units for USDC at 6). These are never trusted for cross-token
+//!    arithmetic as-is.
+//! 2. **Normalize → canonical.** [`normalize_amount`] scales each raw amount
+//!    up (or down) to the fixed 7-decimal `CANONICAL_DECIMALS` representation
+//!    via a `10^(delta)` multiply/divide. All recipient-share computation,
+//!    ratio application, fee calculation, and overflow checks happen **here,
+//!    in canonical units**, so a 6-decimal and an 18-decimal token compare
+//!    correctly.
+//! 3. **Denormalize → native.** Before any on-chain movement,
+//!    [`denormalize_amount`] reverses the scaling, converting the canonical
+//!    result back to the destination token's native smallest unit, which is
+//!    what `token::Client::transfer()` expects.
+//!
+//! The two helpers are exact inverses (`normalize_amount(x, d)` then
+//! `denormalize_amount(_, d)` returns `x`), so the round-trip is lossless
+//! except for the integer truncation that naturally occurs when a higher
+//! decimal token is downscaled (the only place precision is intentionally
+//! dropped). Negative inputs are rejected up front because a signed amount
+//! has no meaningful decimal-scale meaning here.
 
 use crate::error::ContractError;
 
