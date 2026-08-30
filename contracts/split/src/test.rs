@@ -7070,7 +7070,7 @@ fn test_contributor_allowlist_toggle_events() {
 }
 
 #[test]
-fn test_payment_received_event_includes_tip() {
+fn test_payment_received_event_includes_token() {
     let (env, contract_id, token_id) = setup_initialized();
     let c = client(&env, &contract_id);
 
@@ -7085,17 +7085,17 @@ fn test_payment_received_event_includes_tip() {
     c.pay(&payer, &id, &200_i128, &0_u64, &false, &false, &None);
 
     use soroban_sdk::TryIntoVal;
-    let mut found_tip: Option<i128> = None;
+    let mut found_token: Option<Address> = None;
     for (_contract, topics, data) in env.events().all().iter() {
         if topic1_is(&env, &topics, "paid") {
-            let decoded: (Address, i128, i128, u64) = data.try_into_val(&env).unwrap();
-            found_tip = Some(decoded.2);
+            let decoded: (Address, i128, Address, u64) = data.try_into_val(&env).unwrap();
+            found_token = Some(decoded.2);
         }
     }
     assert_eq!(
-        found_tip,
-        Some(0),
-        "payment_received event data should include the tip amount"
+        found_token,
+        Some(token_id),
+        "payment_received event data should include the payment token address"
     );
 }
 
