@@ -213,6 +213,9 @@ pub enum InvoiceKey {
     GroupTreasury(u64),
     TimelockAction(u64),
     PayoutCheckpoint(u64),
+    /// Per-invoice event sequence counter — typed replacement for the former
+    /// `(symbol_short!("ev_seq"), invoice_id)` inline key (issue #708).
+    EvSeq(u64),
 }
 
 // ---------------------------------------------------------------------------
@@ -386,6 +389,7 @@ mod tests {
             InvoiceKey::RecipientsList(id), InvoiceKey::AmountsList(id),
             InvoiceKey::PaidFlags(id), InvoiceKey::MilestoneFlags(id),
             InvoiceKey::ArchiveMarker(id), InvoiceKey::CreatedLedger(id),
+            InvoiceKey::EvSeq(id),
         ];
         for i in 0..keys.len() {
             for j in (i + 1)..keys.len() {
@@ -508,5 +512,17 @@ pub fn pending_creator_key(invoice_id: u64) -> (Symbol, u64) {
 #[allow(dead_code)]
 pub fn tombstone_key(invoice_id: u64) -> (Symbol, u64) {
     (symbol_short!("tombstone"), invoice_id)
+}
+
+// ---------------------------------------------------------------------------
+// Issue #708: Per-invoice event sequence counter (typed key)
+// ---------------------------------------------------------------------------
+
+/// Per-invoice event sequence counter — temporary storage.
+///
+/// Returns the [`InvoiceKey::EvSeq`] variant for `invoice_id`, replacing the
+/// old inline `(symbol_short!("ev_seq"), invoice_id)` tuple.
+pub fn ev_seq_key(invoice_id: u64) -> InvoiceKey {
+    InvoiceKey::EvSeq(invoice_id)
 }
 

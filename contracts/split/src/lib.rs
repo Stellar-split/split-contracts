@@ -56,6 +56,8 @@ mod error;
 mod events;
 pub mod types;
 mod validation;
+mod calc;
+mod stats;
 
 #[cfg(test)]
 mod test;
@@ -73,6 +75,7 @@ mod migrations;
 
 use error::ContractError;
 use validation::assert_valid_bps;
+use calc::{calc_platform_fee, funding_bps};
 use soroban_sdk::crypto::bls12_381::{Fr, G1Affine};
 use soroban_sdk::xdr::ToXdr;
 use soroban_sdk::{
@@ -2499,7 +2502,7 @@ fn check_and_emit_funding_checkpoints(env: &Env, invoice_id: u64, funded: i128, 
         return;
     }
 
-    let progress_bps = (funded.saturating_mul(10_000)) / total;
+    let progress_bps = funding_bps(funded, total) as i128;
     let last_emitted: u32 = env
         .storage()
         .persistent()
@@ -4124,7 +4127,7 @@ impl SplitContract {
         let total: i128 = invoice.amounts.iter().sum();
         let cumulative_contributed: i128 = env.storage().persistent()
             .get(&cumulative_contributed_key(invoice_id)).unwrap_or(0);
-        let completion_bps: u32 = if total > 0 { ((invoice.funded * 10_000) / total) as u32 } else { 0 };
+        let completion_bps: u32 = funding_bps(invoice.funded, total);
         let mut unique_payers: Vec<Address> = Vec::new(&env);
         for payment in invoice.payments.iter() {
             if !unique_payers.contains(&payment.payer) { unique_payers.push_back(payment.payer); }
@@ -10906,7 +10909,7 @@ impl SplitContract {
         let total: i128 = invoice.amounts.iter().sum();
         assert!(total > 0, "invoice total must be positive");
 
-        let funded_bps = (invoice.funded as u128 * 10_000u128 / total as u128) as u32;
+        let funded_bps = funding_bps(invoice.funded, total);
 
         // Evaluate rules in order; execute first match.
         for rule in invoice.auto_resolve_rules.clone().iter() {

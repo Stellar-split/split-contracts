@@ -26,6 +26,7 @@ use crate::types::{DisputeOutcome, FeeSplit, InvoicePhase, InvoiceStatus, RepSco
 //! symbol exceeds the short-macro length limit or must be constructed
 //! dynamically.
 
+use crate::storage_keys::ev_seq_key;
 use crate::types::{DisputeOutcome, FeeSplit, InvoiceStatus, RepScore, TimelockAction};
 use soroban_sdk::{contracttype, symbol_short, Address, BytesN, Env, String, Vec};
 
@@ -36,7 +37,7 @@ use soroban_sdk::{contracttype, symbol_short, Address, BytesN, Env, String, Vec}
 /// Fetch and increment the per-invoice event sequence counter.
 /// Lives in `storage::temporary` so it resets between transactions.
 fn next_seq(env: &Env, invoice_id: u64) -> u64 {
-    let key = (symbol_short!("ev_seq"), invoice_id);
+    let key = ev_seq_key(invoice_id);
     let seq: u64 = env.storage().temporary().get(&key).unwrap_or(0) + 1;
     env.storage().temporary().set(&key, &seq);
     seq
@@ -1852,4 +1853,44 @@ pub fn admin_transfer_completed(env: &Env, new_admin: &Address) {
         (symbol_short!("split"), symbol_short!("adm_done")),
         new_admin.clone(),
     );
+}
+
+// ---------------------------------------------------------------------------
+// Unit tests for the per-invoice event sequence counter (issue #708)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use soroban_sdk::Env;
+
+    /// `next_seq` returns 1 on first call and increments on each subsequent
+    /// call for the same invoice ID.
+    #[test]
+    fn test_next_seq_increments_per_invoice() {
+        let env = Env::default();
+        assert_eq!(next_seq(&env, 1), 1);
+        assert_eq!(next_seq(&env, 1), 2);
+        assert_eq!(next_seq(&env, 1), 3);
+    }
+
+    /// Sequences for different invoice IDs are independent — incrementing the
+    /// counter for invoice A must not affect invoice B's counter.
+    #[test]
+    fn test_next_seq_independent_for_different_invoice_ids() {
+        let env = Env::default();
+
+        // Advance invoice 10 twice.
+        assert_eq!(next_seq(&env, 10), 1);
+        assert_eq!(next_seq(&env, 10), 2);
+
+        // Invoice 20 should still start at 1.
+        assert_eq!(next_seq(&env, 20), 1);
+
+        // Invoice 10 continues independently from where it left off.
+        assert_eq!(next_seq(&env, 10), 3);
+
+        // Invoice 20 is still at 2 after one more call.
+        assert_eq!(next_seq(&env, 20), 2);
+    }
 }
