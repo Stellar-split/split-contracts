@@ -5,23 +5,41 @@ use soroban_sdk::contracterror;
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 #[repr(u32)]
 pub enum ContractError {
+    /// Caller is not authorized for this operation (missing admin/role/signer or wrong identity).
     NotAuthorized = 1,
+    /// The referenced invoice id does not exist in storage.
     InvoiceNotFound = 2,
+    /// The operation requires the invoice to still be open, but its deadline has already passed.
     DeadlinePassed = 3,
+    /// The invoice has already been fully funded and a further fund would over-fund it.
     AlreadyFunded = 4,
+    /// A supplied amount is non-positive, would overflow, or fails the invoice's amount rules.
     InvalidAmount = 5,
+    /// The invoice (or a related entity) is frozen and the requested mutation is disallowed.
     InvoiceFrozen = 6,
+    /// The invoice is not in a status that permits the requested operation.
     InvalidStatus = 7,
+    /// The caller is not in the invoice's allowed-payer set (or `allowed_payers` rejects them).
     PayerNotAllowed = 8,
+    /// The payment/fund amount is less than the remaining amount required to fund the invoice.
     FundingInsufficient = 9,
+    /// A call to an external oracle/price/dependency contract returned an error or aborted.
     OracleCallFailed = 10,
+    /// The caller is not the arbiter required to perform this dispute-related action.
     NotArbiter = 11,
+    /// The operation is only valid while the invoice is under dispute, but no dispute is active.
     NotDisputed = 12,
+    /// The action has already been executed and is not idempotent/retryable.
     AlreadyExecuted = 13,
+    /// A time-lock / vesting window has not yet elapsed; the operation must wait.
     TimelockPending = 14,
+    /// The contract is globally paused; all mutating entry points are blocked.
     ContractPaused = 15,
+    /// The recipient list is invalid (e.g. mismatched lengths of recipients/amounts/tokens).
     InvalidRecipients = 16,
+    /// A prerequisite (invoice, milestone, or dependency) that must be satisfied first is not met.
     PrerequisiteNotMet = 17,
+    /// The requested batch exceeds the maximum number of items permitted in a single call.
     BatchLimitExceeded = 18,
     /// Issue #330: Recipient has already been paid on this invoice.
     RecipientAlreadyPaid = 19,
@@ -32,8 +50,11 @@ pub enum ContractError {
     /// Oracle-priced invoice: the configured price oracle is unreachable or returned a
     /// non-positive rate at payment time.
     OracleUnavailable = 22,
+    /// Caller supplied a rating outside the valid range (e.g. 0, negative, or above the max score).
     InvalidRating = 23,
+    /// Caller attempted to rate the same target more than once.
     AlreadyRated = 24,
+    /// Caller exceeded the per-window rate limit for this operation.
     RateLimitExceeded = 25,
     /// Issue #438: Recipient reveal commitment does not match stored hash.
     RecipientRevealMismatch = 26,
