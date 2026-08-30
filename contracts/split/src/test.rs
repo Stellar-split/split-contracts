@@ -5,7 +5,6 @@ use soroban_sdk::{
     testutils::{Address as _, Events as _, Ledger},
     token::{Client as TokenClient, StellarAssetClient},
     Address, Bytes, BytesN, Env, String, Symbol, TryFromVal, Val, Vec,
-    Address, Bytes, BytesN, Env, String, Symbol, Vec,
 };
 use types::InvoiceOptions;
 
@@ -3126,7 +3125,6 @@ fn test_stage_release_not_fully_funded_panics() {
 }
 
 #[test]
-#[should_panic(expected = "release_stages must sum to 10000 basis points")]
 fn test_create_invoice_invalid_release_stages_panics() {
     let (env, contract_id, token_id) = setup_initialized();
     let c = client(&env, &contract_id);
@@ -3149,7 +3147,8 @@ fn test_create_invoice_invalid_release_stages_panics() {
     let mut opts = default_options(&env);
     opts.release_stages = stages;
 
-    c.create_invoice(&creator, &recipients, &amounts, &token_id, &9_999_u64, &opts);
+    let res = c.try_create_invoice(&creator, &recipients, &amounts, &token_id, &9_999_u64, &opts);
+    assert_eq!(res, Err(Ok(ContractError::InvalidRatioSum.into())));
 }
 
 // ---------------------------------------------------------------------------
@@ -7001,7 +7000,7 @@ fn test_contributor_allowlist_toggle_events() {
 }
 
 #[test]
-fn test_payment_received_event_includes_tip() {
+fn test_payment_received_event_includes_token() {
     let (env, contract_id, token_id) = setup_initialized();
     let c = client(&env, &contract_id);
 
@@ -7016,17 +7015,17 @@ fn test_payment_received_event_includes_tip() {
     c.pay(&payer, &id, &200_i128, &0_u64, &false, &false, &None);
 
     use soroban_sdk::TryIntoVal;
-    let mut found_tip: Option<i128> = None;
+    let mut found_token: Option<Address> = None;
     for (_contract, topics, data) in env.events().all().iter() {
         if topic1_is(&env, &topics, "paid") {
-            let decoded: (Address, i128, i128, u64) = data.try_into_val(&env).unwrap();
-            found_tip = Some(decoded.2);
+            let decoded: (Address, i128, Address, u64) = data.try_into_val(&env).unwrap();
+            found_token = Some(decoded.2);
         }
     }
     assert_eq!(
-        found_tip,
-        Some(0),
-        "payment_received event data should include the tip amount"
+        found_token,
+        Some(token_id),
+        "payment_received event data should include the payment token address"
     );
 }
 
@@ -8291,4 +8290,208 @@ fn test_get_invoice_status_not_found() {
 
     let result = c.try_get_invoice_status(&999);
     assert!(result.is_err());
+}
+
+// ---------------------------------------------------------------------------
+// Issues #690-#693 — InvoiceOptions validation at invoice creation
+// ---------------------------------------------------------------------------
+
+/// Build a two-recipient / two-amount pair for the validation tests. Two
+/// recipients keeps these tests clear of the minimum-recipient-count gate.
+fn two_recipients(env: &Env) -> (Vec<Address>, Vec<i128>) {
+    let mut recipients = Vec::new(env);
+    recipients.push_back(Address::generate(env));
+    recipients.push_back(Address::generate(env));
+    let mut amounts = Vec::new(env);
+    amounts.push_back(600_i128);
+    amounts.push_back(400_i128);
+    (recipients, amounts)
+}
+
+// --- Issue #690: penalty_bps must not exceed 10 000 ---
+
+#[test]
+fn test_create_invoice_penalty_bps_over_max_rejected() {
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+    env.ledger().set_timestamp(1_000);
+
+    let creator = Address::generate(&env);
+    let (recipients, amounts) = two_recipients(&env);
+
+    let mut opts = default_options(&env);
+    opts.penalty_bps = Some(10_001);
+
+    let res = c.try_create_invoice(&creator, &recipients, &amounts, &token_id, &9_999_u64, &opts);
+    assert_eq!(res, Err(Ok(ContractError::InvalidAmount.into())));
+}
+
+#[test]
+fn test_create_invoice_penalty_bps_at_max_ok() {
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+    env.ledger().set_timestamp(1_000);
+
+    let creator = Address::generate(&env);
+    let (recipients, amounts) = two_recipients(&env);
+
+    let mut opts = default_options(&env);
+    opts.penalty_bps = Some(10_000);
+
+    let id = c.create_invoice(&creator, &recipients, &amounts, &token_id, &9_999_u64, &opts);
+    assert!(id >= 1);
+}
+
+// --- Issue #691: non-empty tranches must sum to exactly 10 000 bps ---
+
+#[test]
+fn test_create_invoice_tranches_sum_not_total_rejected() {
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+    env.ledger().set_timestamp(1_000);
+
+    let creator = Address::generate(&env);
+    let (recipients, amounts) = two_recipients(&env);
+
+    // 4_000 + 5_999 = 9_999, one basis point short of 10_000.
+    let mut tranches = Vec::new(&env);
+    tranches.push_back(Tranche { timestamp: 2_000, basis_points: 4_000 });
+    tranches.push_back(Tranche { timestamp: 3_000, basis_points: 5_999 });
+
+    let mut opts = default_options(&env);
+    opts.tranches = tranches;
+
+    let res = c.try_create_invoice(&creator, &recipients, &amounts, &token_id, &9_999_u64, &opts);
+    assert_eq!(res, Err(Ok(ContractError::InvalidRatioSum.into())));
+}
+
+#[test]
+fn test_create_invoice_tranches_sum_exact_total_ok() {
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+    env.ledger().set_timestamp(1_000);
+
+    let creator = Address::generate(&env);
+    let (recipients, amounts) = two_recipients(&env);
+
+    let mut tranches = Vec::new(&env);
+    tranches.push_back(Tranche { timestamp: 2_000, basis_points: 4_000 });
+    tranches.push_back(Tranche { timestamp: 3_000, basis_points: 6_000 });
+
+    let mut opts = default_options(&env);
+    opts.tranches = tranches;
+
+    let id = c.create_invoice(&creator, &recipients, &amounts, &token_id, &9_999_u64, &opts);
+    assert!(id >= 1);
+}
+
+// --- Issue #692: non-empty release_stages must sum to exactly 10 000 bps ---
+
+#[test]
+fn test_create_invoice_release_stages_sum_not_total_rejected() {
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+    env.ledger().set_timestamp(1_000);
+
+    let creator = Address::generate(&env);
+    let (recipients, amounts) = two_recipients(&env);
+
+    // 5_000 + 4_500 = 9_500, short of 10_000.
+    let mut stages: Vec<u32> = Vec::new(&env);
+    stages.push_back(5_000u32);
+    stages.push_back(4_500u32);
+
+    let mut opts = default_options(&env);
+    opts.release_stages = stages;
+
+    let res = c.try_create_invoice(&creator, &recipients, &amounts, &token_id, &9_999_u64, &opts);
+    assert_eq!(res, Err(Ok(ContractError::InvalidRatioSum.into())));
+}
+
+#[test]
+fn test_create_invoice_release_stages_three_stages_sum_total_ok() {
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+    env.ledger().set_timestamp(1_000);
+
+    let creator = Address::generate(&env);
+    let (recipients, amounts) = two_recipients(&env);
+
+    let mut stages: Vec<u32> = Vec::new(&env);
+    stages.push_back(3_000u32);
+    stages.push_back(3_000u32);
+    stages.push_back(4_000u32);
+
+    let mut opts = default_options(&env);
+    opts.release_stages = stages;
+
+    let id = c.create_invoice(&creator, &recipients, &amounts, &token_id, &9_999_u64, &opts);
+    assert!(id >= 1);
+}
+
+// --- Issue #693: required_signatures must be in 1..=co_signers.len() ---
+
+#[test]
+fn test_create_invoice_required_signatures_exceeds_cosigners_rejected() {
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+    env.ledger().set_timestamp(1_000);
+
+    let creator = Address::generate(&env);
+    let (recipients, amounts) = two_recipients(&env);
+
+    // 2-of-3 requested, but only one co-signer supplied.
+    let mut co_signers = Vec::new(&env);
+    co_signers.push_back(Address::generate(&env));
+
+    let mut opts = default_options(&env);
+    opts.co_signers = co_signers;
+    opts.required_signatures = 2;
+
+    let res = c.try_create_invoice(&creator, &recipients, &amounts, &token_id, &9_999_u64, &opts);
+    assert_eq!(res, Err(Ok(ContractError::InvalidAmount.into())));
+}
+
+#[test]
+fn test_create_invoice_required_signatures_zero_with_cosigners_rejected() {
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+    env.ledger().set_timestamp(1_000);
+
+    let creator = Address::generate(&env);
+    let (recipients, amounts) = two_recipients(&env);
+
+    let mut co_signers = Vec::new(&env);
+    co_signers.push_back(Address::generate(&env));
+    co_signers.push_back(Address::generate(&env));
+
+    let mut opts = default_options(&env);
+    opts.co_signers = co_signers;
+    opts.required_signatures = 0;
+
+    let res = c.try_create_invoice(&creator, &recipients, &amounts, &token_id, &9_999_u64, &opts);
+    assert_eq!(res, Err(Ok(ContractError::InvalidAmount.into())));
+}
+
+#[test]
+fn test_create_invoice_valid_multisig_setup_ok() {
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+    env.ledger().set_timestamp(1_000);
+
+    let creator = Address::generate(&env);
+    let (recipients, amounts) = two_recipients(&env);
+
+    // Valid 2-of-3.
+    let mut co_signers = Vec::new(&env);
+    co_signers.push_back(Address::generate(&env));
+    co_signers.push_back(Address::generate(&env));
+    co_signers.push_back(Address::generate(&env));
+
+    let mut opts = default_options(&env);
+    opts.co_signers = co_signers;
+    opts.required_signatures = 2;
+
+    let id = c.create_invoice(&creator, &recipients, &amounts, &token_id, &9_999_u64, &opts);
+    assert!(id >= 1);
 }
