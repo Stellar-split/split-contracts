@@ -8015,7 +8015,7 @@ impl SplitContract {
         env.storage()
             .persistent()
             .set(&cosign_key(invoice_id), &approvals);
-        events::cosigner_approved(&env, invoice_id, &cosigner);
+        events::cosigner_approved(&env, invoice_id, &cosigner, approvals.len());
         append_audit_entry(&env, invoice_id, symbol_short!("cosign"), &cosigner);
 
         let threshold: u32 = env
@@ -10470,6 +10470,7 @@ impl SplitContract {
                     &total_creator_fee,
                 );
                 events::creator_fee_paid(env, invoice_id, &invoice.creator, total_creator_fee);
+                events::creator_fee_collected(env, invoice_id, &invoice.creator, total_creator_fee);
             }
         }
 
@@ -12685,6 +12686,7 @@ impl SplitContract {
         env.storage()
             .persistent()
             .set(&invoice_phase_key(invoice_id), &new_phase);
+        events::invoice_phase_changed(&env, invoice_id, &current_phase, &new_phase);
     }
 
     /// Issue #449 / #676: Get the current phase of an invoice.
