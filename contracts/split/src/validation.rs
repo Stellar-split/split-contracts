@@ -97,6 +97,20 @@ pub fn assert_bps_total(total: u32) -> Result<(), ContractError> {
     Ok(())
 }
 
+/// Reject a single basis-point value that exceeds 100% (`BASIS_POINTS_TOTAL` =
+/// 10 000). Used for standalone rate fields such as `penalty_bps`, `tax_bps`
+/// and `insurance_premium_bps` where the value must be a fraction of a whole,
+/// not a sum that covers it.
+///
+/// # Errors
+/// Returns `Err(ContractError::InvalidAmount)` when `bps > 10_000`.
+pub fn assert_valid_bps(bps: u32) -> Result<(), ContractError> {
+    if bps > BASIS_POINTS_TOTAL {
+        return Err(ContractError::InvalidAmount);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
