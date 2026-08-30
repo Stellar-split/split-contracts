@@ -30,12 +30,8 @@ pub fn get_stats(env: &Env) -> Stats {
     let storage = env.storage().instance();
 
     (
-        storage
-            .get(&total_invoices_key(env))
-            .unwrap_or(0u64),
-        storage
-            .get(&total_volume_key(env))
-            .unwrap_or(0i128),
+        storage.get(&total_invoices_key(env)).unwrap_or(0u64),
+        storage.get(&total_volume_key(env)).unwrap_or(0i128),
         storage
             .get(&total_recipients_paid_key(env))
             .unwrap_or(0u64),
@@ -65,7 +61,7 @@ pub fn increment(
         .checked_add(recipients_paid)
         .ok_or(ContractError::StatsOverflow)?;
 
-    let mut storage = env.storage().instance();
+    let storage = env.storage().instance();
     storage.set(&total_invoices_key(env), &next_invoices);
     storage.set(&total_volume_key(env), &next_volume);
     storage.set(&total_recipients_paid_key(env), &next_recipients_paid);
