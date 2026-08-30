@@ -398,9 +398,13 @@ pub struct PaymentFingerprint {
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct InvoiceOptions {
+    /// Additional creators who share ownership/rights over the invoice.
     pub co_creators: Vec<Address>,
+    /// When true, payers may withdraw their contribution before the deadline.
     pub allow_early_withdrawal: bool,
+    /// Size of the bonus pool funded alongside the invoice, in token units.
     pub bonus_pool: i128,
+    /// Maximum number of distinct payers that may contribute to the bonus pool.
     pub bonus_max_payers: u32,
     /// Optional creator cosigner address that must co-author creator actions.
     pub creator_cosigner: Option<Address>,
