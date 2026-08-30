@@ -80,6 +80,26 @@ pub struct AdminTransferCancelledEvent {
 }
 
 // ──────────────────────────────────────────────────────────────────────
+// Escrow release event
+// ──────────────────────────────────────────────────────────────────────
+
+/// Emitted after funds are successfully transferred to a recipient during
+/// a release call.
+///
+/// Event topics: `(escrow, released)`
+/// Event data: `EscrowReleased { invoice_id, recipient, amount }`
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct EscrowReleased {
+    /// The ID of the invoice that was released.
+    pub invoice_id: u64,
+    /// The address that received the released funds.
+    pub recipient: Address,
+    /// The amount of tokens transferred to the recipient.
+    pub amount: i128,
+}
+
+// ──────────────────────────────────────────────────────────────────────
 // Payer Blacklist types
 // ──────────────────────────────────────────────────────────────────────
 
