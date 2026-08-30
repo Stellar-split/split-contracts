@@ -613,45 +613,85 @@ pub struct InvoiceCore {
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct InvoiceExt {
+    /// Addresses whose approval is required before the invoice can be released.
     pub co_signers: Vec<Address>,
+    /// How many of `co_signers` approvals are required (≤ `co_signers.len()`).
     pub required_signatures: u32,
+    /// Addresses that have actually approved the release so far.
     pub signatures: Vec<Address>,
+    /// Optional address permitted to call `approve_release` on behalf of the creator.
     pub approver: Option<Address>,
+    /// Whether the release has been approved by the required approvers.
     pub approved: bool,
+    /// Optional oracle that must confirm a release condition before funds move.
     pub condition_oracle: Option<Address>,
+    /// Whether the `condition_oracle` has signalled the condition is met.
     pub condition_met: bool,
+    /// Penalty applied (in basis points) to late payments.
     pub penalty_bps: u32,
+    /// Timestamp after which the `penalty_bps` penalty begins to apply.
     pub penalty_deadline: u64,
+    /// Minimum funding threshold (basis points) that must be reached before release.
     pub min_funding_bps: u32,
+    /// Configured release stages as basis points; empty = release all at once.
     pub release_stages: Vec<u32>,
+    /// Count of release stages already paid out.
     pub released_stages: u32,
+    /// Optional allowlist of payer addresses; `None` = open to anyone.
     pub allowed_payers: Option<Vec<Address>>,
+    /// Optional price oracle used for dynamic (oracle-priced) funding.
     pub price_oracle: Option<Address>,
+    /// Cached per-recipient base amounts used during release math.
     pub base_amounts: Vec<i128>,
+    /// Per-recipient optional output token used for a DEX swap on release.
     pub swap_tokens: Vec<Option<Address>>,
+    /// Tax levied on the invoice, in basis points.
     pub tax_bps: u32,
+    /// Address that receives the tax withheld from the invoice.
     pub tax_authority: Option<Address>,
+    /// Insurance premium (basis points) charged on the invoice.
     pub insurance_premium_bps: u32,
+    /// Funds held in the insurance pool for this invoice.
     pub insurance_fund: i128,
+    /// Whether payouts are routed through a smart-order router for best execution.
     pub smart_route: bool,
+    /// When true, release registers the funds with the stream contract instead of a direct transfer.
     pub convert_to_stream: bool,
+    /// Additional tokens (beyond the base token) accepted by `pay_with_token`.
     pub accepted_tokens: Vec<Address>,
+    /// Optional address that leftover funds are forwarded to on release.
     pub forward_to: Option<Address>,
+    /// Optional invoice id that leftover funds are forwarded to on release.
     pub forward_invoice_id: Option<u64>,
+    /// Per-recipient split rules evaluated at release time; empty = use `amounts`.
     pub split_rules: Vec<SplitRule>,
+    /// Pre-agreed auto-resolution rules evaluated in order by `auto_resolve`.
     pub auto_resolve_rules: Vec<ResolveRule>,
+    /// Optional creator cosigner that must co-author creator actions.
     pub creator_cosigner: Option<Address>,
+    /// Velocity limit (token units) for a single payer over `velocity_window`.
     pub velocity_limit: i128,
+    /// Window length (seconds) for velocity limiting of payer contributions.
     pub velocity_window: u64,
+    /// Optional id of the parent invoice this one was cloned from.
     pub parent_invoice_id: Option<u64>,
+    /// Optional human-readable reason the invoice is paused.
     pub pause_reason: Option<String>,
+    /// Optional timestamp at which a paused invoice auto-resumes.
     pub auto_resume_at: Option<u64>,
+    /// Optional per-payer cooldown (seconds) between payments.
     pub payment_cooldown_secs: Option<u64>,
+    /// Optional maximum number of payments allowed per `payment_window_secs`.
     pub max_payments_per_window: Option<u32>,
+    /// Optional window (seconds) for per-payer payment rate limiting.
     pub payment_window_secs: Option<u64>,
+    /// Optional timestamp at which release is scheduled to become available.
     pub scheduled_release_at: Option<u64>,
+    /// Configured penalty tiers applied at different late-payment thresholds.
     pub penalty_tiers: Vec<PenaltyTier>,
+    /// Optional allowlist of callers permitted to invoke mutating entry points.
     pub allowed_callers: Option<Vec<Address>>,
+    /// Grace period (seconds) after `deadline` before a refund is allowed.
     pub refund_grace_secs: Option<u64>,
 }
 
