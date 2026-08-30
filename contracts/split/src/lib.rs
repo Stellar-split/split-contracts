@@ -56,6 +56,8 @@ mod error;
 mod events;
 pub mod types;
 mod validation;
+mod calc;
+mod stats;
 
 #[cfg(test)]
 mod test;
@@ -73,6 +75,7 @@ mod migrations;
 
 use error::ContractError;
 use validation::assert_valid_bps;
+use calc::{calc_platform_fee, funding_bps};
 use soroban_sdk::crypto::bls12_381::{Fr, G1Affine};
 use soroban_sdk::xdr::ToXdr;
 use soroban_sdk::{
@@ -2499,7 +2502,7 @@ fn check_and_emit_funding_checkpoints(env: &Env, invoice_id: u64, funded: i128, 
         return;
     }
 
-    let progress_bps = (funded.saturating_mul(10_000)) / total;
+    let progress_bps = funding_bps(funded, total) as i128;
     let last_emitted: u32 = env
         .storage()
         .persistent()
@@ -4124,7 +4127,7 @@ impl SplitContract {
         let total: i128 = invoice.amounts.iter().sum();
         let cumulative_contributed: i128 = env.storage().persistent()
             .get(&cumulative_contributed_key(invoice_id)).unwrap_or(0);
-        let completion_bps: u32 = if total > 0 { ((invoice.funded * 10_000) / total) as u32 } else { 0 };
+        let completion_bps: u32 = funding_bps(invoice.funded, total);
         let mut unique_payers: Vec<Address> = Vec::new(&env);
         for payment in invoice.payments.iter() {
             if !unique_payers.contains(&payment.payer) { unique_payers.push_back(payment.payer); }
@@ -5416,7 +5419,12 @@ impl SplitContract {
             );
         }
         assert!(bonus_pool >= 0, "bonus_pool must be non-negative");
-        assert_valid_bps(penalty_bps).expect("penalty_bps must be ≤ 10000");
+        // Issue #690: `penalty_bps` is a fraction of a late payment; a value
+        // above 100% would make every late payment exceed its principal. Reject
+        // it before any storage is written.
+        if let Err(e) = assert_valid_bps(penalty_bps) {
+            env.panic_with_error(e);
+        }
         assert!(min_funding_bps <= 10_000, "min_funding_bps must be ≤ 10000");
         assert_valid_bps(tax_bps).expect("tax_bps must be ≤ 10000");
         assert_valid_bps(insurance_premium_bps).expect("insurance_premium_bps must be ≤ 10000");
@@ -5512,16 +5520,40 @@ impl SplitContract {
             let _ = load_invoice(env, prereq_id);
         }
 
-        if !tranches.is_empty() {
-            let total_bps: u32 = tranches.iter().map(|t| t.basis_points).fold(0u32, |a, b| a.saturating_add(b));
-            validation::assert_bps_total(total_bps)
-                .expect("tranches must sum to 10000 basis points");
+        // Issue #693: a multi-signature release gate that requires more approvals
+        // than there are co-signers (or requires approvals with no co-signers at
+        // all) can never be satisfied, permanently locking the invoice. Reject
+        // such a configuration at creation time rather than at release time.
+        if required_signatures > co_signers.len() {
+            env.panic_with_error(ContractError::InvalidAmount);
+        }
+        if !co_signers.is_empty() && required_signatures == 0 {
+            env.panic_with_error(ContractError::InvalidAmount);
         }
 
+        // Issue #691: when a graduated release schedule is supplied, its
+        // per-tranche basis points must cover exactly 100% so that all funds are
+        // eventually releasable. An empty schedule (release-all-at-once) is fine.
+        if !tranches.is_empty() {
+            let total_bps: u32 = tranches
+                .iter()
+                .map(|t| t.basis_points)
+                .fold(0u32, |a, b| a.saturating_add(b));
+            if let Err(e) = validation::assert_bps_total(total_bps) {
+                env.panic_with_error(e);
+            }
+        }
+
+        // Issue #692: a non-empty staged-release schedule must sum to exactly
+        // 100% (10 000 bps); otherwise the final stage is silently truncated and
+        // residual funds are left unreachable. An empty schedule is skipped.
         if !release_stages.is_empty() {
-            let total_bps: u32 = release_stages.iter().fold(0u32, |a, b| a.saturating_add(b));
-            validation::assert_bps_total(total_bps)
-                .expect("release_stages must sum to 10000 basis points");
+            let total_bps: u32 = release_stages
+                .iter()
+                .fold(0u32, |a, b| a.saturating_add(b));
+            if let Err(e) = validation::assert_bps_total(total_bps) {
+                env.panic_with_error(e);
+            }
         }
         let milestones = milestones.unwrap_or_else(|| Vec::new(env));
         validate_milestones(env, &milestones);
@@ -8013,7 +8045,7 @@ impl SplitContract {
         env.storage()
             .persistent()
             .set(&cosign_key(invoice_id), &approvals);
-        events::cosigner_approved(&env, invoice_id, &cosigner);
+        events::cosigner_approved(&env, invoice_id, &cosigner, approvals.len());
         append_audit_entry(&env, invoice_id, symbol_short!("cosign"), &cosigner);
 
         let threshold: u32 = env
@@ -10468,6 +10500,7 @@ impl SplitContract {
                     &total_creator_fee,
                 );
                 events::creator_fee_paid(env, invoice_id, &invoice.creator, total_creator_fee);
+                events::creator_fee_collected(env, invoice_id, &invoice.creator, total_creator_fee);
             }
         }
 
@@ -10876,7 +10909,7 @@ impl SplitContract {
         let total: i128 = invoice.amounts.iter().sum();
         assert!(total > 0, "invoice total must be positive");
 
-        let funded_bps = (invoice.funded as u128 * 10_000u128 / total as u128) as u32;
+        let funded_bps = funding_bps(invoice.funded, total);
 
         // Evaluate rules in order; execute first match.
         for rule in invoice.auto_resolve_rules.clone().iter() {
@@ -12683,6 +12716,7 @@ impl SplitContract {
         env.storage()
             .persistent()
             .set(&invoice_phase_key(invoice_id), &new_phase);
+        events::invoice_phase_changed(&env, invoice_id, &current_phase, &new_phase);
     }
 
     /// Issue #449 / #676: Get the current phase of an invoice.

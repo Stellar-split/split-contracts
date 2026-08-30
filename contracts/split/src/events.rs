@@ -1,3 +1,4 @@
+use crate::types::{DisputeOutcome, FeeSplit, InvoicePhase, InvoiceStatus, RepScore, TimelockAction};
 //! # Event naming convention
 //!
 //! All split-contracts events follow a consistent topic layout:
@@ -25,6 +26,7 @@
 //! symbol exceeds the short-macro length limit or must be constructed
 //! dynamically.
 
+use crate::storage_keys::ev_seq_key;
 use crate::types::{DisputeOutcome, FeeSplit, InvoiceStatus, RepScore, TimelockAction};
 use soroban_sdk::{contracttype, symbol_short, Address, BytesN, Env, String, Vec};
 
@@ -35,7 +37,7 @@ use soroban_sdk::{contracttype, symbol_short, Address, BytesN, Env, String, Vec}
 /// Fetch and increment the per-invoice event sequence counter.
 /// Lives in `storage::temporary` so it resets between transactions.
 fn next_seq(env: &Env, invoice_id: u64) -> u64 {
-    let key = (symbol_short!("ev_seq"), invoice_id);
+    let key = ev_seq_key(invoice_id);
     let seq: u64 = env.storage().temporary().get(&key).unwrap_or(0) + 1;
     env.storage().temporary().set(&key, &seq);
     seq
@@ -182,12 +184,6 @@ pub fn invoice_expired(env: &Env, invoice_id: u64, deadline: u64, funded: i128, 
             invoice_id,
         ),
         (deadline, funded, creator.clone()),
-/// Data: (deadline, funded)
-pub fn invoice_expired(env: &Env, invoice_id: u64, deadline: u64, funded: i128) {
-    let event_seq = next_seq(env, invoice_id);
-    env.events().publish(
-        (symbol_short!("split"), symbol_short!("expired"), invoice_id),
-        (deadline, funded, event_seq),
     );
 }
 
@@ -1580,15 +1576,15 @@ pub fn invoice_dispute_raised(
 
 /// Emitted on every individual cosigner approval recorded via `approve_release`.
 /// Topics: (split, CosignerApproved, invoice_id)
-/// Data: (cosigner, ledger)
-pub fn cosigner_approved(env: &Env, invoice_id: u64, cosigner: &Address) {
+/// Data: (cosigner, approvals_so_far, ledger)
+pub fn cosigner_approved(env: &Env, invoice_id: u64, cosigner: &Address, approvals_so_far: u32) {
     env.events().publish(
         (
             symbol_short!("split"),
             soroban_sdk::Symbol::new(env, "CosignerApproved"),
             invoice_id,
         ),
-        (cosigner.clone(), env.ledger().sequence()),
+        (cosigner.clone(), approvals_so_far, env.ledger().sequence()),
     );
 }
 
@@ -1708,6 +1704,22 @@ pub fn creator_fee_paid(env: &Env, invoice_id: u64, creator: &Address, fee_amoun
     );
 }
 
+/// Issue #685: Emitted when a creator-declared fee (`creator_fee_bps`) is
+/// deducted from recipient payouts at release time.
+///
+/// Topics: (split, creator_fee_collected, invoice_id)
+/// Data:   (creator, fee_amount)
+pub fn creator_fee_collected(env: &Env, invoice_id: u64, creator: &Address, fee_amount: i128) {
+    env.events().publish(
+        (
+            symbol_short!("split"),
+            soroban_sdk::Symbol::new(env, "creator_fee_collected"),
+            invoice_id,
+        ),
+        (creator.clone(), fee_amount),
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Issue #560: Creator Migration
 // ---------------------------------------------------------------------------
@@ -1787,6 +1799,29 @@ pub fn recipient_share_locked(
     );
 }
 
+/// Issue #684: Emitted at every `InvoicePhase` transition (Draft -> Active ->
+/// Locked -> Released).
+/// Topics: (split, phase_chg, invoice_id)
+/// Data: (old_phase, new_phase, event_seq)
+pub fn invoice_phase_changed(
+    env: &Env,
+    invoice_id: u64,
+    old_phase: &InvoicePhase,
+    new_phase: &InvoicePhase,
+) {
+    let phase_sym = |phase: &InvoicePhase| match phase {
+        InvoicePhase::Draft => symbol_short!("draft"),
+        InvoicePhase::Active => symbol_short!("active"),
+        InvoicePhase::Locked => symbol_short!("locked"),
+        InvoicePhase::Released => symbol_short!("released"),
+    };
+    let event_seq = next_seq(env, invoice_id);
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("phase_chg"), invoice_id),
+        (phase_sym(old_phase), phase_sym(new_phase), event_seq),
+    );
+}
+
 /// Emitted when an admin unlocks a recipient's share of an invoice.
 pub fn recipient_share_unlocked(
     env: &Env,
@@ -1818,4 +1853,44 @@ pub fn admin_transfer_completed(env: &Env, new_admin: &Address) {
         (symbol_short!("split"), symbol_short!("adm_done")),
         new_admin.clone(),
     );
+}
+
+// ---------------------------------------------------------------------------
+// Unit tests for the per-invoice event sequence counter (issue #708)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use soroban_sdk::Env;
+
+    /// `next_seq` returns 1 on first call and increments on each subsequent
+    /// call for the same invoice ID.
+    #[test]
+    fn test_next_seq_increments_per_invoice() {
+        let env = Env::default();
+        assert_eq!(next_seq(&env, 1), 1);
+        assert_eq!(next_seq(&env, 1), 2);
+        assert_eq!(next_seq(&env, 1), 3);
+    }
+
+    /// Sequences for different invoice IDs are independent — incrementing the
+    /// counter for invoice A must not affect invoice B's counter.
+    #[test]
+    fn test_next_seq_independent_for_different_invoice_ids() {
+        let env = Env::default();
+
+        // Advance invoice 10 twice.
+        assert_eq!(next_seq(&env, 10), 1);
+        assert_eq!(next_seq(&env, 10), 2);
+
+        // Invoice 20 should still start at 1.
+        assert_eq!(next_seq(&env, 20), 1);
+
+        // Invoice 10 continues independently from where it left off.
+        assert_eq!(next_seq(&env, 10), 3);
+
+        // Invoice 20 is still at 2 after one more call.
+        assert_eq!(next_seq(&env, 20), 2);
+    }
 }

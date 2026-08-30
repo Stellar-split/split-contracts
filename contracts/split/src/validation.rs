@@ -97,21 +97,16 @@ pub fn assert_bps_total(total: u32) -> Result<(), ContractError> {
     Ok(())
 }
 
-/// Issue #704: Validate that a single basis-point value is within the legal
-/// range `[0, BASIS_POINTS_TOTAL]` (i.e. `0..=10_000`).
-///
-/// Per-invoice options such as `penalty_bps`, `tax_bps`, and
-/// `insurance_premium_bps` are stored as `u32` basis points and must never
-/// exceed 100%. Callers invoke this guard before writing storage so an
-/// out-of-range value is rejected atomically. The three existing call sites
-/// use `.expect("… must be ≤ 10000")`, so this returns a `Result` and lets the
-/// caller choose how to surface the failure.
+/// Reject a single basis-point value that exceeds 100% (`BASIS_POINTS_TOTAL` =
+/// 10 000). Used for standalone rate fields such as `penalty_bps`, `tax_bps`
+/// and `insurance_premium_bps` where the value must be a fraction of a whole,
+/// not a sum that covers it.
 ///
 /// # Errors
-/// Returns `Err(ContractError::InvalidRatio)` when `bps > BASIS_POINTS_TOTAL`.
+/// Returns `Err(ContractError::InvalidAmount)` when `bps > 10_000`.
 pub fn assert_valid_bps(bps: u32) -> Result<(), ContractError> {
     if bps > BASIS_POINTS_TOTAL {
-        return Err(ContractError::InvalidRatio);
+        return Err(ContractError::InvalidAmount);
     }
     Ok(())
 }
@@ -153,6 +148,41 @@ mod tests {
     fn empty_recipient_list_passes() {
         let env = Env::default();
         let v: Vec<Address> = Vec::new(&env);
+        assert!(assert_unique_recipients(&env, &v.to_vec()).is_ok());
+    }
+
+    #[test]
+    fn single_recipient_passes() {
+        let env = Env::default();
+        let a = Address::generate(&env);
+        let mut v: Vec<Address> = Vec::new(&env);
+        v.push_back(a.clone());
+        assert!(assert_unique_recipients(&env, &v.to_vec()).is_ok());
+    }
+
+    #[test]
+    fn non_adjacent_duplicate_rejected() {
+        // duplicate at index 0 and 2 with a different address at index 1
+        let env = Env::default();
+        let a = Address::generate(&env);
+        let b = Address::generate(&env);
+        let mut v: Vec<Address> = Vec::new(&env);
+        v.push_back(a.clone()); // index 0
+        v.push_back(b.clone()); // index 1
+        v.push_back(a.clone()); // index 2 — non-adjacent duplicate of index 0
+        assert_eq!(
+            assert_unique_recipients(&env, &v.to_vec()),
+            Err(ContractError::DuplicateRecipient)
+        );
+    }
+
+    #[test]
+    fn ten_unique_recipients_passes() {
+        let env = Env::default();
+        let mut v: Vec<Address> = Vec::new(&env);
+        for _ in 0..10 {
+            v.push_back(Address::generate(&env));
+        }
         assert!(assert_unique_recipients(&env, &v.to_vec()).is_ok());
     }
 

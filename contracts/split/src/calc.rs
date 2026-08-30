@@ -34,7 +34,7 @@
 
 #[allow(unused_imports)]
 use crate::types::BASIS_POINTS_TOTAL;
-use soroban_sdk::{Env, Vec};
+use soroban_sdk::{Address, BytesN, Env, Vec};
 
 use crate::error::ContractError;
 
@@ -183,6 +183,67 @@ pub fn sort_recipients(env: &Env, recipients: &mut Vec<Address>) {
         sorted.push_back(recipients.get(original_idx as u32).unwrap());
     }
     *recipients = sorted;
+}
+
+// ---------------------------------------------------------------------------
+// Issue #705: Invoice funding completion helper
+// ---------------------------------------------------------------------------
+
+/// Compute the funding completion of an invoice in basis points.
+///
+/// Returns `funded * 10_000 / total`, clamped to `[0, 10_000]`.
+///
+/// # Edge cases
+/// * Returns `0` when `total <= 0` (nothing to fund).
+/// * Returns `0` when `funded <= 0`.
+/// * Returns `10_000` when `funded >= total` (fully funded or overfunded).
+///
+/// # Examples
+/// ```
+/// assert_eq!(funding_bps(500, 1000), 5_000);  // 50%
+/// assert_eq!(funding_bps(1000, 1000), 10_000); // 100%
+/// assert_eq!(funding_bps(1500, 1000), 10_000); // overfunded → clamped
+/// assert_eq!(funding_bps(0, 1000), 0);          // nothing paid
+/// assert_eq!(funding_bps(500, 0), 0);            // invalid total
+/// ```
+pub fn funding_bps(funded: i128, total: i128) -> u32 {
+    if total <= 0 || funded <= 0 {
+        return 0;
+    }
+    if funded >= total {
+        return 10_000;
+    }
+    // funded < total, both positive — safe to cast to u128 and divide.
+    let bps = (funded as u128 * 10_000u128) / (total as u128);
+    // bps is in [0, 9_999] since funded < total; the clamp is a safeguard.
+    bps.min(10_000) as u32
+}
+
+// ---------------------------------------------------------------------------
+// Issue #705: Platform fee computation helper
+// ---------------------------------------------------------------------------
+
+/// Compute the platform fee for a given funded amount and fee rate.
+///
+/// Returns `funded * fee_bps / 10_000`, using checked arithmetic to prevent
+/// overflow on very large amounts.
+///
+/// # Arguments
+/// * `funded`   – gross collected amount (stroops); must be ≥ 0.
+/// * `fee_bps`  – platform fee rate in basis points (0 – 10 000).
+///
+/// # Errors
+/// Returns [`ContractError::ArithmeticOverflow`] when `funded * fee_bps`
+/// overflows `i128` (i.e. `funded` is close to `i128::MAX` and `fee_bps > 0`).
+pub fn calc_platform_fee(funded: i128, fee_bps: u32) -> Result<i128, ContractError> {
+    if fee_bps == 0 || funded == 0 {
+        return Ok(0);
+    }
+    let fee = (funded as i128)
+        .checked_mul(fee_bps as i128)
+        .ok_or(ContractError::ArithmeticOverflow)?
+        / 10_000;
+    Ok(fee)
 }
 
 // ---------------------------------------------------------------------------
@@ -343,6 +404,53 @@ mod tests {
         for &(total, ratios, denom) in cases {
             assert_exact(&env, total, ratios, denom);
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // funding_bps tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_funding_bps_partial() {
+        // 500 funded out of 1000 total → 50% → 5_000 bps
+        assert_eq!(funding_bps(500, 1_000), 5_000);
+    }
+
+    #[test]
+    fn test_funding_bps_full() {
+        // Exactly fully funded → 100% → 10_000 bps
+        assert_eq!(funding_bps(1_000, 1_000), 10_000);
+    }
+
+    #[test]
+    fn test_funding_bps_overfunded() {
+        // Overfunded → clamped to 10_000
+        assert_eq!(funding_bps(1_500, 1_000), 10_000);
+    }
+
+    #[test]
+    fn test_funding_bps_zero_funded() {
+        // Nothing paid yet → 0
+        assert_eq!(funding_bps(0, 1_000), 0);
+    }
+
+    #[test]
+    fn test_funding_bps_zero_total() {
+        // Invalid total → 0 to avoid divide-by-zero
+        assert_eq!(funding_bps(500, 0), 0);
+    }
+
+    #[test]
+    fn test_funding_bps_negative_total() {
+        assert_eq!(funding_bps(500, -1), 0);
+    }
+
+    #[test]
+    fn test_funding_bps_one_stroop_below_full() {
+        // funded = total - 1 → result must be < 10_000
+        let bps = funding_bps(999, 1_000);
+        assert!(bps < 10_000);
+        assert!(bps > 9_980); // should be ~9_990
     }
 
     // -----------------------------------------------------------------------
