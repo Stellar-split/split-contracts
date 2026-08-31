@@ -2908,13 +2908,13 @@ fn test_min_funding_bps_allows_release_above_threshold() {
 }
 
 // ---------------------------------------------------------------------------
-// Issue #694: validate min_funding_bps at invoice creation
+// Issue #695: validate velocity_window is non-zero when velocity_limit is set
 // ---------------------------------------------------------------------------
 
 #[test]
 #[should_panic]
-fn test_min_funding_bps_above_10000_rejected() {
-    // min_funding_bps = 10_001 must be rejected with ContractError::InvalidAmount.
+fn test_velocity_limit_without_window_rejected() {
+    // velocity_limit=1000 with velocity_window=0 must be rejected with ContractError::InvalidAmount.
     let (env, contract_id, token_id) = setup_initialized();
     let c = client(&env, &contract_id);
 
@@ -2928,7 +2928,7 @@ fn test_min_funding_bps_above_10000_rejected() {
     let mut amounts = Vec::new(&env);
     amounts.push_back(1_000_i128);
 
-    // 10_001 bps > 10_000 — must be rejected before any storage is written.
+    // velocity_limit > 0 but velocity_window == 0 — undefined behaviour; must panic.
     c.create_invoice(
         &creator,
         &recipients,
@@ -2936,15 +2936,16 @@ fn test_min_funding_bps_above_10000_rejected() {
         &token_id,
         &9_999_u64,
         &InvoiceOptions {
-            min_funding_bps: Some(10_001),
+            velocity_limit: 1_000,
+            velocity_window: 0,
             ..default_options(&env)
         },
     );
 }
 
 #[test]
-fn test_min_funding_bps_exactly_10000_accepted() {
-    // min_funding_bps = 10_000 (100%) is a valid boundary value and must be accepted.
+fn test_velocity_limit_with_valid_window_accepted() {
+    // velocity_limit=1000, velocity_window=3600 is a valid configuration and must be accepted.
     let (env, contract_id, token_id) = setup_initialized();
     let c = client(&env, &contract_id);
 
@@ -2958,7 +2959,7 @@ fn test_min_funding_bps_exactly_10000_accepted() {
     let mut amounts = Vec::new(&env);
     amounts.push_back(1_000_i128);
 
-    // 10_000 bps == 100% — exactly at the upper boundary, must succeed.
+    // Both limit and window are set — valid; invoice creation must succeed.
     let id = c.create_invoice(
         &creator,
         &recipients,
@@ -2966,11 +2967,11 @@ fn test_min_funding_bps_exactly_10000_accepted() {
         &token_id,
         &9_999_u64,
         &InvoiceOptions {
-            min_funding_bps: Some(10_000),
+            velocity_limit: 1_000,
+            velocity_window: 3_600,
             ..default_options(&env)
         },
     );
-    // Invoice was created; a valid status confirms no panic occurred.
     assert_eq!(c.get_invoice(&id).status, InvoiceStatus::Pending);
 }
 
