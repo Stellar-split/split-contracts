@@ -5442,7 +5442,12 @@ impl SplitContract {
         if let Err(e) = assert_valid_bps(penalty_bps) {
             env.panic_with_error(e);
         }
-        assert!(min_funding_bps <= 10_000, "min_funding_bps must be ≤ 10000");
+        // Issue #694: min_funding_bps must be a valid basis-point fraction (0-10 000).
+        // Values above 10 000 would require more than 100% funding, making the invoice
+        // permanently unreleasable. Use panic_with_error! for a typed, on-chain error code.
+        if min_funding_bps > 10_000 {
+            panic_with_error!(env, ContractError::InvalidAmount);
+        }
         assert_valid_bps(tax_bps).expect("tax_bps must be ≤ 10000");
         assert_valid_bps(insurance_premium_bps).expect("insurance_premium_bps must be ≤ 10000");
         // Issue #489 / #696: early-bird discounted platform fee must not exceed the

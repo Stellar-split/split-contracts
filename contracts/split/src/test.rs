@@ -2908,6 +2908,73 @@ fn test_min_funding_bps_allows_release_above_threshold() {
 }
 
 // ---------------------------------------------------------------------------
+// Issue #694: validate min_funding_bps at invoice creation
+// ---------------------------------------------------------------------------
+
+#[test]
+#[should_panic]
+fn test_min_funding_bps_above_10000_rejected() {
+    // min_funding_bps = 10_001 must be rejected with ContractError::InvalidAmount.
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    env.ledger().set_timestamp(1_000);
+
+    let mut recipients = Vec::new(&env);
+    recipients.push_back(recipient.clone());
+    let mut amounts = Vec::new(&env);
+    amounts.push_back(1_000_i128);
+
+    // 10_001 bps > 10_000 — must be rejected before any storage is written.
+    c.create_invoice(
+        &creator,
+        &recipients,
+        &amounts,
+        &token_id,
+        &9_999_u64,
+        &InvoiceOptions {
+            min_funding_bps: Some(10_001),
+            ..default_options(&env)
+        },
+    );
+}
+
+#[test]
+fn test_min_funding_bps_exactly_10000_accepted() {
+    // min_funding_bps = 10_000 (100%) is a valid boundary value and must be accepted.
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    env.ledger().set_timestamp(1_000);
+
+    let mut recipients = Vec::new(&env);
+    recipients.push_back(recipient.clone());
+    let mut amounts = Vec::new(&env);
+    amounts.push_back(1_000_i128);
+
+    // 10_000 bps == 100% — exactly at the upper boundary, must succeed.
+    let id = c.create_invoice(
+        &creator,
+        &recipients,
+        &amounts,
+        &token_id,
+        &9_999_u64,
+        &InvoiceOptions {
+            min_funding_bps: Some(10_000),
+            ..default_options(&env)
+        },
+    );
+    // Invoice was created; a valid status confirms no panic occurred.
+    assert_eq!(c.get_invoice(&id).status, InvoiceStatus::Pending);
+}
+
+// ---------------------------------------------------------------------------
 // Issue #85: generate_payment_proof
 // ---------------------------------------------------------------------------
 
