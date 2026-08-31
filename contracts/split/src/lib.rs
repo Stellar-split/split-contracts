@@ -5443,6 +5443,12 @@ impl SplitContract {
             env.panic_with_error(e);
         }
         assert!(min_funding_bps <= 10_000, "min_funding_bps must be ≤ 10000");
+        // Issue #695: velocity_limit > 0 paired with velocity_window == 0 would cause
+        // division-by-zero or undefined behaviour when computing per-payer spend rates.
+        // Reject the configuration before any storage is written.
+        if velocity_limit > 0 && velocity_window == 0 {
+            panic_with_error!(env, ContractError::InvalidAmount);
+        }
         assert_valid_bps(tax_bps).expect("tax_bps must be ≤ 10000");
         assert_valid_bps(insurance_premium_bps).expect("insurance_premium_bps must be ≤ 10000");
         // Issue #489 / #696: early-bird discounted platform fee must not exceed the

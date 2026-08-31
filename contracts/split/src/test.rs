@@ -2908,6 +2908,74 @@ fn test_min_funding_bps_allows_release_above_threshold() {
 }
 
 // ---------------------------------------------------------------------------
+// Issue #695: validate velocity_window is non-zero when velocity_limit is set
+// ---------------------------------------------------------------------------
+
+#[test]
+#[should_panic]
+fn test_velocity_limit_without_window_rejected() {
+    // velocity_limit=1000 with velocity_window=0 must be rejected with ContractError::InvalidAmount.
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    env.ledger().set_timestamp(1_000);
+
+    let mut recipients = Vec::new(&env);
+    recipients.push_back(recipient.clone());
+    let mut amounts = Vec::new(&env);
+    amounts.push_back(1_000_i128);
+
+    // velocity_limit > 0 but velocity_window == 0 — undefined behaviour; must panic.
+    c.create_invoice(
+        &creator,
+        &recipients,
+        &amounts,
+        &token_id,
+        &9_999_u64,
+        &InvoiceOptions {
+            velocity_limit: 1_000,
+            velocity_window: 0,
+            ..default_options(&env)
+        },
+    );
+}
+
+#[test]
+fn test_velocity_limit_with_valid_window_accepted() {
+    // velocity_limit=1000, velocity_window=3600 is a valid configuration and must be accepted.
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    env.ledger().set_timestamp(1_000);
+
+    let mut recipients = Vec::new(&env);
+    recipients.push_back(recipient.clone());
+    let mut amounts = Vec::new(&env);
+    amounts.push_back(1_000_i128);
+
+    // Both limit and window are set — valid; invoice creation must succeed.
+    let id = c.create_invoice(
+        &creator,
+        &recipients,
+        &amounts,
+        &token_id,
+        &9_999_u64,
+        &InvoiceOptions {
+            velocity_limit: 1_000,
+            velocity_window: 3_600,
+            ..default_options(&env)
+        },
+    );
+    assert_eq!(c.get_invoice(&id).status, InvoiceStatus::Pending);
+}
+
+// ---------------------------------------------------------------------------
 // Issue #85: generate_payment_proof
 // ---------------------------------------------------------------------------
 
