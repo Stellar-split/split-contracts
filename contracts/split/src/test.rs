@@ -82,62 +82,12 @@ fn default_options(env: &Env) -> InvoiceOptions {
         ratios: Vec::new(env),
         cosigners: None,
         cosigner_threshold: None,
-        ext: types::InvoiceOptions2 {
-            target_usd_cents: None,
-            payment_token: None,
-            release_delay_ledgers: None,
-            metadata_hash: None,
-            payment_cooldown_secs: None,
-            max_payments_per_window: None,
-            payment_window_secs: None,
-            oracle: None,
-            oracle_asset_pair_base: None,
-            oracle_asset_pair_quote: None,
-            min_payer_rep: None,
-            payment_open_at: None,
-            payment_close_at: None,
-            milestones: None,
-            recipient_max_payouts: None,
-            release_condition_hash: None,
-            recipient_whitelist_enabled: false,
-            escrow_hold_period: None,
-            overfunding_policy: types::OverfundingPolicy::Cap,
-            early_bird_window_ledgers: 0,
-            early_bird_fee_bps: 0,
-            creator_fee_bps: 0,
-            early_bird_fee_credit: 0,
-            ratio_denominator: 10_000,
-        },
+        ext: types::InvoiceOptions2::default(),
     }
 }
 
 fn default_options2(_env: &Env) -> InvoiceOptions2 {
-    InvoiceOptions2 {
-        target_usd_cents: None,
-        payment_token: None,
-        release_delay_ledgers: None,
-        metadata_hash: None,
-        payment_cooldown_secs: None,
-        max_payments_per_window: None,
-        payment_window_secs: None,
-        oracle: None,
-        oracle_asset_pair_base: None,
-        oracle_asset_pair_quote: None,
-        min_payer_rep: None,
-        payment_open_at: None,
-        payment_close_at: None,
-        milestones: None,
-        recipient_max_payouts: None,
-        release_condition_hash: None,
-        recipient_whitelist_enabled: false,
-        escrow_hold_period: None,
-        overfunding_policy: types::OverfundingPolicy::Cap,
-        early_bird_window_ledgers: 0,
-        early_bird_fee_bps: 0,
-        creator_fee_bps: 0,
-        early_bird_fee_credit: 0,
-        ratio_denominator: 10_000,
-    }
+    InvoiceOptions2::default()
 }
 
 fn invoice_options(
@@ -187,30 +137,10 @@ fn invoice_options(
         cosigners: None,
         cosigner_threshold: None,
         ext: types::InvoiceOptions2 {
-            target_usd_cents: None,
-            payment_token: None,
-            release_delay_ledgers: None,
-            metadata_hash: None,
             payment_cooldown_secs: cooldown_secs,
             max_payments_per_window: max_payments,
             payment_window_secs: window_secs,
-            oracle: None,
-            oracle_asset_pair_base: None,
-            oracle_asset_pair_quote: None,
-            min_payer_rep: None,
-            payment_open_at: None,
-            payment_close_at: None,
-            milestones: None,
-            recipient_max_payouts: None,
-            release_condition_hash: None,
-            recipient_whitelist_enabled: false,
-            escrow_hold_period: None,
-            overfunding_policy: types::OverfundingPolicy::Cap,
-            early_bird_window_ledgers: 0,
-            early_bird_fee_bps: 0,
-            creator_fee_bps: 0,
-            early_bird_fee_credit: 0,
-            ratio_denominator: 10_000,
+            ..Default::default()
         },
     }
 }
@@ -3195,7 +3125,6 @@ fn test_stage_release_not_fully_funded_panics() {
 }
 
 #[test]
-#[should_panic(expected = "release_stages must sum to 10000 basis points")]
 fn test_create_invoice_invalid_release_stages_panics() {
     let (env, contract_id, token_id) = setup_initialized();
     let c = client(&env, &contract_id);
@@ -3218,7 +3147,8 @@ fn test_create_invoice_invalid_release_stages_panics() {
     let mut opts = default_options(&env);
     opts.release_stages = stages;
 
-    c.create_invoice(&creator, &recipients, &amounts, &token_id, &9_999_u64, &opts);
+    let res = c.try_create_invoice(&creator, &recipients, &amounts, &token_id, &9_999_u64, &opts);
+    assert_eq!(res, Err(Ok(ContractError::InvalidRatioSum.into())));
 }
 
 // ---------------------------------------------------------------------------
@@ -7070,7 +7000,7 @@ fn test_contributor_allowlist_toggle_events() {
 }
 
 #[test]
-fn test_payment_received_event_includes_tip() {
+fn test_payment_received_event_includes_token() {
     let (env, contract_id, token_id) = setup_initialized();
     let c = client(&env, &contract_id);
 
@@ -7085,17 +7015,17 @@ fn test_payment_received_event_includes_tip() {
     c.pay(&payer, &id, &200_i128, &0_u64, &false, &false, &None);
 
     use soroban_sdk::TryIntoVal;
-    let mut found_tip: Option<i128> = None;
+    let mut found_token: Option<Address> = None;
     for (_contract, topics, data) in env.events().all().iter() {
         if topic1_is(&env, &topics, "paid") {
-            let decoded: (Address, i128, i128, u64) = data.try_into_val(&env).unwrap();
-            found_tip = Some(decoded.2);
+            let decoded: (Address, i128, Address, u64) = data.try_into_val(&env).unwrap();
+            found_token = Some(decoded.2);
         }
     }
     assert_eq!(
-        found_tip,
-        Some(0),
-        "payment_received event data should include the tip amount"
+        found_token,
+        Some(token_id),
+        "payment_received event data should include the payment token address"
     );
 }
 
@@ -8363,297 +8293,290 @@ fn test_get_invoice_status_not_found() {
 }
 
 // ---------------------------------------------------------------------------
-// Issue #686 — overfunding_triggered event
+// Issues #690-#693 — InvoiceOptions validation at invoice creation
 // ---------------------------------------------------------------------------
 
-fn count_events_with_topic1(env: &Env, name: &str) -> usize {
-    env.events()
-        .all()
-        .iter()
-        .filter(|(_c, topics, _d)| topic1_is(env, topics, name))
-        .count()
-}
-
-#[test]
-fn test_overfunding_triggered_event_emitted_for_return_surplus() {
-    use soroban_sdk::TryIntoVal;
-    let (env, contract_id, token_id) = setup_initialized();
-    let c = client(&env, &contract_id);
-    let tk = token_client(&env, &token_id);
-
-    let creator = Address::generate(&env);
-    let payer = Address::generate(&env);
-    let recipient = Address::generate(&env);
-
-    StellarAssetClient::new(&env, &token_id).mint(&payer, &200);
-    env.ledger().set_timestamp(1_000);
-
-    let id = make_invoice(&env, &c, &creator, &recipient, 100, &token_id, 9_999);
-    c.set_overfunding_policy(&creator, &id, &types::OverfundingPolicy::ReturnSurplus);
-
-    // Pay 150 toward a 100 invoice: 100 is credited, 50 is returned.
-    c.pay(&payer, &id, &150_i128, &0_u64, &false, &false, &None);
-
-    let mut found: Option<(Address, Symbol, i128, u64)> = None;
-    for (_contract, topics, data) in env.events().all().iter() {
-        if topic1_is(&env, &topics, "ovf_trig") {
-            found = Some(data.try_into_val(&env).unwrap());
-        }
-    }
-    let (evt_payer, policy, surplus, _seq) = found.expect("overfunding_triggered event missing");
-    assert_eq!(evt_payer, payer);
-    assert_eq!(policy, Symbol::new(&env, "retsurpls"));
-    assert_eq!(surplus, 50, "surplus is the amount refunded beyond total");
-    // Payer: -150 paid, +50 refunded.
-    assert_eq!(tk.balance(&payer), 100);
-}
-
-#[test]
-fn test_overfunding_triggered_event_emitted_for_accept_all() {
-    use soroban_sdk::TryIntoVal;
-    let (env, contract_id, token_id) = setup_initialized();
-    let c = client(&env, &contract_id);
-
-    let creator = Address::generate(&env);
-    let payer = Address::generate(&env);
-    let recipient = Address::generate(&env);
-
-    StellarAssetClient::new(&env, &token_id).mint(&payer, &200);
-    env.ledger().set_timestamp(1_000);
-
-    let id = make_invoice(&env, &c, &creator, &recipient, 100, &token_id, 9_999);
-    c.set_overfunding_policy(&creator, &id, &types::OverfundingPolicy::AcceptAll);
-
-    c.pay(&payer, &id, &150_i128, &0_u64, &false, &false, &None);
-
-    let mut found: Option<(Address, Symbol, i128, u64)> = None;
-    for (_contract, topics, data) in env.events().all().iter() {
-        if topic1_is(&env, &topics, "ovf_trig") {
-            found = Some(data.try_into_val(&env).unwrap());
-        }
-    }
-    let (_p, policy, surplus, _seq) = found.expect("overfunding_triggered event missing");
-    assert_eq!(policy, Symbol::new(&env, "acceptall"));
-    assert_eq!(surplus, 50, "surplus is the amount accepted beyond total");
-}
-
-#[test]
-fn test_overfunding_triggered_not_emitted_when_within_total() {
-    let (env, contract_id, token_id) = setup_initialized();
-    let c = client(&env, &contract_id);
-
-    let creator = Address::generate(&env);
-    let payer = Address::generate(&env);
-    let recipient = Address::generate(&env);
-
-    StellarAssetClient::new(&env, &token_id).mint(&payer, &200);
-    env.ledger().set_timestamp(1_000);
-
-    let id = make_invoice(&env, &c, &creator, &recipient, 100, &token_id, 9_999);
-    c.set_overfunding_policy(&creator, &id, &types::OverfundingPolicy::ReturnSurplus);
-
-    // Exact fill: funded + payment == total, so no overfunding occurs.
-    c.pay(&payer, &id, &100_i128, &0_u64, &false, &false, &None);
-
-    assert_eq!(
-        count_events_with_topic1(&env, "ovf_trig"),
-        0,
-        "overfunding_triggered must not fire unless funded + payment exceeds total"
-    );
-}
-
-// ---------------------------------------------------------------------------
-// Issue #687 — penalty_applied event
-// ---------------------------------------------------------------------------
-
-fn late_penalty_invoice(
-    env: &Env,
-    c: &SplitContractClient,
-    creator: &Address,
-    recipient: &Address,
-    token_id: &Address,
-) -> u64 {
+/// Build a two-recipient / two-amount pair for the validation tests. Two
+/// recipients keeps these tests clear of the minimum-recipient-count gate.
+fn two_recipients(env: &Env) -> (Vec<Address>, Vec<i128>) {
     let mut recipients = Vec::new(env);
-    recipients.push_back(recipient.clone());
+    recipients.push_back(Address::generate(env));
+    recipients.push_back(Address::generate(env));
     let mut amounts = Vec::new(env);
-    amounts.push_back(500_i128);
-    c.create_invoice(
-        creator,
-        &recipients,
-        &amounts,
-        token_id,
-        &9_999_u64,
-        &InvoiceOptions {
-            penalty_bps: Some(1_000), // 10%
-            penalty_deadline: Some(2_000),
-            ..default_options(env)
-        },
-    )
+    amounts.push_back(600_i128);
+    amounts.push_back(400_i128);
+    (recipients, amounts)
+}
+
+// --- Issue #690: penalty_bps must not exceed 10 000 ---
+
+#[test]
+fn test_create_invoice_penalty_bps_over_max_rejected() {
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+    env.ledger().set_timestamp(1_000);
+
+    let creator = Address::generate(&env);
+    let (recipients, amounts) = two_recipients(&env);
+
+    let mut opts = default_options(&env);
+    opts.penalty_bps = Some(10_001);
+
+    let res = c.try_create_invoice(&creator, &recipients, &amounts, &token_id, &9_999_u64, &opts);
+    assert_eq!(res, Err(Ok(ContractError::InvalidAmount.into())));
 }
 
 #[test]
-fn test_penalty_applied_event_emitted_for_late_payment() {
-    use soroban_sdk::TryIntoVal;
+fn test_create_invoice_penalty_bps_at_max_ok() {
     let (env, contract_id, token_id) = setup_initialized();
     let c = client(&env, &contract_id);
-
-    let creator = Address::generate(&env);
-    let payer = Address::generate(&env);
-    let recipient = Address::generate(&env);
-
-    StellarAssetClient::new(&env, &token_id).mint(&payer, &1_000);
     env.ledger().set_timestamp(1_000);
 
-    let id = late_penalty_invoice(&env, &c, &creator, &recipient, &token_id);
+    let creator = Address::generate(&env);
+    let (recipients, amounts) = two_recipients(&env);
 
-    // Pay after the penalty deadline.
-    env.ledger().set_timestamp(3_000);
-    c.pay(&payer, &id, &500_i128, &0_u64, &false, &false, &None);
+    let mut opts = default_options(&env);
+    opts.penalty_bps = Some(10_000);
 
-    let mut found: Option<(Address, i128, u32, u64)> = None;
-    for (_contract, topics, data) in env.events().all().iter() {
-        if topic1_is(&env, &topics, "pen_appl") {
-            found = Some(data.try_into_val(&env).unwrap());
-        }
-    }
-    let (evt_payer, penalty_amount, penalty_bps, _seq) =
-        found.expect("penalty_applied event missing for late payment");
-    assert_eq!(evt_payer, payer);
-    assert_eq!(penalty_amount, 50, "500 * 10% deducted from the payment");
-    assert_eq!(penalty_bps, 1_000);
+    let id = c.create_invoice(&creator, &recipients, &amounts, &token_id, &9_999_u64, &opts);
+    assert!(id >= 1);
+}
+
+// --- Issue #691: non-empty tranches must sum to exactly 10 000 bps ---
+
+#[test]
+fn test_create_invoice_tranches_sum_not_total_rejected() {
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+    env.ledger().set_timestamp(1_000);
+
+    let creator = Address::generate(&env);
+    let (recipients, amounts) = two_recipients(&env);
+
+    // 4_000 + 5_999 = 9_999, one basis point short of 10_000.
+    let mut tranches = Vec::new(&env);
+    tranches.push_back(Tranche { timestamp: 2_000, basis_points: 4_000 });
+    tranches.push_back(Tranche { timestamp: 3_000, basis_points: 5_999 });
+
+    let mut opts = default_options(&env);
+    opts.tranches = tranches;
+
+    let res = c.try_create_invoice(&creator, &recipients, &amounts, &token_id, &9_999_u64, &opts);
+    assert_eq!(res, Err(Ok(ContractError::InvalidRatioSum.into())));
 }
 
 #[test]
-fn test_penalty_applied_event_absent_for_on_time_payment() {
+fn test_create_invoice_tranches_sum_exact_total_ok() {
     let (env, contract_id, token_id) = setup_initialized();
     let c = client(&env, &contract_id);
-
-    let creator = Address::generate(&env);
-    let payer = Address::generate(&env);
-    let recipient = Address::generate(&env);
-
-    StellarAssetClient::new(&env, &token_id).mint(&payer, &1_000);
     env.ledger().set_timestamp(1_000);
 
-    let id = late_penalty_invoice(&env, &c, &creator, &recipient, &token_id);
+    let creator = Address::generate(&env);
+    let (recipients, amounts) = two_recipients(&env);
 
-    // Pay before the penalty deadline.
-    c.pay(&payer, &id, &500_i128, &0_u64, &false, &false, &None);
+    let mut tranches = Vec::new(&env);
+    tranches.push_back(Tranche { timestamp: 2_000, basis_points: 4_000 });
+    tranches.push_back(Tranche { timestamp: 3_000, basis_points: 6_000 });
 
-    assert_eq!(
-        count_events_with_topic1(&env, "pen_appl"),
-        0,
-        "penalty_applied must not fire for an on-time payment"
-    );
+    let mut opts = default_options(&env);
+    opts.tranches = tranches;
+
+    let id = c.create_invoice(&creator, &recipients, &amounts, &token_id, &9_999_u64, &opts);
+    assert!(id >= 1);
 }
 
-// ---------------------------------------------------------------------------
-// Issue #688 — deadline_extended event
-// ---------------------------------------------------------------------------
+// --- Issue #692: non-empty release_stages must sum to exactly 10 000 bps ---
 
 #[test]
-fn test_deadline_extended_event_carries_old_and_new_values() {
-    use soroban_sdk::TryIntoVal;
+fn test_create_invoice_release_stages_sum_not_total_rejected() {
     let (env, contract_id, token_id) = setup_initialized();
     let c = client(&env, &contract_id);
-
-    let creator = Address::generate(&env);
-    let recipient = Address::generate(&env);
-
-    env.ledger().set_timestamp(1_000);
-    let id = make_invoice(&env, &c, &creator, &recipient, 100, &token_id, 5_000);
-
-    c.extend_deadline(&id, &10_000_u64, &creator);
-
-    let mut found: Option<(u64, u64, u64)> = None;
-    for (_contract, topics, data) in env.events().all().iter() {
-        if topic1_is(&env, &topics, "dl_ext") {
-            found = Some(data.try_into_val(&env).unwrap());
-        }
-    }
-    let (old_deadline, new_deadline, _seq) =
-        found.expect("deadline_extended event missing");
-    assert_eq!(old_deadline, 5_000);
-    assert_eq!(new_deadline, 10_000);
-    assert_eq!(c.get_invoice(&id).deadline, 10_000);
-}
-
-// ---------------------------------------------------------------------------
-// Issue #689 — recipient_whitelist_updated event
-// ---------------------------------------------------------------------------
-
-#[test]
-fn test_recipient_whitelist_updated_event_on_enable_and_add() {
-    use soroban_sdk::TryIntoVal;
-    let (env, contract_id, token_id) = setup_initialized();
-    let c = client(&env, &contract_id);
-
-    let creator = Address::generate(&env);
-    let recipient = Address::generate(&env);
-    let whitelisted = Address::generate(&env);
-
     env.ledger().set_timestamp(1_000);
 
-    let mut recipients = Vec::new(&env);
-    recipients.push_back(recipient.clone());
-    let mut amounts = Vec::new(&env);
-    amounts.push_back(100_i128);
-    let id = c.create_invoice(
-        &creator,
-        &recipients,
-        &amounts,
-        &token_id,
-        &9_999_u64,
-        &InvoiceOptions {
-            ext: types::InvoiceOptions2 {
-                recipient_whitelist_enabled: true,
-                ..default_options(&env).ext
-            },
-            ..default_options(&env)
-        },
-    );
+    let creator = Address::generate(&env);
+    let (recipients, amounts) = two_recipients(&env);
 
-    c.add_to_recipient_whitelist(&creator, &id, &whitelisted);
+    // 5_000 + 4_500 = 9_500, short of 10_000.
+    let mut stages: Vec<u32> = Vec::new(&env);
+    stages.push_back(5_000u32);
+    stages.push_back(4_500u32);
 
-    let mut found: Option<(bool, Vec<Address>, Vec<Address>, u64)> = None;
-    for (_contract, topics, data) in env.events().all().iter() {
-        if topic1_is(&env, &topics, "rcp_wl_up") {
-            found = Some(data.try_into_val(&env).unwrap());
-        }
-    }
-    let (enabled, added, removed, _seq) =
-        found.expect("recipient_whitelist_updated event missing");
-    assert!(enabled, "invoice was created with the whitelist enabled");
-    assert_eq!(added.len(), 1);
-    assert_eq!(added.get(0).unwrap(), whitelisted);
-    assert_eq!(removed.len(), 0);
+    let mut opts = default_options(&env);
+    opts.release_stages = stages;
+
+    let res = c.try_create_invoice(&creator, &recipients, &amounts, &token_id, &9_999_u64, &opts);
+    assert_eq!(res, Err(Ok(ContractError::InvalidRatioSum.into())));
 }
 
 #[test]
-fn test_recipient_whitelist_updated_event_on_remove() {
-    use soroban_sdk::TryIntoVal;
+fn test_create_invoice_release_stages_three_stages_sum_total_ok() {
     let (env, contract_id, token_id) = setup_initialized();
     let c = client(&env, &contract_id);
+    env.ledger().set_timestamp(1_000);
 
     let creator = Address::generate(&env);
-    let recipient = Address::generate(&env);
-    let whitelisted = Address::generate(&env);
+    let (recipients, amounts) = two_recipients(&env);
 
-    env.ledger().set_timestamp(1_000);
-    let id = make_invoice(&env, &c, &creator, &recipient, 100, &token_id, 9_999);
+    let mut stages: Vec<u32> = Vec::new(&env);
+    stages.push_back(3_000u32);
+    stages.push_back(3_000u32);
+    stages.push_back(4_000u32);
 
-    c.add_to_recipient_whitelist(&creator, &id, &whitelisted);
-    c.remove_from_recipient_whitelist(&creator, &id, &whitelisted);
+    let mut opts = default_options(&env);
+    opts.release_stages = stages;
 
-    let mut last_removed: Option<Vec<Address>> = None;
-    for (_contract, topics, data) in env.events().all().iter() {
-        if topic1_is(&env, &topics, "rcp_wl_up") {
-            let (_enabled, _added, removed, _seq): (bool, Vec<Address>, Vec<Address>, u64) =
-                data.try_into_val(&env).unwrap();
-            last_removed = Some(removed);
-        }
-    }
-    let removed = last_removed.expect("recipient_whitelist_updated event missing on remove");
-    assert_eq!(removed.len(), 1);
-    assert_eq!(removed.get(0).unwrap(), whitelisted);
+    let id = c.create_invoice(&creator, &recipients, &amounts, &token_id, &9_999_u64, &opts);
+    assert!(id >= 1);
 }
+
+// --- Issue #693: required_signatures must be in 1..=co_signers.len() ---
+
+#[test]
+fn test_create_invoice_required_signatures_exceeds_cosigners_rejected() {
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+    env.ledger().set_timestamp(1_000);
+
+    let creator = Address::generate(&env);
+    let (recipients, amounts) = two_recipients(&env);
+
+    // 2-of-3 requested, but only one co-signer supplied.
+    let mut co_signers = Vec::new(&env);
+    co_signers.push_back(Address::generate(&env));
+
+    let mut opts = default_options(&env);
+    opts.co_signers = co_signers;
+    opts.required_signatures = 2;
+
+    let res = c.try_create_invoice(&creator, &recipients, &amounts, &token_id, &9_999_u64, &opts);
+    assert_eq!(res, Err(Ok(ContractError::InvalidAmount.into())));
+}
+
+#[test]
+fn test_create_invoice_required_signatures_zero_with_cosigners_rejected() {
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+    env.ledger().set_timestamp(1_000);
+
+    let creator = Address::generate(&env);
+    let (recipients, amounts) = two_recipients(&env);
+
+    let mut co_signers = Vec::new(&env);
+    co_signers.push_back(Address::generate(&env));
+    co_signers.push_back(Address::generate(&env));
+
+    let mut opts = default_options(&env);
+    opts.co_signers = co_signers;
+    opts.required_signatures = 0;
+
+    let res = c.try_create_invoice(&creator, &recipients, &amounts, &token_id, &9_999_u64, &opts);
+    assert_eq!(res, Err(Ok(ContractError::InvalidAmount.into())));
+}
+
+#[test]
+fn test_create_invoice_valid_multisig_setup_ok() {
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+    env.ledger().set_timestamp(1_000);
+
+    let creator = Address::generate(&env);
+    let (recipients, amounts) = two_recipients(&env);
+
+    // Valid 2-of-3.
+    let mut co_signers = Vec::new(&env);
+    co_signers.push_back(Address::generate(&env));
+    co_signers.push_back(Address::generate(&env));
+    co_signers.push_back(Address::generate(&env));
+
+    let mut opts = default_options(&env);
+    opts.co_signers = co_signers;
+    opts.required_signatures = 2;
+
+    let id = c.create_invoice(&creator, &recipients, &amounts, &token_id, &9_999_u64, &opts);
+    assert!(id >= 1);
+}
+
+// --- Issue #697: payment_open_at must be strictly before payment_close_at when both are set ---
+
+#[test]
+fn test_create_invoice_payment_open_at_greater_than_close_at_rejected() {
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+    env.ledger().set_timestamp(50);
+
+    let creator = Address::generate(&env);
+    let (recipients, amounts) = two_recipients(&env);
+
+    let mut opts = default_options(&env);
+    opts.ext.payment_open_at = Some(100);
+    opts.ext.payment_close_at = Some(99);
+
+    let res = c.try_create_invoice(&creator, &recipients, &amounts, &token_id, &9_999_u64, &opts);
+    assert_eq!(res, Err(Ok(ContractError::InvalidAmount.into())));
+}
+
+#[test]
+fn test_create_invoice_payment_open_at_equal_to_close_at_rejected() {
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+    env.ledger().set_timestamp(50);
+
+    let creator = Address::generate(&env);
+    let (recipients, amounts) = two_recipients(&env);
+
+    let mut opts = default_options(&env);
+    opts.ext.payment_open_at = Some(100);
+    opts.ext.payment_close_at = Some(100);
+
+    let res = c.try_create_invoice(&creator, &recipients, &amounts, &token_id, &9_999_u64, &opts);
+    assert_eq!(res, Err(Ok(ContractError::InvalidAmount.into())));
+}
+
+#[test]
+fn test_create_invoice_payment_open_at_less_than_close_at_ok() {
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+    env.ledger().set_timestamp(50);
+
+    let creator = Address::generate(&env);
+    let (recipients, amounts) = two_recipients(&env);
+
+    let mut opts = default_options(&env);
+    opts.ext.payment_open_at = Some(99);
+    opts.ext.payment_close_at = Some(100);
+
+    let id = c.create_invoice(&creator, &recipients, &amounts, &token_id, &9_999_u64, &opts);
+    assert!(id >= 1);
+}
+
+#[test]
+fn test_create_invoice_payment_window_only_one_or_none_ok() {
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+    env.ledger().set_timestamp(50);
+
+    let creator = Address::generate(&env);
+    let (recipients, amounts) = two_recipients(&env);
+
+    // Only payment_open_at set
+    let mut opts_open_only = default_options(&env);
+    opts_open_only.ext.payment_open_at = Some(100);
+    opts_open_only.ext.payment_close_at = None;
+    let id1 = c.create_invoice(&creator, &recipients, &amounts, &token_id, &9_999_u64, &opts_open_only);
+    assert!(id1 >= 1);
+
+    // Only payment_close_at set
+    let mut opts_close_only = default_options(&env);
+    opts_close_only.ext.payment_open_at = None;
+    opts_close_only.ext.payment_close_at = Some(100);
+    let id2 = c.create_invoice(&creator, &recipients, &amounts, &token_id, &9_999_u64, &opts_close_only);
+    assert!(id2 >= 1);
+
+    // Both None
+    let mut opts_none = default_options(&env);
+    opts_none.ext.payment_open_at = None;
+    opts_none.ext.payment_close_at = None;
+    let id3 = c.create_invoice(&creator, &recipients, &amounts, &token_id, &9_999_u64, &opts_none);
+    assert!(id3 >= 1);
+}
+

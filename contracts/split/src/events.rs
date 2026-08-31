@@ -1,3 +1,4 @@
+use crate::types::{DisputeOutcome, FeeSplit, InvoicePhase, InvoiceStatus, RepScore, TimelockAction};
 //! # Event naming convention
 //!
 //! All split-contracts events follow a consistent topic layout:
@@ -25,9 +26,8 @@
 //! symbol exceeds the short-macro length limit or must be constructed
 //! dynamically.
 
-use crate::types::{
-    DisputeOutcome, FeeSplit, InvoiceStatus, OverfundingPolicy, RepScore, TimelockAction,
-};
+use crate::storage_keys::ev_seq_key;
+use crate::types::{DisputeOutcome, FeeSplit, InvoiceStatus, RepScore, TimelockAction};
 use soroban_sdk::{contracttype, symbol_short, Address, BytesN, Env, String, Vec};
 
 // ---------------------------------------------------------------------------
@@ -37,7 +37,7 @@ use soroban_sdk::{contracttype, symbol_short, Address, BytesN, Env, String, Vec}
 /// Fetch and increment the per-invoice event sequence counter.
 /// Lives in `storage::temporary` so it resets between transactions.
 fn next_seq(env: &Env, invoice_id: u64) -> u64 {
-    let key = (symbol_short!("ev_seq"), invoice_id);
+    let key = ev_seq_key(invoice_id);
     let seq: u64 = env.storage().temporary().get(&key).unwrap_or(0) + 1;
     env.storage().temporary().set(&key, &seq);
     seq
@@ -1576,15 +1576,15 @@ pub fn invoice_dispute_raised(
 
 /// Emitted on every individual cosigner approval recorded via `approve_release`.
 /// Topics: (split, CosignerApproved, invoice_id)
-/// Data: (cosigner, ledger)
-pub fn cosigner_approved(env: &Env, invoice_id: u64, cosigner: &Address) {
+/// Data: (cosigner, approvals_so_far, ledger)
+pub fn cosigner_approved(env: &Env, invoice_id: u64, cosigner: &Address, approvals_so_far: u32) {
     env.events().publish(
         (
             symbol_short!("split"),
             soroban_sdk::Symbol::new(env, "CosignerApproved"),
             invoice_id,
         ),
-        (cosigner.clone(), env.ledger().sequence()),
+        (cosigner.clone(), approvals_so_far, env.ledger().sequence()),
     );
 }
 
@@ -1704,6 +1704,22 @@ pub fn creator_fee_paid(env: &Env, invoice_id: u64, creator: &Address, fee_amoun
     );
 }
 
+/// Issue #685: Emitted when a creator-declared fee (`creator_fee_bps`) is
+/// deducted from recipient payouts at release time.
+///
+/// Topics: (split, creator_fee_collected, invoice_id)
+/// Data:   (creator, fee_amount)
+pub fn creator_fee_collected(env: &Env, invoice_id: u64, creator: &Address, fee_amount: i128) {
+    env.events().publish(
+        (
+            symbol_short!("split"),
+            soroban_sdk::Symbol::new(env, "creator_fee_collected"),
+            invoice_id,
+        ),
+        (creator.clone(), fee_amount),
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Issue #560: Creator Migration
 // ---------------------------------------------------------------------------
@@ -1783,6 +1799,29 @@ pub fn recipient_share_locked(
     );
 }
 
+/// Issue #684: Emitted at every `InvoicePhase` transition (Draft -> Active ->
+/// Locked -> Released).
+/// Topics: (split, phase_chg, invoice_id)
+/// Data: (old_phase, new_phase, event_seq)
+pub fn invoice_phase_changed(
+    env: &Env,
+    invoice_id: u64,
+    old_phase: &InvoicePhase,
+    new_phase: &InvoicePhase,
+) {
+    let phase_sym = |phase: &InvoicePhase| match phase {
+        InvoicePhase::Draft => symbol_short!("draft"),
+        InvoicePhase::Active => symbol_short!("active"),
+        InvoicePhase::Locked => symbol_short!("locked"),
+        InvoicePhase::Released => symbol_short!("released"),
+    };
+    let event_seq = next_seq(env, invoice_id);
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("phase_chg"), invoice_id),
+        (phase_sym(old_phase), phase_sym(new_phase), event_seq),
+    );
+}
+
 /// Emitted when an admin unlocks a recipient's share of an invoice.
 pub fn recipient_share_unlocked(
     env: &Env,
@@ -1817,116 +1856,41 @@ pub fn admin_transfer_completed(env: &Env, new_admin: &Address) {
 }
 
 // ---------------------------------------------------------------------------
-// Issue #686: Overfunding policy activation
+// Unit tests for the per-invoice event sequence counter (issue #708)
 // ---------------------------------------------------------------------------
 
-/// Map an `OverfundingPolicy` variant to a stable, short symbol for events.
-fn overfunding_policy_sym(policy: &OverfundingPolicy) -> soroban_sdk::Symbol {
-    match policy {
-        OverfundingPolicy::Cap => symbol_short!("cap"),
-        OverfundingPolicy::AcceptAll => symbol_short!("acceptall"),
-        OverfundingPolicy::ReturnSurplus => symbol_short!("retsurpls"),
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use soroban_sdk::Env;
+
+    /// `next_seq` returns 1 on first call and increments on each subsequent
+    /// call for the same invoice ID.
+    #[test]
+    fn test_next_seq_increments_per_invoice() {
+        let env = Env::default();
+        assert_eq!(next_seq(&env, 1), 1);
+        assert_eq!(next_seq(&env, 1), 2);
+        assert_eq!(next_seq(&env, 1), 3);
     }
-}
 
-/// Issue #686: Emitted when a payment pushes `funded` past `total` and the
-/// invoice's [`OverfundingPolicy`] (either `AcceptAll` or `ReturnSurplus`)
-/// decides what happens to the excess. Not emitted for the default `Cap`
-/// policy, which defers to `overflow_behavior` and has its own events.
-///
-/// Topics: (split, ovf_trig, invoice_id)
-/// Data: (payer, policy, surplus, event_seq)
-///
-/// `surplus` is the amount beyond `total`: the stroops refunded to the payer
-/// for `ReturnSurplus`, or the stroops accepted over the target for `AcceptAll`.
-pub fn overfunding_triggered(
-    env: &Env,
-    invoice_id: u64,
-    payer: &Address,
-    policy: &OverfundingPolicy,
-    surplus: i128,
-) {
-    let event_seq = next_seq(env, invoice_id);
-    env.events().publish(
-        (symbol_short!("split"), symbol_short!("ovf_trig"), invoice_id),
-        (
-            payer.clone(),
-            overfunding_policy_sym(policy),
-            surplus,
-            event_seq,
-        ),
-    );
-}
+    /// Sequences for different invoice IDs are independent — incrementing the
+    /// counter for invoice A must not affect invoice B's counter.
+    #[test]
+    fn test_next_seq_independent_for_different_invoice_ids() {
+        let env = Env::default();
 
-// ---------------------------------------------------------------------------
-// Issue #687: Late-payment penalty
-// ---------------------------------------------------------------------------
+        // Advance invoice 10 twice.
+        assert_eq!(next_seq(&env, 10), 1);
+        assert_eq!(next_seq(&env, 10), 2);
 
-/// Issue #687: Emitted from the payment path when a late payment incurs a
-/// `penalty_bps` deduction (i.e. `penalty_bps > 0` and `penalty_deadline` has
-/// passed). `penalty_amount` is the actual stroops taken from the payment and
-/// distributed to recipients.
-///
-/// Topics: (split, pen_appl, invoice_id)
-/// Data: (payer, penalty_amount, penalty_bps, event_seq)
-pub fn penalty_applied(
-    env: &Env,
-    invoice_id: u64,
-    payer: &Address,
-    penalty_amount: i128,
-    penalty_bps: u32,
-) {
-    let event_seq = next_seq(env, invoice_id);
-    env.events().publish(
-        (symbol_short!("split"), symbol_short!("pen_appl"), invoice_id),
-        (payer.clone(), penalty_amount, penalty_bps, event_seq),
-    );
-}
+        // Invoice 20 should still start at 1.
+        assert_eq!(next_seq(&env, 20), 1);
 
-// ---------------------------------------------------------------------------
-// Issue #688: Invoice deadline extension
-// ---------------------------------------------------------------------------
+        // Invoice 10 continues independently from where it left off.
+        assert_eq!(next_seq(&env, 10), 3);
 
-/// Issue #688: Emitted from `extend_deadline` so payers who planned around the
-/// original deadline get an on-chain record of the change.
-///
-/// Topics: (split, dl_ext, invoice_id)
-/// Data: (old_deadline, new_deadline, event_seq)
-pub fn deadline_extended(env: &Env, invoice_id: u64, old_deadline: u64, new_deadline: u64) {
-    let event_seq = next_seq(env, invoice_id);
-    env.events().publish(
-        (symbol_short!("split"), symbol_short!("dl_ext"), invoice_id),
-        (old_deadline, new_deadline, event_seq),
-    );
-}
-
-// ---------------------------------------------------------------------------
-// Issue #689: Recipient whitelist updates
-// ---------------------------------------------------------------------------
-
-/// Issue #689: Emitted whenever an invoice's recipient whitelist state changes
-/// so off-chain monitors that gate on whitelist membership do not have to poll.
-///
-/// `enabled` reflects `recipient_whitelist_enabled` for the invoice. `added`
-/// and `removed` are the addresses affected by this particular change (each is
-/// typically a single entry, but the vectors leave room for batch updates).
-///
-/// Topics: (split, rcp_wl_up, invoice_id)
-/// Data: (enabled, added, removed, event_seq)
-pub fn recipient_whitelist_updated(
-    env: &Env,
-    invoice_id: u64,
-    enabled: bool,
-    added: &Vec<Address>,
-    removed: &Vec<Address>,
-) {
-    let event_seq = next_seq(env, invoice_id);
-    env.events().publish(
-        (
-            symbol_short!("split"),
-            symbol_short!("rcp_wl_up"),
-            invoice_id,
-        ),
-        (enabled, added.clone(), removed.clone(), event_seq),
-    );
+        // Invoice 20 is still at 2 after one more call.
+        assert_eq!(next_seq(&env, 20), 2);
+    }
 }

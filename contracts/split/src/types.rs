@@ -398,9 +398,13 @@ pub struct PaymentFingerprint {
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct InvoiceOptions {
+    /// Additional creators who share ownership/rights over the invoice.
     pub co_creators: Vec<Address>,
+    /// When true, payers may withdraw their contribution before the deadline.
     pub allow_early_withdrawal: bool,
+    /// Size of the bonus pool funded alongside the invoice, in token units.
     pub bonus_pool: i128,
+    /// Maximum number of distinct payers that may contribute to the bonus pool.
     pub bonus_max_payers: u32,
     /// Optional creator cosigner address that must co-author creator actions.
     pub creator_cosigner: Option<Address>,
@@ -544,6 +548,51 @@ pub struct InvoiceOptions2 {
     pub ratio_denominator: u64,
 }
 
+impl Default for InvoiceOptions2 {
+    /// Returns an `InvoiceOptions2` with every optional field set to `None`,
+    /// every boolean to `false`, every numeric to `0`, and
+    /// `overfunding_policy` to [`OverfundingPolicy::Cap`] (the historical
+    /// behaviour).  `ratio_denominator` is `10_000` to match
+    /// [`InvoiceExt2::default`].
+    ///
+    /// Tests that only care about one or two fields can use this as a
+    /// starting point and override just those fields:
+    /// ```
+    /// let opts = InvoiceOptions2 {
+    ///     payment_cooldown_secs: Some(60),
+    ///     ..Default::default()
+    /// };
+    /// ```
+    fn default() -> Self {
+        InvoiceOptions2 {
+            target_usd_cents: None,
+            payment_token: None,
+            release_delay_ledgers: None,
+            metadata_hash: None,
+            payment_cooldown_secs: None,
+            max_payments_per_window: None,
+            payment_window_secs: None,
+            oracle: None,
+            oracle_asset_pair_base: None,
+            oracle_asset_pair_quote: None,
+            min_payer_rep: None,
+            payment_open_at: None,
+            payment_close_at: None,
+            milestones: None,
+            recipient_max_payouts: None,
+            release_condition_hash: None,
+            recipient_whitelist_enabled: false,
+            escrow_hold_period: None,
+            overfunding_policy: OverfundingPolicy::Cap,
+            early_bird_window_ledgers: 0,
+            early_bird_fee_bps: 0,
+            creator_fee_bps: 0,
+            early_bird_fee_credit: 0,
+            ratio_denominator: 10_000,
+        }
+    }
+}
+
 /// Legacy invoice layout used by stored invoices created before the `version`
 /// field was added. Kept for on-chain migration so old data can be
 /// deserialised and re-saved in the current schema.
@@ -613,45 +662,85 @@ pub struct InvoiceCore {
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct InvoiceExt {
+    /// Addresses whose approval is required before the invoice can be released.
     pub co_signers: Vec<Address>,
+    /// How many of `co_signers` approvals are required (≤ `co_signers.len()`).
     pub required_signatures: u32,
+    /// Addresses that have actually approved the release so far.
     pub signatures: Vec<Address>,
+    /// Optional address permitted to call `approve_release` on behalf of the creator.
     pub approver: Option<Address>,
+    /// Whether the release has been approved by the required approvers.
     pub approved: bool,
+    /// Optional oracle that must confirm a release condition before funds move.
     pub condition_oracle: Option<Address>,
+    /// Whether the `condition_oracle` has signalled the condition is met.
     pub condition_met: bool,
+    /// Penalty applied (in basis points) to late payments.
     pub penalty_bps: u32,
+    /// Timestamp after which the `penalty_bps` penalty begins to apply.
     pub penalty_deadline: u64,
+    /// Minimum funding threshold (basis points) that must be reached before release.
     pub min_funding_bps: u32,
+    /// Configured release stages as basis points; empty = release all at once.
     pub release_stages: Vec<u32>,
+    /// Count of release stages already paid out.
     pub released_stages: u32,
+    /// Optional allowlist of payer addresses; `None` = open to anyone.
     pub allowed_payers: Option<Vec<Address>>,
+    /// Optional price oracle used for dynamic (oracle-priced) funding.
     pub price_oracle: Option<Address>,
+    /// Cached per-recipient base amounts used during release math.
     pub base_amounts: Vec<i128>,
+    /// Per-recipient optional output token used for a DEX swap on release.
     pub swap_tokens: Vec<Option<Address>>,
+    /// Tax levied on the invoice, in basis points.
     pub tax_bps: u32,
+    /// Address that receives the tax withheld from the invoice.
     pub tax_authority: Option<Address>,
+    /// Insurance premium (basis points) charged on the invoice.
     pub insurance_premium_bps: u32,
+    /// Funds held in the insurance pool for this invoice.
     pub insurance_fund: i128,
+    /// Whether payouts are routed through a smart-order router for best execution.
     pub smart_route: bool,
+    /// When true, release registers the funds with the stream contract instead of a direct transfer.
     pub convert_to_stream: bool,
+    /// Additional tokens (beyond the base token) accepted by `pay_with_token`.
     pub accepted_tokens: Vec<Address>,
+    /// Optional address that leftover funds are forwarded to on release.
     pub forward_to: Option<Address>,
+    /// Optional invoice id that leftover funds are forwarded to on release.
     pub forward_invoice_id: Option<u64>,
+    /// Per-recipient split rules evaluated at release time; empty = use `amounts`.
     pub split_rules: Vec<SplitRule>,
+    /// Pre-agreed auto-resolution rules evaluated in order by `auto_resolve`.
     pub auto_resolve_rules: Vec<ResolveRule>,
+    /// Optional creator cosigner that must co-author creator actions.
     pub creator_cosigner: Option<Address>,
+    /// Velocity limit (token units) for a single payer over `velocity_window`.
     pub velocity_limit: i128,
+    /// Window length (seconds) for velocity limiting of payer contributions.
     pub velocity_window: u64,
+    /// Optional id of the parent invoice this one was cloned from.
     pub parent_invoice_id: Option<u64>,
+    /// Optional human-readable reason the invoice is paused.
     pub pause_reason: Option<String>,
+    /// Optional timestamp at which a paused invoice auto-resumes.
     pub auto_resume_at: Option<u64>,
+    /// Optional per-payer cooldown (seconds) between payments.
     pub payment_cooldown_secs: Option<u64>,
+    /// Optional maximum number of payments allowed per `payment_window_secs`.
     pub max_payments_per_window: Option<u32>,
+    /// Optional window (seconds) for per-payer payment rate limiting.
     pub payment_window_secs: Option<u64>,
+    /// Optional timestamp at which release is scheduled to become available.
     pub scheduled_release_at: Option<u64>,
+    /// Configured penalty tiers applied at different late-payment thresholds.
     pub penalty_tiers: Vec<PenaltyTier>,
+    /// Optional allowlist of callers permitted to invoke mutating entry points.
     pub allowed_callers: Option<Vec<Address>>,
+    /// Grace period (seconds) after `deadline` before a refund is allowed.
     pub refund_grace_secs: Option<u64>,
 }
 
@@ -1655,11 +1744,13 @@ impl InvoiceStatus {
             InvoiceStatus::PartiallyReleased => 6,
             InvoiceStatus::Finalised => 7,
             InvoiceStatus::Deleted => 8,
+            InvoiceStatus::PayoutInProgress => 9,
         }
     }
 
-    /// Decode from a single byte.  Unknown byte values panic to prevent
-    /// silent data corruption from masked migration errors (#616).
+    /// Decode from a single byte.  Unknown byte values fall back to
+    /// `InvoiceStatus::Pending` so that forward-compatibility reads and
+    /// corrupt/out-of-range bytes never produce an invalid variant.
     pub fn from_u8(v: u8) -> Self {
         match v {
             0 => InvoiceStatus::Pending,
@@ -1671,7 +1762,8 @@ impl InvoiceStatus {
             6 => InvoiceStatus::PartiallyReleased,
             7 => InvoiceStatus::Finalised,
             8 => InvoiceStatus::Deleted,
-            _ => panic!("unknown InvoiceStatus byte: {v}"),
+            9 => InvoiceStatus::PayoutInProgress,
+            _ => InvoiceStatus::Pending,
         }
     }
 }
@@ -1789,3 +1881,74 @@ pub struct PaymentRecord {
     pub ledger: u32,
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::InvoiceStatus;
+
+    /// All ten variants must survive a to_u8 → from_u8 round-trip unchanged.
+    #[test]
+    fn invoice_status_round_trip_all_variants() {
+        let variants = [
+            InvoiceStatus::Pending,
+            InvoiceStatus::Released,
+            InvoiceStatus::Refunded,
+            InvoiceStatus::Expired,
+            InvoiceStatus::Cancelled,
+            InvoiceStatus::Disputed,
+            InvoiceStatus::PartiallyReleased,
+            InvoiceStatus::Finalised,
+            InvoiceStatus::Deleted,
+            InvoiceStatus::PayoutInProgress,
+        ];
+
+        for variant in &variants {
+            let byte = variant.to_u8();
+            let restored = InvoiceStatus::from_u8(byte);
+            assert_eq!(
+                restored, *variant,
+                "round-trip failed for variant {:?}: to_u8()={} decoded back to {:?}",
+                variant, byte, restored
+            );
+        }
+    }
+
+    /// Each variant's discriminant must be unique — no two variants may map to
+    /// the same byte, which would cause silent data corruption in compact storage.
+    #[test]
+    fn invoice_status_discriminants_are_unique() {
+        let variants = [
+            InvoiceStatus::Pending,
+            InvoiceStatus::Released,
+            InvoiceStatus::Refunded,
+            InvoiceStatus::Expired,
+            InvoiceStatus::Cancelled,
+            InvoiceStatus::Disputed,
+            InvoiceStatus::PartiallyReleased,
+            InvoiceStatus::Finalised,
+            InvoiceStatus::Deleted,
+            InvoiceStatus::PayoutInProgress,
+        ];
+
+        let mut seen = std::collections::HashSet::new();
+        for variant in &variants {
+            let byte = variant.to_u8();
+            assert!(
+                seen.insert(byte),
+                "discriminant collision: byte {} is used by more than one variant",
+                byte
+            );
+        }
+    }
+
+    /// An unknown byte value (e.g. 255) must map to InvoiceStatus::Pending
+    /// rather than panicking, so that future schema extensions and corrupt reads
+    /// degrade gracefully.
+    #[test]
+    fn invoice_status_unknown_byte_falls_back_to_pending() {
+        assert_eq!(InvoiceStatus::from_u8(255), InvoiceStatus::Pending);
+        // A few other out-of-range values for good measure.
+        assert_eq!(InvoiceStatus::from_u8(10), InvoiceStatus::Pending);
+        assert_eq!(InvoiceStatus::from_u8(100), InvoiceStatus::Pending);
+    }
+}
