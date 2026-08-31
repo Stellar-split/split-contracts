@@ -27,7 +27,7 @@ use errors::Error;
 use soroban_sdk::{
     contract, contractimpl, symbol_short, token, Address, BytesN, Env, Symbol, Vec,
 };
-use types::{BlacklistEntry, EscrowInvoice, EscrowStatus};
+use types::{BlacklistEntry, EscrowInvoice, EscrowReleased, EscrowStatus};
 
 // ---------------------------------------------------------------------------
 // Storage key helpers
@@ -476,6 +476,17 @@ impl InvoiceEscrowContract {
         let token_client = token::Client::new(&env, &invoice.token);
         token_client.transfer(&env.current_contract_address(), &creator, &total);
         emit_released(&env, invoice_id, total);
+
+        // Emit structured EscrowReleased event for off-chain indexers.
+        env.events().publish(
+            (symbol_short!("escrow"), symbol_short!("released")),
+            EscrowReleased {
+                invoice_id,
+                recipient: creator,
+                amount: total,
+            },
+        );
+
         Ok(())
     }
 
@@ -772,6 +783,26 @@ impl InvoiceEscrowContract {
     /// * [`Error::InvoiceNotFound`] — Unknown invoice ID.
     pub fn get_invoice(env: Env, invoice_id: u64) -> Result<EscrowInvoice, Error> {
         get_invoice(&env, invoice_id)
+    }
+
+    /// Return the current locked balance held in escrow for a given invoice.
+    ///
+    /// This is a read-only view function — it performs no state mutations.
+    /// Returns `0` when no escrow entry exists for `invoice_id` (i.e. the
+    /// invoice has never been created or has already been released/refunded).
+    ///
+    /// # Arguments
+    /// * `invoice_id` — The ID of the invoice to query.
+    ///
+    /// # Returns
+    /// The `funded_amount` currently locked in this escrow invoice, or `0`
+    /// if the invoice does not exist.
+    pub fn get_escrow_balance(env: Env, invoice_id: u64) -> i128 {
+        env.storage()
+            .persistent()
+            .get::<_, EscrowInvoice>(&invoice_key(invoice_id))
+            .map(|inv| inv.funded_amount)
+            .unwrap_or(0)
     }
 
     /// Return the amount a specific payer has deposited toward an invoice.

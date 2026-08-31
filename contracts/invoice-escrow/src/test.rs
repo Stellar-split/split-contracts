@@ -716,3 +716,106 @@ fn test_cannot_finalise_twice() {
     let result = client.try_finalise_blacklist(&admin, &payer, &true);
     assert_eq!(result, Err(Ok(Error::AlreadyFinalised)));
 }
+
+// ---------------------------------------------------------------------------
+// #735: get_escrow_balance
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_get_escrow_balance_existing_invoice_returns_funded_amount() {
+    let (env, contract_id) = setup();
+    let client = InvoiceEscrowContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let payer = Address::generate(&env);
+
+    client.initialize(&admin);
+
+    let token = create_token(&env, &token_admin);
+    let total: i128 = 1_000;
+    let deposit_amount: i128 = 400;
+    let deadline: u64 = env.ledger().timestamp() + 10_000;
+
+    // Mint enough tokens to the payer.
+    mint(&env, &token, &token_admin, &payer, total);
+
+    let invoice_id = client.create_invoice(
+        &Address::generate(&env),
+        &token,
+        &total,
+        &deadline,
+    );
+
+    // Before any deposit, balance should equal 0.
+    assert_eq!(client.get_escrow_balance(&invoice_id), 0);
+
+    // Deposit a partial amount.
+    client.deposit(&payer, &invoice_id, &deposit_amount);
+
+    // Balance must reflect the deposited amount.
+    assert_eq!(client.get_escrow_balance(&invoice_id), deposit_amount);
+}
+
+#[test]
+fn test_get_escrow_balance_unknown_invoice_returns_zero() {
+    let (env, contract_id) = setup();
+    let client = InvoiceEscrowContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+
+    client.initialize(&admin);
+
+    // Invoice ID 9999 was never created — must return 0, not panic.
+    assert_eq!(client.get_escrow_balance(&9999), 0);
+}
+
+// ---------------------------------------------------------------------------
+// #736: EscrowReleased event
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_release_emits_escrow_released_event() {
+    let (env, contract_id) = setup();
+    let client = InvoiceEscrowContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let creator = Address::generate(&env);
+    let payer = Address::generate(&env);
+
+    client.initialize(&admin);
+
+    let token = create_token(&env, &token_admin);
+    let total: i128 = 500;
+    let deadline: u64 = env.ledger().timestamp() + 10_000;
+
+    mint(&env, &token, &token_admin, &payer, total);
+
+    let invoice_id = client.create_invoice(&creator, &token, &total, &deadline);
+
+    // Deposit the full amount so the invoice becomes fully funded.
+    client.deposit(&payer, &invoice_id, &total);
+
+    // Verify EscrowReleased event was emitted.
+    let all_events = env.events().all();
+    let mut found = false;
+    for event in all_events.iter() {
+        // Topics for the structured release event are (escrow, released).
+        let topics = event.1;
+        if topics.len() >= 2 {
+            if let Ok(t0) = <soroban_sdk::Symbol as soroban_sdk::TryFromVal<Env, soroban_sdk::Val>>::try_from_val(
+                &env,
+                &topics.get_unchecked(0),
+            ) {
+                if let Ok(t1) = <soroban_sdk::Symbol as soroban_sdk::TryFromVal<Env, soroban_sdk::Val>>::try_from_val(
+                    &env,
+                    &topics.get_unchecked(1),
+                ) {
+                    if t0 == symbol_short!("escrow") && t1 == symbol_short!("released") {
+                        found = true;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    assert!(found, "EscrowReleased event was not emitted during release");
+}
