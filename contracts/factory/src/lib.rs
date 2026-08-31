@@ -35,8 +35,13 @@ const MAX_DEPLOYMENTS_PER_CREATOR: u32 = 10_000;
 
 /// Emitted when a new split contract is deployed by the factory.
 ///
-/// Topics: (factory, deployed, creator)
-/// Data: (contract_address, salt)
+/// Topics: `(factory, deployed, creator)`
+/// Data: `contract_address`
+///
+/// # Parameters
+/// * `env`              — The current Soroban execution environment.
+/// * `creator`          — The address that triggered the deployment.
+/// * `contract_address` — The address of the newly deployed contract.
 pub fn contract_deployed(env: &Env, creator: &Address, contract_address: &Address) {
     env.events().publish(
         (
@@ -58,7 +63,17 @@ pub struct SplitFactory;
 #[contractimpl]
 impl SplitFactory {
     /// Initialise the factory by recording its admin.
-    /// Can only be called once.
+    ///
+    /// Must be called exactly once after the contract is deployed. Subsequent
+    /// calls panic with `"already initialized"`.
+    ///
+    /// # Parameters
+    /// * `env`   — The current Soroban execution environment.
+    /// * `admin` — The address that will become the factory administrator.
+    ///
+    /// # Panics
+    /// Panics with `"already initialized"` if the factory has already been
+    /// initialised.
     pub fn initialize(env: Env, admin: Address) {
         assert!(
             !env.storage().instance().has(&factory_admin_key()),
@@ -150,6 +165,18 @@ impl SplitFactory {
     }
 
     /// Return all deployed contract addresses for a given creator.
+    ///
+    /// Looks up the persistent list of contracts that `creator` has deployed
+    /// through this factory. Returns an empty `Vec` when the creator has not
+    /// yet deployed any contracts.
+    ///
+    /// # Parameters
+    /// * `env`     — The current Soroban execution environment.
+    /// * `creator` — The creator address to query.
+    ///
+    /// # Returns
+    /// A `Vec<Address>` of contract addresses in deployment order. Empty if
+    /// no contracts have been deployed for this creator.
     pub fn get_deployments(env: Env, creator: Address) -> Vec<Address> {
         env.storage()
             .persistent()
@@ -158,6 +185,20 @@ impl SplitFactory {
     }
 
     /// Check whether a specific (creator, salt) pair has already been used.
+    ///
+    /// Because the deployed address is deterministic per `(creator, salt)`,
+    /// the factory rejects duplicate salts for the same creator. Use this
+    /// view function before calling [`Self::deploy_invoice_contract`] to
+    /// pre-check whether a salt is available.
+    ///
+    /// # Parameters
+    /// * `env`     — The current Soroban execution environment.
+    /// * `creator` — The creator address to check.
+    /// * `salt`    — The 32-byte salt to check.
+    ///
+    /// # Returns
+    /// `true` if the `(creator, salt)` pair was already used in a previous
+    /// deployment; `false` otherwise.
     pub fn is_salt_used(env: Env, creator: Address, salt: BytesN<32>) -> bool {
         env.storage().persistent().has(&salt_key(&creator, &salt))
     }

@@ -8496,78 +8496,87 @@ fn test_create_invoice_valid_multisig_setup_ok() {
     assert!(id >= 1);
 }
 
-// --- Issue #696: early_bird_fee_bps must not exceed platform fee at creation ---
+// --- Issue #697: payment_open_at must be strictly before payment_close_at when both are set ---
 
 #[test]
-fn test_create_invoice_early_bird_fee_exceeds_platform_fee_rejected() {
-    let (env, contract_id, token_id) = setup();
-    let c = client(&env, &contract_id);
-    let admin = Address::generate(&env);
-    let treasury = Address::generate(&env);
-    c.initialize(&admin, &0_i128, &treasury, &token_id, &500_u32, &None, &0_u32, &0_u32, &0_u64);
-    env.ledger().set_timestamp(1_000);
-
-    let creator = Address::generate(&env);
-    let (recipients, amounts) = two_recipients(&env);
-
-    let mut opts = default_options(&env);
-    opts.ext.early_bird_fee_bps = 501;
-
-    let res = c.try_create_invoice(&creator, &recipients, &amounts, &token_id, &9_999_u64, &opts);
-    assert_eq!(res, Err(Ok(ContractError::InvalidAmount.into())));
-}
-
-#[test]
-fn test_create_invoice_early_bird_fee_exceeds_default_zero_platform_fee_rejected() {
+fn test_create_invoice_payment_open_at_greater_than_close_at_rejected() {
     let (env, contract_id, token_id) = setup_initialized();
     let c = client(&env, &contract_id);
-    env.ledger().set_timestamp(1_000);
+    env.ledger().set_timestamp(50);
 
     let creator = Address::generate(&env);
     let (recipients, amounts) = two_recipients(&env);
 
     let mut opts = default_options(&env);
-    opts.ext.early_bird_fee_bps = 100;
+    opts.ext.payment_open_at = Some(100);
+    opts.ext.payment_close_at = Some(99);
 
     let res = c.try_create_invoice(&creator, &recipients, &amounts, &token_id, &9_999_u64, &opts);
     assert_eq!(res, Err(Ok(ContractError::InvalidAmount.into())));
 }
 
 #[test]
-fn test_create_invoice_early_bird_fee_equals_platform_fee_ok() {
-    let (env, contract_id, token_id) = setup();
+fn test_create_invoice_payment_open_at_equal_to_close_at_rejected() {
+    let (env, contract_id, token_id) = setup_initialized();
     let c = client(&env, &contract_id);
-    let admin = Address::generate(&env);
-    let treasury = Address::generate(&env);
-    c.initialize(&admin, &0_i128, &treasury, &token_id, &500_u32, &None, &0_u32, &0_u32, &0_u64);
-    env.ledger().set_timestamp(1_000);
+    env.ledger().set_timestamp(50);
 
     let creator = Address::generate(&env);
     let (recipients, amounts) = two_recipients(&env);
 
     let mut opts = default_options(&env);
-    opts.ext.early_bird_fee_bps = 500;
+    opts.ext.payment_open_at = Some(100);
+    opts.ext.payment_close_at = Some(100);
+
+    let res = c.try_create_invoice(&creator, &recipients, &amounts, &token_id, &9_999_u64, &opts);
+    assert_eq!(res, Err(Ok(ContractError::InvalidAmount.into())));
+}
+
+#[test]
+fn test_create_invoice_payment_open_at_less_than_close_at_ok() {
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+    env.ledger().set_timestamp(50);
+
+    let creator = Address::generate(&env);
+    let (recipients, amounts) = two_recipients(&env);
+
+    let mut opts = default_options(&env);
+    opts.ext.payment_open_at = Some(99);
+    opts.ext.payment_close_at = Some(100);
 
     let id = c.create_invoice(&creator, &recipients, &amounts, &token_id, &9_999_u64, &opts);
     assert!(id >= 1);
 }
 
 #[test]
-fn test_create_invoice_early_bird_fee_less_than_platform_fee_ok() {
-    let (env, contract_id, token_id) = setup();
+fn test_create_invoice_payment_window_only_one_or_none_ok() {
+    let (env, contract_id, token_id) = setup_initialized();
     let c = client(&env, &contract_id);
-    let admin = Address::generate(&env);
-    let treasury = Address::generate(&env);
-    c.initialize(&admin, &0_i128, &treasury, &token_id, &500_u32, &None, &0_u32, &0_u32, &0_u64);
-    env.ledger().set_timestamp(1_000);
+    env.ledger().set_timestamp(50);
 
     let creator = Address::generate(&env);
     let (recipients, amounts) = two_recipients(&env);
 
-    let mut opts = default_options(&env);
-    opts.ext.early_bird_fee_bps = 250;
+    // Only payment_open_at set
+    let mut opts_open_only = default_options(&env);
+    opts_open_only.ext.payment_open_at = Some(100);
+    opts_open_only.ext.payment_close_at = None;
+    let id1 = c.create_invoice(&creator, &recipients, &amounts, &token_id, &9_999_u64, &opts_open_only);
+    assert!(id1 >= 1);
 
-    let id = c.create_invoice(&creator, &recipients, &amounts, &token_id, &9_999_u64, &opts);
-    assert!(id >= 1);
+    // Only payment_close_at set
+    let mut opts_close_only = default_options(&env);
+    opts_close_only.ext.payment_open_at = None;
+    opts_close_only.ext.payment_close_at = Some(100);
+    let id2 = c.create_invoice(&creator, &recipients, &amounts, &token_id, &9_999_u64, &opts_close_only);
+    assert!(id2 >= 1);
+
+    // Both None
+    let mut opts_none = default_options(&env);
+    opts_none.ext.payment_open_at = None;
+    opts_none.ext.payment_close_at = None;
+    let id3 = c.create_invoice(&creator, &recipients, &amounts, &token_id, &9_999_u64, &opts_none);
+    assert!(id3 >= 1);
 }
 

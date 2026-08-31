@@ -5405,7 +5405,7 @@ impl SplitContract {
             deadline > env.ledger().timestamp(),
             "deadline must be in the future"
         );
-        // Issue #430: creator-defined payment window.
+        // Issue #430 / #697: creator-defined payment window.
         if let Some(close_at) = payment_close_at {
             assert!(
                 close_at < deadline,
@@ -5413,10 +5413,9 @@ impl SplitContract {
             );
         }
         if let (Some(open_at), Some(close_at)) = (payment_open_at, payment_close_at) {
-            assert!(
-                open_at < close_at,
-                "payment_open_at must be before payment_close_at"
-            );
+            if open_at >= close_at {
+                env.panic_with_error(ContractError::InvalidAmount);
+            }
         }
         assert!(bonus_pool >= 0, "bonus_pool must be non-negative");
         // Issue #690: `penalty_bps` is a fraction of a late payment; a value
