@@ -20,7 +20,7 @@ where
     env.storage().persistent().set(&key, value);
     env.storage()
         .persistent()
-        .bump(&key, MIN_INVOICE_TTL_LEDGERS, MAX_INVOICE_TTL_LEDGERS);
+        .extend_ttl(&key, MIN_INVOICE_TTL_LEDGERS, MAX_INVOICE_TTL_LEDGERS);
 }
 
 /// Save a recipients list entry and automatically bump its TTL.
@@ -32,7 +32,7 @@ where
     env.storage().persistent().set(&key, value);
     env.storage()
         .persistent()
-        .bump(&key, MIN_INVOICE_TTL_LEDGERS, MAX_INVOICE_TTL_LEDGERS);
+        .extend_ttl(&key, MIN_INVOICE_TTL_LEDGERS, MAX_INVOICE_TTL_LEDGERS);
 }
 
 /// Save a contributor entry and automatically bump its TTL.
@@ -44,7 +44,7 @@ where
     env.storage().persistent().set(&key, value);
     env.storage()
         .persistent()
-        .bump(&key, MIN_INVOICE_TTL_LEDGERS, MAX_INVOICE_TTL_LEDGERS);
+        .extend_ttl(&key, MIN_INVOICE_TTL_LEDGERS, MAX_INVOICE_TTL_LEDGERS);
 }
 
 // ---------------------------------------------------------------------------
@@ -55,54 +55,66 @@ where
 mod tests {
     use super::*;
     use soroban_sdk::testutils::Address as _;
-    use soroban_sdk::{symbol_short, Address, Symbol};
+    use soroban_sdk::{symbol_short, Address, String, Symbol};
+
+    fn contract_id(env: &Env) -> Address {
+        env.register(crate::SplitContract, ())
+    }
 
     #[test]
     fn test_save_invoice_bumps_ttl() {
         let env = Env::default();
+        let id = contract_id(&env);
         let key = (symbol_short!("test_inv"), 42u64);
-        let value = "test_value";
+        let value = String::from_str(&env, "test_value");
 
-        save_invoice(&env, key.clone(), &value);
+        env.as_contract(&id, || {
+            save_invoice(&env, key.clone(), &value);
 
-        // Verify value was stored (would fail if not set)
-        let stored: String = env
-            .storage()
-            .persistent()
-            .get(&key)
-            .expect("value should be stored");
-        assert_eq!(stored, "test_value");
+            let stored: String = env
+                .storage()
+                .persistent()
+                .get(&key)
+                .expect("value should be stored");
+            assert_eq!(stored, String::from_str(&env, "test_value"));
+        });
     }
 
     #[test]
     fn test_save_recipients_bumps_ttl() {
         let env = Env::default();
+        let id = contract_id(&env);
         let key = (symbol_short!("test_rec"), 42u64);
         let value = 100i128;
 
-        save_recipients(&env, key.clone(), &value);
+        env.as_contract(&id, || {
+            save_recipients(&env, key.clone(), &value);
 
-        let stored: i128 = env
-            .storage()
-            .persistent()
-            .get(&key)
-            .expect("value should be stored");
-        assert_eq!(stored, 100);
+            let stored: i128 = env
+                .storage()
+                .persistent()
+                .get(&key)
+                .expect("value should be stored");
+            assert_eq!(stored, 100);
+        });
     }
 
     #[test]
     fn test_save_contributor_bumps_ttl() {
         let env = Env::default();
-        let key = (symbol_short!("test_con"), 42u64);
+        let id = contract_id(&env);
         let value = Address::generate(&env);
+        let key = (symbol_short!("test_con"), 42u64);
 
-        save_contributor(&env, key.clone(), &value);
+        env.as_contract(&id, || {
+            save_contributor(&env, key.clone(), &value);
 
-        let stored: Address = env
-            .storage()
-            .persistent()
-            .get(&key)
-            .expect("value should be stored");
-        assert_eq!(stored, value);
+            let stored: Address = env
+                .storage()
+                .persistent()
+                .get(&key)
+                .expect("value should be stored");
+            assert_eq!(stored, value);
+        });
     }
 }

@@ -4887,10 +4887,7 @@ fn test_auto_resume_allows_payment_after_timestamp() {
     // Payment should succeed because lazy auto-resume fires.
     c.pay(&payer, &id, &200_i128, &0_u64, &false, &false, &None);
 
-    let invoice = c.get_invoice(&id);
-    assert_eq!(invoice.status, InvoiceStatus::Released);
-    assert_eq!(tk.balance(&recipient), 200);
-
+    // Check events immediately — events reset between contract calls.
     // A distinct `invoice_auto_resumed` event fires for the timer-triggered
     // resume; the manual `resumed` event must NOT fire (it wasn't a manual resume).
     let has_auto_resumed_event = env
@@ -4912,6 +4909,10 @@ fn test_auto_resume_allows_payment_after_timestamp() {
         !has_manual_resumed_event,
         "manual invoice_resumed should not fire for an automatic resume"
     );
+
+    let invoice = c.get_invoice(&id);
+    assert_eq!(invoice.status, InvoiceStatus::Released);
+    assert_eq!(tk.balance(&recipient), 200);
 }
 
 #[test]
@@ -7035,9 +7036,7 @@ fn test_contributor_allowlist_toggle_events() {
     // Adding the first contributor turns gating ON (None -> Some).
     c.add_contributor_to_allowlist(&creator, &id, &contributor);
 
-    let ext_enabled = c.get_invoice_ext2(&id);
-    assert!(ext_enabled.contributor_allowlist.is_some());
-
+    // Check event immediately — events reset between contract calls.
     let toggled_on_count = env
         .events()
         .all()
@@ -7048,23 +7047,25 @@ fn test_contributor_allowlist_toggle_events() {
         toggled_on_count, 1,
         "contributor_allowlist_toggled(enabled=true) should fire exactly once on first add"
     );
+    let ext_enabled = c.get_invoice_ext2(&id);
+    assert!(ext_enabled.contributor_allowlist.is_some());
 
     // Removing the only contributor turns gating OFF (Some -> None).
     c.remove_contributor_allowlist(&creator, &id, &contributor);
 
-    let ext_disabled = c.get_invoice_ext2(&id);
-    assert!(ext_disabled.contributor_allowlist.is_none());
-
-    let toggled_total_count = env
+    // Check event immediately — events reset between contract calls.
+    let toggled_off_count = env
         .events()
         .all()
         .iter()
         .filter(|(_c, topics, _d)| topic1_is(&env, topics, "al_tog"))
         .count();
     assert_eq!(
-        toggled_total_count, 2,
-        "one toggle event for enabling, one for disabling"
+        toggled_off_count, 1,
+        "contributor_allowlist_toggled(enabled=false) should fire on last remove"
     );
+    let ext_disabled = c.get_invoice_ext2(&id);
+    assert!(ext_disabled.contributor_allowlist.is_none());
 }
 
 #[test]
@@ -7354,8 +7355,8 @@ fn test_remove_allowlist_opens_invoice_and_emits_event() {
     assert!(c.get_invoice_ext(&id).allowed_payers.is_some());
 
     c.remove_allowlist(&creator, &id);
-    assert!(c.get_invoice_ext(&id).allowed_payers.is_none());
 
+    // Check event immediately — events reset between contract calls.
     let has_allowlist_removed_event = env
         .events()
         .all()
@@ -7365,6 +7366,8 @@ fn test_remove_allowlist_opens_invoice_and_emits_event() {
         has_allowlist_removed_event,
         "expected an allowlist_removed event"
     );
+
+    assert!(c.get_invoice_ext(&id).allowed_payers.is_none());
 
     // The invoice is now open — a previously non-allowed payer can pay.
     c.pay(&other_payer, &id, &300_i128, &0_u64, &false, &false, &None);

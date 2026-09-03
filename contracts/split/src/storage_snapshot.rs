@@ -354,6 +354,10 @@ fn storage_key_snapshot() {
 // #738: Invoice state persistence — storage round-trip tests
 // ---------------------------------------------------------------------------
 
+fn contract_id(env: &Env) -> soroban_sdk::Address {
+    env.register(crate::SplitContract, ())
+}
+
 /// Test 1: snapshot round-trip — write then read equals original.
 ///
 /// Writes a value under a persistent storage key and reads it back. Verifies
@@ -362,24 +366,27 @@ fn storage_key_snapshot() {
 #[test]
 fn storage_roundtrip_write_then_read_equals_original() {
     let env = Env::default();
+    let id = contract_id(&env);
 
     // Use a simple (Symbol, u64) key identical to the pattern used throughout
     // the split contract (e.g. invoice_key).
     let key = (symbol_short!("inv"), 1u64);
     let original: i128 = 123_456_789;
 
-    env.storage().persistent().set(&key, &original);
+    env.as_contract(&id, || {
+        env.storage().persistent().set(&key, &original);
 
-    let retrieved: i128 = env
-        .storage()
-        .persistent()
-        .get(&key)
-        .expect("value should be present after write");
+        let retrieved: i128 = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .expect("value should be present after write");
 
-    assert_eq!(
-        retrieved, original,
-        "round-trip mismatch: stored {original} but read {retrieved}"
-    );
+        assert_eq!(
+            retrieved, original,
+            "round-trip mismatch: stored {original} but read {retrieved}"
+        );
+    });
 }
 
 /// Test 2: partial field update does not overwrite unrelated keys.
@@ -390,6 +397,7 @@ fn storage_roundtrip_write_then_read_equals_original() {
 #[test]
 fn storage_partial_update_does_not_overwrite_unrelated_keys() {
     let env = Env::default();
+    let id = contract_id(&env);
 
     let key_a = (symbol_short!("inv"), 1u64);
     let key_b = (symbol_short!("inv"), 2u64);
@@ -397,33 +405,35 @@ fn storage_partial_update_does_not_overwrite_unrelated_keys() {
     let value_a: i128 = 1_000;
     let value_b: i128 = 2_000;
 
-    // Write both keys.
-    env.storage().persistent().set(&key_a, &value_a);
-    env.storage().persistent().set(&key_b, &value_b);
+    env.as_contract(&id, || {
+        // Write both keys.
+        env.storage().persistent().set(&key_a, &value_a);
+        env.storage().persistent().set(&key_b, &value_b);
 
-    // Update only key_a.
-    let updated_a: i128 = 9_999;
-    env.storage().persistent().set(&key_a, &updated_a);
+        // Update only key_a.
+        let updated_a: i128 = 9_999;
+        env.storage().persistent().set(&key_a, &updated_a);
 
-    // key_b must be unchanged.
-    let still_b: i128 = env
-        .storage()
-        .persistent()
-        .get(&key_b)
-        .expect("key_b should still be present");
+        // key_b must be unchanged.
+        let still_b: i128 = env
+            .storage()
+            .persistent()
+            .get(&key_b)
+            .expect("key_b should still be present");
 
-    assert_eq!(
-        still_b, value_b,
-        "key_b was incorrectly modified by update to key_a"
-    );
+        assert_eq!(
+            still_b, value_b,
+            "key_b was incorrectly modified by update to key_a"
+        );
 
-    // Sanity check: key_a reflects the update.
-    let new_a: i128 = env
-        .storage()
-        .persistent()
-        .get(&key_a)
-        .expect("key_a should be present after update");
-    assert_eq!(new_a, updated_a);
+        // Sanity check: key_a reflects the update.
+        let new_a: i128 = env
+            .storage()
+            .persistent()
+            .get(&key_a)
+            .expect("key_a should be present after update");
+        assert_eq!(new_a, updated_a);
+    });
 }
 
 /// Test 3: missing key returns None without panic.
@@ -434,15 +444,18 @@ fn storage_partial_update_does_not_overwrite_unrelated_keys() {
 #[test]
 fn storage_missing_key_returns_none_without_panic() {
     let env = Env::default();
+    let id = contract_id(&env);
 
     // A key that has never been written.
     let key = (symbol_short!("inv"), 99_999u64);
 
-    let result: Option<i128> = env.storage().persistent().get(&key);
+    env.as_contract(&id, || {
+        let result: Option<i128> = env.storage().persistent().get(&key);
 
-    assert!(
-        result.is_none(),
-        "expected None for missing key, got Some({:?})",
-        result
-    );
+        assert!(
+            result.is_none(),
+            "expected None for missing key, got Some({:?})",
+            result
+        );
+    });
 }

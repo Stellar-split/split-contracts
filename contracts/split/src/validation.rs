@@ -5,7 +5,7 @@
 //! rejected atomically.
 
 use crate::error::ContractError;
-use soroban_sdk::{symbol_short, Address, Env, Map, Vec};
+use soroban_sdk::{symbol_short, Address, Env, IntoVal, Map, Val, Vec};
 
 /// Issue #556: Reject a recipient list that contains duplicate addresses.
 ///
@@ -14,10 +14,10 @@ use soroban_sdk::{symbol_short, Address, Env, Map, Vec};
 ///
 /// # Errors
 /// Returns [ContractError::DuplicateRecipient] when a duplicate is found.
-pub fn assert_unique_recipients(env: &Env, recipients: &[Address]) -> Result<(), ContractError> {
+pub fn assert_unique_recipients(env: &Env, recipients: &Vec<Address>) -> Result<(), ContractError> {
     let mut seen: Map<Address, bool> = Map::new(env);
     for r in recipients.iter() {
-        if seen.has(r) {
+        if seen.contains_key(r.clone()) {
             return Err(ContractError::DuplicateRecipient);
         }
         seen.set(r.clone(), true);
@@ -45,13 +45,15 @@ pub fn assert_unique_recipients(env: &Env, recipients: &[Address]) -> Result<(),
 pub fn assert_recipients_have_trustlines(
     env: &Env,
     token: &Address,
-    recipients: &[Address],
+    recipients: &Vec<Address>,
 ) -> Result<(), ContractError> {
     for r in recipients.iter() {
+        let mut args: Vec<Val> = Vec::new(env);
+        args.push_back(r.clone().into_val(env));
         let result = env.try_invoke_contract::<i128, soroban_sdk::Error>(
             token,
             &symbol_short!("balance"),
-            (r.clone(),).into_val(env),
+            args,
         );
         match result {
             Ok(_) => {}
@@ -126,7 +128,7 @@ mod tests {
         v.push_back(a.clone());
         v.push_back(b.clone());
         v.push_back(c.clone());
-        assert!(assert_unique_recipients(&env, &v.to_vec()).is_ok());
+        assert!(assert_unique_recipients(&env, &v).is_ok());
     }
 
     #[test]
@@ -139,7 +141,7 @@ mod tests {
         v.push_back(b.clone());
         v.push_back(a.clone());
         assert_eq!(
-            assert_unique_recipients(&env, &v.to_vec()),
+            assert_unique_recipients(&env, &v),
             Err(ContractError::DuplicateRecipient)
         );
     }
@@ -148,7 +150,7 @@ mod tests {
     fn empty_recipient_list_passes() {
         let env = Env::default();
         let v: Vec<Address> = Vec::new(&env);
-        assert!(assert_unique_recipients(&env, &v.to_vec()).is_ok());
+        assert!(assert_unique_recipients(&env, &v).is_ok());
     }
 
     #[test]
@@ -157,7 +159,7 @@ mod tests {
         let a = Address::generate(&env);
         let mut v: Vec<Address> = Vec::new(&env);
         v.push_back(a.clone());
-        assert!(assert_unique_recipients(&env, &v.to_vec()).is_ok());
+        assert!(assert_unique_recipients(&env, &v).is_ok());
     }
 
     #[test]
@@ -171,7 +173,7 @@ mod tests {
         v.push_back(b.clone()); // index 1
         v.push_back(a.clone()); // index 2 — non-adjacent duplicate of index 0
         assert_eq!(
-            assert_unique_recipients(&env, &v.to_vec()),
+            assert_unique_recipients(&env, &v),
             Err(ContractError::DuplicateRecipient)
         );
     }
@@ -183,7 +185,7 @@ mod tests {
         for _ in 0..10 {
             v.push_back(Address::generate(&env));
         }
-        assert!(assert_unique_recipients(&env, &v.to_vec()).is_ok());
+        assert!(assert_unique_recipients(&env, &v).is_ok());
     }
 
     // --- assert_bps_sum (issue #623) ---

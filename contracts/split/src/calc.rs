@@ -34,7 +34,7 @@
 
 #[allow(unused_imports)]
 use crate::types::BASIS_POINTS_TOTAL;
-use soroban_sdk::{Address, BytesN, Env, Vec};
+use soroban_sdk::{Address, Env, Map, Vec};
 
 use crate::error::ContractError;
 
@@ -148,39 +148,22 @@ pub fn distribute_with_remainder(
 /// * `env`        – Soroban environment
 /// * `recipients` – mutable list of recipient addresses to sort in-place
 pub fn sort_recipients(env: &Env, recipients: &mut Vec<Address>) {
-    let n = recipients.len() as usize;
+    let n = recipients.len();
     if n <= 1 {
         return;
     }
 
-    // Build byte representations for comparison.
-    let mut bytes_vec: Vec<(BytesN<32>, usize)> = Vec::new(env);
+    // Soroban Map maintains keys in canonical (XDR-sorted) order.
+    // Inserting all addresses as keys then iterating produces deterministic ordering.
+    let mut ordered: Map<Address, u32> = Map::new(env);
     for i in 0..n {
-        let addr = recipients.get(i as u32).unwrap();
-        let bytes = addr.to_bytes();
-        bytes_vec.push_back((bytes, i));
+        let addr = recipients.get(i).unwrap();
+        ordered.set(addr, i);
     }
 
-    // Insertion sort by byte representation (lexicographic).
-    for i in 1..n {
-        let key = bytes_vec.get(i).unwrap();
-        let mut j = i;
-        while j > 0 {
-            let prev = bytes_vec.get(j - 1).unwrap();
-            if prev.0 <= key.0 {
-                break;
-            }
-            bytes_vec.set(j, bytes_vec.get(j - 1).unwrap());
-            j -= 1;
-        }
-        bytes_vec.set(j, key.clone());
-    }
-
-    // Reorder recipients according to sorted indices.
     let mut sorted = Vec::new(env);
-    for i in 0..n {
-        let (_, original_idx) = bytes_vec.get(i).unwrap();
-        sorted.push_back(recipients.get(original_idx as u32).unwrap());
+    for (addr, _) in ordered.iter() {
+        sorted.push_back(addr);
     }
     *recipients = sorted;
 }
@@ -359,7 +342,7 @@ mod tests {
     #[test]
     fn single_recipient_gets_full_amount() {
         let env = Env::default();
-        let r = distribute_with_remainder(&env, 12345, &make_ratios(&env, &[1]), 1);
+        let r = distribute_with_remainder(&env, 12345, &make_ratios(&env, &[1]), 1).unwrap();
         assert_eq!(r.len(), 1);
         assert_eq!(r.get(0), Some(12345));
     }
@@ -369,17 +352,17 @@ mod tests {
         let env = Env::default();
         // Case 1: 3 recipients with ratios [1, 1, 1] and total=10
         // Total is not evenly divisible by denom (10 % 3 != 0)
-        let r1 = distribute_with_remainder(&env, 10, &make_ratios(&env, &[1, 1, 1]), 3);
+        let r1 = distribute_with_remainder(&env, 10, &make_ratios(&env, &[1, 1, 1]), 3).unwrap();
         let sum1: i128 = r1.iter().sum();
         assert_eq!(sum1, 10);
 
         // Case 2: 4 recipients with ratios [2, 3, 1, 4] and total=100
-        let r2 = distribute_with_remainder(&env, 100, &make_ratios(&env, &[2, 3, 1, 4]), 10);
+        let r2 = distribute_with_remainder(&env, 100, &make_ratios(&env, &[2, 3, 1, 4]), 10).unwrap();
         let sum2: i128 = r2.iter().sum();
         assert_eq!(sum2, 100);
 
         // Case 3: 2 recipients with ratios [1, 3] and total=999
-        let r3 = distribute_with_remainder(&env, 999, &make_ratios(&env, &[1, 3]), 4);
+        let r3 = distribute_with_remainder(&env, 999, &make_ratios(&env, &[1, 3]), 4).unwrap();
         let sum3: i128 = r3.iter().sum();
         assert_eq!(sum3, 999);
     }
@@ -478,8 +461,8 @@ mod tests {
 
     #[test]
     fn test_calc_platform_fee_overflow() {
-        // i128::MAX * any fee_bps > 0 will overflow the intermediate multiplication
-        let result = calc_platform_fee(i128::MAX, 1);
+        // i128::MAX * 2 overflows the intermediate multiplication
+        let result = calc_platform_fee(i128::MAX, 2);
         assert_eq!(result, Err(crate::error::ContractError::ArithmeticOverflow));
     }
 }

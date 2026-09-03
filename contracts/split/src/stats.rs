@@ -12,6 +12,9 @@ pub struct ProtocolStats {
     pub total_recipients_paid: u64,
 }
 
+/// Alias so call sites can use `Stats` as the return type.
+pub type Stats = ProtocolStats;
+
 const TOTAL_INVOICES: &str = "stats_total_invoices";
 const TOTAL_VOLUME: &str = "stats_total_volume";
 const TOTAL_RECIPIENTS_PAID: &str = "stats_total_recipients_paid";
@@ -37,11 +40,10 @@ fn total_recipients_paid_key(env: &Env) -> Symbol {
 /// * `env` — the Soroban environment used to read instance storage.
 pub fn get_stats(env: &Env) -> Stats {
     let storage = env.storage().instance();
-
-    (
-        storage.get(&total_invoices_key(env)).unwrap_or(0u64),
-        storage.get(&total_volume_key(env)).unwrap_or(0i128),
-        storage
+    ProtocolStats {
+        total_invoices: storage.get(&total_invoices_key(env)).unwrap_or(0u64),
+        total_volume: storage.get(&total_volume_key(env)).unwrap_or(0i128),
+        total_recipients_paid: storage
             .get(&total_recipients_paid_key(env))
             .unwrap_or(0u64),
     }
@@ -147,52 +149,70 @@ mod tests {
     use super::*;
     use soroban_sdk::Env;
 
+    fn contract_id(env: &Env) -> soroban_sdk::Address {
+        env.register(crate::SplitContract, ())
+    }
+
     #[test]
     fn test_get_stats_initial_state() {
         let env = Env::default();
-        let stats = get_stats(&env);
-        assert_eq!(stats.total_invoices, 0);
-        assert_eq!(stats.total_volume, 0);
-        assert_eq!(stats.total_recipients_paid, 0);
+        let id = contract_id(&env);
+        env.as_contract(&id, || {
+            let stats = get_stats(&env);
+            assert_eq!(stats.total_invoices, 0);
+            assert_eq!(stats.total_volume, 0);
+            assert_eq!(stats.total_recipients_paid, 0);
+        });
     }
 
     #[test]
     fn test_invoice_created_increments_counter() {
         let env = Env::default();
-        invoice_created(&env).unwrap();
-        let stats = get_stats(&env);
-        assert_eq!(stats.total_invoices, 1);
-        assert_eq!(stats.total_volume, 0);
-        assert_eq!(stats.total_recipients_paid, 0);
+        let id = contract_id(&env);
+        env.as_contract(&id, || {
+            invoice_created(&env).unwrap();
+            let stats = get_stats(&env);
+            assert_eq!(stats.total_invoices, 1);
+            assert_eq!(stats.total_volume, 0);
+            assert_eq!(stats.total_recipients_paid, 0);
+        });
     }
 
     #[test]
     fn test_volume_added() {
         let env = Env::default();
-        volume_added(&env, 1_000).unwrap();
-        let stats = get_stats(&env);
-        assert_eq!(stats.total_invoices, 0);
-        assert_eq!(stats.total_volume, 1_000);
-        assert_eq!(stats.total_recipients_paid, 0);
+        let id = contract_id(&env);
+        env.as_contract(&id, || {
+            volume_added(&env, 1_000).unwrap();
+            let stats = get_stats(&env);
+            assert_eq!(stats.total_invoices, 0);
+            assert_eq!(stats.total_volume, 1_000);
+            assert_eq!(stats.total_recipients_paid, 0);
+        });
     }
 
     #[test]
     fn test_recipients_paid_increments() {
         let env = Env::default();
-        recipients_paid(&env, 3).unwrap();
-        let stats = get_stats(&env);
-        assert_eq!(stats.total_invoices, 0);
-        assert_eq!(stats.total_volume, 0);
-        assert_eq!(stats.total_recipients_paid, 3);
+        let id = contract_id(&env);
+        env.as_contract(&id, || {
+            recipients_paid(&env, 3).unwrap();
+            let stats = get_stats(&env);
+            assert_eq!(stats.total_invoices, 0);
+            assert_eq!(stats.total_volume, 0);
+            assert_eq!(stats.total_recipients_paid, 3);
+        });
     }
 
     #[test]
     fn test_increment_uses_named_fields() {
         let env = Env::default();
-        let result = increment(&env, 2, 500, 4).unwrap();
-        // Named fields — not positional
-        assert_eq!(result.total_invoices, 2);
-        assert_eq!(result.total_volume, 500);
-        assert_eq!(result.total_recipients_paid, 4);
+        let id = contract_id(&env);
+        env.as_contract(&id, || {
+            let result = increment(&env, 2, 500, 4).unwrap();
+            assert_eq!(result.total_invoices, 2);
+            assert_eq!(result.total_volume, 500);
+            assert_eq!(result.total_recipients_paid, 4);
+        });
     }
 }

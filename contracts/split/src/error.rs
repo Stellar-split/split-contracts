@@ -143,4 +143,6 @@ pub enum ContractError {
     CheckpointMismatch = 64,
     /// Issue #564: Recipient at this index has already been paid in a prior payout attempt.
     AlreadyPaid = 65,
+    /// Recipient list is shorter than the configured minimum recipient count.
+    TooFewRecipients = 66,
 }

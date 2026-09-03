@@ -1278,6 +1278,7 @@ pub(crate) fn valid_transition(from: InvoiceStatus, to: InvoiceStatus) -> bool {
         InvoiceStatus::Disputed => to == InvoiceStatus::Pending || to == InvoiceStatus::Refunded,
         InvoiceStatus::Finalised => false,
         InvoiceStatus::Deleted => false,
+        InvoiceStatus::PayoutInProgress => to == InvoiceStatus::Released || to == InvoiceStatus::Refunded,
     }
 }
 
@@ -3680,7 +3681,7 @@ impl SplitContract {
                 invoice.completion_time = Some(env.ledger().timestamp());
                 save_invoice(&env, invoice_id, &invoice);
                 events::dispute_resolved(&env, invoice_id, &admin, &outcome);
-                events::invoice_refunded(&env, invoice_id);
+                events::invoice_refunded(&env, invoice_id, invoice.funded);
                 events::invoice_state_changed(&env, invoice_id, Some(&InvoiceStatus::Disputed),
                     &InvoiceStatus::Refunded, &admin);
             }
@@ -4189,37 +4190,37 @@ impl SplitContract {
         Ok(bps as u32)
     }
 
-    pub fn get_invoice_deadline(env: Env, invoice_id: u64) -> Result<u64, ContractError> {
-        if let Some(core) = env.storage().persistent().get(&invoice_key(invoice_id)) {
-            Ok(core.deadline)
-        } else if let Some(core) = env.storage().instance().get(&invoice_key(invoice_id)) {
-            Ok(core.deadline)
+    pub fn get_invoice_deadline(env: Env, invoice_id: u64) -> Option<u64> {
+        if let Some(core) = env.storage().persistent().get::<_, InvoiceCore>(&invoice_key(invoice_id)) {
+            Some(core.deadline)
+        } else if let Some(core) = env.storage().instance().get::<_, InvoiceCore>(&invoice_key(invoice_id)) {
+            Some(core.deadline)
         } else {
-            Err(ContractError::InvoiceNotFound)
+            panic_with_error!(env, ContractError::InvoiceNotFound);
         }
     }
 
-    pub fn get_invoice_funded(env: Env, invoice_id: u64) -> Result<i128, ContractError> {
-        if let Some(hot) = env.storage().instance().get(&invoice_hot_key(invoice_id)) {
-            Ok(hot.funded)
-        } else if let Some(core) = env.storage().persistent().get(&invoice_key(invoice_id)) {
-            Ok(core.funded)
-        } else if let Some(core) = env.storage().instance().get(&invoice_key(invoice_id)) {
-            Ok(core.funded)
+    pub fn get_invoice_funded(env: Env, invoice_id: u64) -> Option<i128> {
+        if let Some(hot) = env.storage().instance().get::<_, InvoiceHot>(&invoice_hot_key(invoice_id)) {
+            Some(hot.funded)
+        } else if let Some(core) = env.storage().persistent().get::<_, InvoiceCore>(&invoice_key(invoice_id)) {
+            Some(core.funded)
+        } else if let Some(core) = env.storage().instance().get::<_, InvoiceCore>(&invoice_key(invoice_id)) {
+            Some(core.funded)
         } else {
-            Err(ContractError::InvoiceNotFound)
+            panic_with_error!(env, ContractError::InvoiceNotFound);
         }
     }
 
-    pub fn get_invoice_status(env: Env, invoice_id: u64) -> Result<InvoiceStatus, ContractError> {
-        if let Some(hot) = env.storage().instance().get(&invoice_hot_key(invoice_id)) {
-            Ok(hot.status)
-        } else if let Some(core) = env.storage().persistent().get(&invoice_key(invoice_id)) {
-            Ok(core.status)
-        } else if let Some(core) = env.storage().instance().get(&invoice_key(invoice_id)) {
-            Ok(core.status)
+    pub fn get_invoice_status(env: Env, invoice_id: u64) -> Option<InvoiceStatus> {
+        if let Some(hot) = env.storage().instance().get::<_, InvoiceHot>(&invoice_hot_key(invoice_id)) {
+            Some(hot.status)
+        } else if let Some(core) = env.storage().persistent().get::<_, InvoiceCore>(&invoice_key(invoice_id)) {
+            Some(core.status)
+        } else if let Some(core) = env.storage().instance().get::<_, InvoiceCore>(&invoice_key(invoice_id)) {
+            Some(core.status)
         } else {
-            Err(ContractError::InvoiceNotFound)
+            panic_with_error!(env, ContractError::InvoiceNotFound);
         }
     }
 
@@ -5410,7 +5411,7 @@ impl SplitContract {
                 .storage()
                 .instance()
                 .get(&min_recipients_key())
-                .unwrap_or(2u32);
+                .unwrap_or(1u32);
             if (recipients.len() as u32) < min_recipients {
                 panic_with_error!(env, ContractError::TooFewRecipients);
             }
@@ -12894,6 +12895,7 @@ impl SplitContract {
             InvoiceStatus::Disputed => 6u8,
             InvoiceStatus::Finalised => 7u8,
             InvoiceStatus::Deleted => 8u8,
+            InvoiceStatus::PayoutInProgress => 9u8,
         };
 
         let mut preimage = [0u8; 17];
@@ -14350,7 +14352,7 @@ impl SplitContract {
                 invoice.completion_time = Some(env.ledger().timestamp());
                 save_invoice(&env, invoice_id, &invoice);
                 events::dispute_resolved(&env, invoice_id, &admin_addr, &DisputeOutcome::Refund);
-                events::invoice_refunded(&env, invoice_id);
+                events::invoice_refunded(&env, invoice_id, invoice.funded);
                 events::invoice_state_changed(
                     &env,
                     invoice_id,
@@ -15792,7 +15794,7 @@ impl SplitContract {
         for key in &keys {
             env.storage()
                 .persistent()
-                .bump(key, min_ttl, max_ttl);
+                .extend_ttl(key, min_ttl, max_ttl);
         }
     }
 

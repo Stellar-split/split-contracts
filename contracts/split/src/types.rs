@@ -1413,6 +1413,7 @@ impl Invoice {
             InvoiceStatus::PartiallyReleased => 6,
             InvoiceStatus::Finalised => 7,
             InvoiceStatus::Deleted => 8,
+            InvoiceStatus::PayoutInProgress => 9,
         };
         bytes.push_back(status_byte);
 
@@ -1930,14 +1931,15 @@ mod tests {
             InvoiceStatus::PayoutInProgress,
         ];
 
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = [false; 256];
         for variant in &variants {
-            let byte = variant.to_u8();
+            let byte = variant.to_u8() as usize;
             assert!(
-                seen.insert(byte),
+                !seen[byte],
                 "discriminant collision: byte {} is used by more than one variant",
                 byte
             );
+            seen[byte] = true;
         }
     }
 

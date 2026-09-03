@@ -1,4 +1,3 @@
-use crate::types::{DisputeOutcome, FeeSplit, InvoicePhase, InvoiceStatus, RepScore, TimelockAction};
 //! # Event naming convention
 //!
 //! All split-contracts events follow a consistent topic layout:
@@ -27,7 +26,7 @@ use crate::types::{DisputeOutcome, FeeSplit, InvoicePhase, InvoiceStatus, RepSco
 //! dynamically.
 
 use crate::storage_keys::ev_seq_key;
-use crate::types::{DisputeOutcome, FeeSplit, InvoiceStatus, RepScore, TimelockAction};
+use crate::types::{DisputeOutcome, FeeSplit, InvoicePhase, InvoiceStatus, OverfundingPolicy, RepScore, TimelockAction};
 use soroban_sdk::{contracttype, symbol_short, Address, BytesN, Env, String, Vec};
 
 // ---------------------------------------------------------------------------
@@ -147,10 +146,10 @@ pub fn invoice_released(env: &Env, invoice_id: u64, recipients: &Vec<Address>) {
     );
 }
 
-/// Emitted when an invoice is refunded after deadline.
+/// Emitted when an invoice is refunded.
 /// Topics: (split, refunded, invoice_id)
-/// Data: (invoice_id, event_seq)
-pub fn invoice_refunded(env: &Env, invoice_id: u64) {
+/// Data: (invoice_id, amount, event_seq)
+pub fn invoice_refunded(env: &Env, invoice_id: u64, amount: i128) {
     let event_seq = next_seq(env, invoice_id);
     env.events().publish(
         (
@@ -158,7 +157,7 @@ pub fn invoice_refunded(env: &Env, invoice_id: u64) {
             symbol_short!("refunded"),
             invoice_id,
         ),
-        (invoice_id, event_seq),
+        (invoice_id, amount, event_seq),
     );
 }
 
@@ -719,6 +718,7 @@ pub fn invoice_state_changed(
         Some(InvoiceStatus::PartiallyReleased) => symbol_short!("part_rel"),
         Some(InvoiceStatus::Finalised) => symbol_short!("finald"),
         Some(InvoiceStatus::Deleted) => symbol_short!("deleted"),
+        Some(InvoiceStatus::PayoutInProgress) => symbol_short!("pay_prg"),
     };
     let to_sym = match to_status {
         InvoiceStatus::Pending => symbol_short!("pending"),
@@ -730,6 +730,7 @@ pub fn invoice_state_changed(
         InvoiceStatus::PartiallyReleased => symbol_short!("part_rel"),
         InvoiceStatus::Finalised => symbol_short!("finald"),
         InvoiceStatus::Deleted => symbol_short!("deleted"),
+        InvoiceStatus::PayoutInProgress => symbol_short!("pay_prg"),
     };
     env.events().publish(
         (symbol_short!("split"), symbol_short!("st_chg"), invoice_id),
@@ -1855,6 +1856,64 @@ pub fn admin_transfer_completed(env: &Env, new_admin: &Address) {
     );
 }
 
+/// Emitted when a recipient is added to or removed from an invoice whitelist.
+/// Topics: (split, wl_upd, invoice_id)
+/// Data: (enabled, added_count, removed_count)
+pub fn recipient_whitelist_updated(
+    env: &Env,
+    invoice_id: u64,
+    enabled: bool,
+    added: &Vec<Address>,
+    removed: &Vec<Address>,
+) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("wl_upd"), invoice_id),
+        (enabled, added.len(), removed.len()),
+    );
+}
+
+/// Emitted when an overfunding event is triggered on an invoice.
+/// Topics: (split, overfund, invoice_id)
+/// Data: (payer, surplus)
+pub fn overfunding_triggered(
+    env: &Env,
+    invoice_id: u64,
+    payer: &Address,
+    _policy: &OverfundingPolicy,
+    surplus: i128,
+) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("overfund"), invoice_id),
+        (payer.clone(), surplus),
+    );
+}
+
+/// Emitted when a late-payment penalty is applied.
+/// Topics: (split, penalty, invoice_id)
+/// Data: (payer, penalty_amount, penalty_bps)
+pub fn penalty_applied(
+    env: &Env,
+    invoice_id: u64,
+    payer: &Address,
+    penalty_amount: i128,
+    penalty_bps: u32,
+) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("penalty"), invoice_id),
+        (payer.clone(), penalty_amount, penalty_bps),
+    );
+}
+
+/// Emitted when an invoice deadline is extended.
+/// Topics: (split, dl_ext, invoice_id)
+/// Data: (old_deadline, new_deadline)
+pub fn deadline_extended(env: &Env, invoice_id: u64, old_deadline: u64, new_deadline: u64) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("dl_ext"), invoice_id),
+        (old_deadline, new_deadline),
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Unit tests for the per-invoice event sequence counter (issue #708)
 // ---------------------------------------------------------------------------
@@ -1862,16 +1921,23 @@ pub fn admin_transfer_completed(env: &Env, new_admin: &Address) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::Env;
+    use soroban_sdk::{Address, Env};
+
+    fn contract_id(env: &Env) -> Address {
+        env.register(crate::SplitContract, ())
+    }
 
     /// `next_seq` returns 1 on first call and increments on each subsequent
     /// call for the same invoice ID.
     #[test]
     fn test_next_seq_increments_per_invoice() {
         let env = Env::default();
-        assert_eq!(next_seq(&env, 1), 1);
-        assert_eq!(next_seq(&env, 1), 2);
-        assert_eq!(next_seq(&env, 1), 3);
+        let id = contract_id(&env);
+        env.as_contract(&id, || {
+            assert_eq!(next_seq(&env, 1), 1);
+            assert_eq!(next_seq(&env, 1), 2);
+            assert_eq!(next_seq(&env, 1), 3);
+        });
     }
 
     /// Sequences for different invoice IDs are independent — incrementing the
@@ -1879,18 +1945,20 @@ mod tests {
     #[test]
     fn test_next_seq_independent_for_different_invoice_ids() {
         let env = Env::default();
+        let id = contract_id(&env);
+        env.as_contract(&id, || {
+            // Advance invoice 10 twice.
+            assert_eq!(next_seq(&env, 10), 1);
+            assert_eq!(next_seq(&env, 10), 2);
 
-        // Advance invoice 10 twice.
-        assert_eq!(next_seq(&env, 10), 1);
-        assert_eq!(next_seq(&env, 10), 2);
+            // Invoice 20 should still start at 1.
+            assert_eq!(next_seq(&env, 20), 1);
 
-        // Invoice 20 should still start at 1.
-        assert_eq!(next_seq(&env, 20), 1);
+            // Invoice 10 continues independently from where it left off.
+            assert_eq!(next_seq(&env, 10), 3);
 
-        // Invoice 10 continues independently from where it left off.
-        assert_eq!(next_seq(&env, 10), 3);
-
-        // Invoice 20 is still at 2 after one more call.
-        assert_eq!(next_seq(&env, 20), 2);
+            // Invoice 20 is still at 2 after one more call.
+            assert_eq!(next_seq(&env, 20), 2);
+        });
     }
 }
