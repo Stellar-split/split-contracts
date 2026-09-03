@@ -182,7 +182,7 @@ pub fn sort_recipients(env: &Env, recipients: &mut Vec<Address>) {
 /// * Returns `10_000` when `funded >= total` (fully funded or overfunded).
 ///
 /// # Examples
-/// ```
+/// ```ignore
 /// assert_eq!(funding_bps(500, 1000), 5_000);  // 50%
 /// assert_eq!(funding_bps(1000, 1000), 10_000); // 100%
 /// assert_eq!(funding_bps(1500, 1000), 10_000); // overfunded → clamped

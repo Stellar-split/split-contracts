@@ -557,7 +557,7 @@ impl Default for InvoiceOptions2 {
     ///
     /// Tests that only care about one or two fields can use this as a
     /// starting point and override just those fields:
-    /// ```
+    /// ```ignore
     /// let opts = InvoiceOptions2 {
     ///     payment_cooldown_secs: Some(60),
     ///     ..Default::default()

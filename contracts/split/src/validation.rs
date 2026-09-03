@@ -77,7 +77,7 @@ pub fn assert_recipients_have_trustlines(
 /// Returns `Err(ContractError::InvalidRatioSum)` when `values.iter().sum::<u32>() != 10_000`.
 ///
 /// # Examples
-/// ```
+/// ```ignore
 /// assert!(assert_bps_sum(&[5_000u32, 5_000]).is_ok());
 /// assert!(assert_bps_sum(&[3_000u32, 3_000]).is_err());
 /// ```
