@@ -216,6 +216,8 @@ pub enum InvoiceKey {
     /// Per-invoice event sequence counter — typed replacement for the former
     /// `(symbol_short!("ev_seq"), invoice_id)` inline key (issue #708).
     EvSeq(u64),
+    /// Issue #823: Cold archived event log storage for finalized/historical events.
+    ColdAuditLog(u64),
 }
 
 // ---------------------------------------------------------------------------
@@ -389,7 +391,7 @@ mod tests {
             InvoiceKey::RecipientsList(id), InvoiceKey::AmountsList(id),
             InvoiceKey::PaidFlags(id), InvoiceKey::MilestoneFlags(id),
             InvoiceKey::ArchiveMarker(id), InvoiceKey::CreatedLedger(id),
-            InvoiceKey::EvSeq(id),
+            InvoiceKey::EvSeq(id), InvoiceKey::ColdAuditLog(id),
         ];
         for i in 0..keys.len() {
             for j in (i + 1)..keys.len() {

@@ -522,6 +522,31 @@ pub fn batch_archived(env: &Env, count: u32, ids: &Vec<u64>) {
     );
 }
 
+/// Issue #823: Emitted when contract events / audit entries are moved to cold storage.
+/// Topics: (split, ev_arch, invoice_id)
+/// Data: (count, older_than, event_seq)
+pub fn events_archived(env: &Env, invoice_id: u64, count: u32, older_than: u64) {
+    let event_seq = next_seq(env, invoice_id);
+    env.events().publish(
+        (
+            symbol_short!("split"),
+            symbol_short!("ev_arch"),
+            invoice_id,
+        ),
+        (count, older_than, event_seq),
+    );
+}
+
+/// Issue #823: Emitted when a batch of contract events are moved to cold storage.
+/// Topics: (split, bev_arch)
+/// Data: (total_archived, invoice_count)
+pub fn batch_events_archived(env: &Env, total_archived: u32, invoice_count: u32) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("bev_arch")),
+        (total_archived, invoice_count),
+    );
+}
+
 pub fn partial_refund_issued(
     env: &Env,
     invoice_id: u64,

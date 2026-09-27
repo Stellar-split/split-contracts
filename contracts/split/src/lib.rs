@@ -362,6 +362,9 @@ fn invoice_hot_key(id: u64) -> (Symbol, u64) {
 fn audit_log_key(id: u64) -> (Symbol, u64) {
     (symbol_short!("log"), id)
 }
+fn cold_audit_log_key(id: u64) -> (Symbol, u64) {
+    (symbol_short!("cld_log"), id)
+}
 fn subscription_params_key(id: u64) -> (Symbol, u64) {
     (symbol_short!("sub"), id)
 }
@@ -2214,6 +2217,14 @@ pub fn get_audit_log(env: &Env, id: u64) -> Vec<AuditEntry> {
         .persistent()
         .get(&audit_log_key(id))
         .or_else(|| env.storage().instance().get(&audit_log_key(id)))
+        .unwrap_or_else(|| Vec::new(env))
+}
+
+pub fn get_cold_audit_log(env: &Env, id: u64) -> Vec<AuditEntry> {
+    env.storage()
+        .persistent()
+        .get(&cold_audit_log_key(id))
+        .or_else(|| env.storage().instance().get(&cold_audit_log_key(id)))
         .unwrap_or_else(|| Vec::new(env))
 }
 
@@ -13697,6 +13708,163 @@ impl SplitContract {
 
         events::batch_archived(&env, archived.len(), &archived);
         archived
+    }
+
+    // -----------------------------------------------------------------------
+    // Contract Event Archival (Issue #823)
+    // -----------------------------------------------------------------------
+
+    /// Archive events from the active audit log to cold storage that are
+    /// older than or equal to `older_than_timestamp`.
+    /// Moves qualifying entries from active log to cold storage, freeing active storage.
+    /// Emits `events_archived`. Returns the number of events archived.
+    pub fn archive_events(env: Env, invoice_id: u64, older_than_timestamp: u64) -> u32 {
+        let is_archived_inv = env.storage().instance().has(&archive_marker_key(invoice_id))
+            || env.storage().persistent().has(&archive_marker_key(invoice_id));
+        let active_log: Vec<AuditEntry> = if is_archived_inv {
+            env.storage()
+                .instance()
+                .get(&audit_log_key(invoice_id))
+                .unwrap_or_else(|| Vec::new(&env))
+        } else {
+            env.storage()
+                .persistent()
+                .get(&audit_log_key(invoice_id))
+                .unwrap_or_else(|| Vec::new(&env))
+        };
+
+        let mut remaining_active: Vec<AuditEntry> = Vec::new(&env);
+        let mut cold_log: Vec<AuditEntry> = env
+            .storage()
+            .persistent()
+            .get(&cold_audit_log_key(invoice_id))
+            .or_else(|| env.storage().instance().get(&cold_audit_log_key(invoice_id)))
+            .unwrap_or_else(|| Vec::new(&env));
+
+        let mut moved_count: u32 = 0;
+        for i in 0..active_log.len() {
+            let entry = active_log.get(i).unwrap();
+            if entry.timestamp <= older_than_timestamp {
+                cold_log.push_back(entry);
+                moved_count += 1;
+            } else {
+                remaining_active.push_back(entry);
+            }
+        }
+
+        if moved_count > 0 {
+            if is_archived_inv {
+                env.storage()
+                    .instance()
+                    .set(&cold_audit_log_key(invoice_id), &cold_log);
+                env.storage()
+                    .instance()
+                    .set(&audit_log_key(invoice_id), &remaining_active);
+            } else {
+                env.storage()
+                    .persistent()
+                    .set(&cold_audit_log_key(invoice_id), &cold_log);
+                env.storage()
+                    .persistent()
+                    .set(&audit_log_key(invoice_id), &remaining_active);
+            }
+            events::events_archived(&env, invoice_id, moved_count, older_than_timestamp);
+        }
+
+        moved_count
+    }
+
+    /// Archive older events by count, retaining at most `keep_latest` newest entries
+    /// in the active audit log and transferring all older entries into cold storage.
+    pub fn archive_events_by_count(env: Env, invoice_id: u64, keep_latest: u32) -> u32 {
+        let is_archived_inv = env.storage().instance().has(&archive_marker_key(invoice_id))
+            || env.storage().persistent().has(&archive_marker_key(invoice_id));
+        let active_log: Vec<AuditEntry> = if is_archived_inv {
+            env.storage()
+                .instance()
+                .get(&audit_log_key(invoice_id))
+                .unwrap_or_else(|| Vec::new(&env))
+        } else {
+            env.storage()
+                .persistent()
+                .get(&audit_log_key(invoice_id))
+                .unwrap_or_else(|| Vec::new(&env))
+        };
+
+        let total = active_log.len();
+        if total <= keep_latest {
+            return 0;
+        }
+
+        let to_move = total - keep_latest;
+        let mut remaining_active: Vec<AuditEntry> = Vec::new(&env);
+        let mut cold_log: Vec<AuditEntry> = env
+            .storage()
+            .persistent()
+            .get(&cold_audit_log_key(invoice_id))
+            .or_else(|| env.storage().instance().get(&cold_audit_log_key(invoice_id)))
+            .unwrap_or_else(|| Vec::new(&env));
+
+        let mut last_moved_ts: u64 = 0;
+        for i in 0..total {
+            let entry = active_log.get(i).unwrap();
+            if i < to_move {
+                last_moved_ts = entry.timestamp;
+                cold_log.push_back(entry);
+            } else {
+                remaining_active.push_back(entry);
+            }
+        }
+
+        if is_archived_inv {
+            env.storage()
+                .instance()
+                .set(&cold_audit_log_key(invoice_id), &cold_log);
+            env.storage()
+                .instance()
+                .set(&audit_log_key(invoice_id), &remaining_active);
+        } else {
+            env.storage()
+                .persistent()
+                .set(&cold_audit_log_key(invoice_id), &cold_log);
+            env.storage()
+                .persistent()
+                .set(&audit_log_key(invoice_id), &remaining_active);
+        }
+
+        events::events_archived(&env, invoice_id, to_move, last_moved_ts);
+        to_move
+    }
+
+    /// Retrieve cold archived events for `invoice_id`.
+    pub fn get_cold_event_log(env: Env, invoice_id: u64) -> Vec<AuditEntry> {
+        get_cold_audit_log(&env, invoice_id)
+    }
+
+    /// Retrieve full event history for `invoice_id` (cold events followed by active events).
+    pub fn get_full_event_log(env: Env, invoice_id: u64) -> Vec<AuditEntry> {
+        let cold = get_cold_audit_log(&env, invoice_id);
+        let active = get_audit_log(&env, invoice_id);
+        let mut full: Vec<AuditEntry> = Vec::new(&env);
+        for i in 0..cold.len() {
+            full.push_back(cold.get(i).unwrap());
+        }
+        for i in 0..active.len() {
+            full.push_back(active.get(i).unwrap());
+        }
+        full
+    }
+
+    /// Batch archive events across multiple invoices up to a maximum of 20 invoices.
+    pub fn archive_events_batch(env: Env, invoice_ids: Vec<u64>, older_than_timestamp: u64) -> u32 {
+        assert!(invoice_ids.len() <= 20, "batch limit exceeded");
+        let mut total_archived: u32 = 0;
+        for i in 0..invoice_ids.len() {
+            let id = invoice_ids.get(i).unwrap();
+            total_archived += Self::archive_events(env.clone(), id, older_than_timestamp);
+        }
+        events::batch_events_archived(&env, total_archived, invoice_ids.len() as u32);
+        total_archived
     }
 
     // -----------------------------------------------------------------------

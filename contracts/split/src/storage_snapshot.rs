@@ -139,6 +139,7 @@ fn storage_key_snapshot() {
     keys.push(("invoice_compact_key", hex_xdr(&env, invoice_compact_key(1))));
     keys.push(("invoice_hot_key", hex_xdr(&env, invoice_hot_key(1))));
     keys.push(("audit_log_key", hex_xdr(&env, audit_log_key(1))));
+    keys.push(("cold_audit_log_key", hex_xdr(&env, cold_audit_log_key(1))));
     keys.push(("archive_marker_key", hex_xdr(&env, archive_marker_key(1))));
     keys.push(("created_ledger_key", hex_xdr(&env, created_ledger_key(1))));
     keys.push((

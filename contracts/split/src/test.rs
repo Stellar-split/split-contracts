@@ -9119,3 +9119,193 @@ fn test_contribution_cap_no_cap_set_no_restriction() {
     assert_eq!(c.get_payer_contribution_total(&id, &payer), 1000);
 }
 
+// ---------------------------------------------------------------------------
+// Issue #823: Contract event archival — move old events to cold storage
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_archive_events_moves_older_events_to_cold_storage() {
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let payer = Address::generate(&env);
+
+    StellarAssetClient::new(&env, &token_id).mint(&payer, &10_000);
+
+    let id = make_invoice(&env, &c, &creator, &recipient, 10_000, &token_id, 9_999);
+
+    // Event 1: pay 100 at timestamp 1_000
+    env.ledger().set_timestamp(1_000);
+    c.pay(&payer, &id, &100_i128, &0_u64, &false, &false, &None);
+
+    // Event 2: pay 100 at timestamp 1_100
+    env.ledger().set_timestamp(1_100);
+    c.pay(&payer, &id, &100_i128, &1_u64, &false, &false, &None);
+
+    // Event 3: pay 100 at timestamp 1_200
+    env.ledger().set_timestamp(1_200);
+    c.pay(&payer, &id, &100_i128, &2_u64, &false, &false, &None);
+
+    // Event 4: pay 100 at timestamp 1_300
+    env.ledger().set_timestamp(1_300);
+    c.pay(&payer, &id, &100_i128, &3_u64, &false, &false, &None);
+
+    // Verify initial active audit log has 4 events
+    let initial_log = c.get_audit_log(&id);
+    assert_eq!(initial_log.len(), 4);
+    assert_eq!(c.get_cold_event_log(&id).len(), 0);
+
+    // Archive events with timestamp <= 1_150 (events at 1_000 and 1_100)
+    let archived_count = c.archive_events(&id, &1_150);
+    assert_eq!(archived_count, 2);
+
+    // Active log should now have only events at 1_200 and 1_300
+    let active_log = c.get_audit_log(&id);
+    assert_eq!(active_log.len(), 2);
+    assert_eq!(active_log.get(0).unwrap().timestamp, 1_200);
+    assert_eq!(active_log.get(1).unwrap().timestamp, 1_300);
+
+    // Cold log should contain the 2 archived events
+    let cold_log = c.get_cold_event_log(&id);
+    assert_eq!(cold_log.len(), 2);
+    assert_eq!(cold_log.get(0).unwrap().timestamp, 1_000);
+    assert_eq!(cold_log.get(1).unwrap().timestamp, 1_100);
+
+    // Full event log should reconstruct the complete history in chronological order
+    let full_log = c.get_full_event_log(&id);
+    assert_eq!(full_log.len(), 4);
+    assert_eq!(full_log.get(0).unwrap().timestamp, 1_000);
+    assert_eq!(full_log.get(1).unwrap().timestamp, 1_100);
+    assert_eq!(full_log.get(2).unwrap().timestamp, 1_200);
+    assert_eq!(full_log.get(3).unwrap().timestamp, 1_300);
+}
+
+#[test]
+fn test_archive_events_by_count() {
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let payer = Address::generate(&env);
+
+    StellarAssetClient::new(&env, &token_id).mint(&payer, &10_000);
+
+    let id = make_invoice(&env, &c, &creator, &recipient, 10_000, &token_id, 9_999);
+
+    env.ledger().set_timestamp(1_000);
+    c.pay(&payer, &id, &100_i128, &0_u64, &false, &false, &None);
+
+    env.ledger().set_timestamp(1_100);
+    c.pay(&payer, &id, &100_i128, &1_u64, &false, &false, &None);
+
+    env.ledger().set_timestamp(1_200);
+    c.pay(&payer, &id, &100_i128, &2_u64, &false, &false, &None);
+
+    env.ledger().set_timestamp(1_300);
+    c.pay(&payer, &id, &100_i128, &3_u64, &false, &false, &None);
+
+    // Total 4 events. Keep latest 1, move 3 oldest to cold storage.
+    let moved = c.archive_events_by_count(&id, &1);
+    assert_eq!(moved, 3);
+
+    let active_log = c.get_audit_log(&id);
+    assert_eq!(active_log.len(), 1);
+    assert_eq!(active_log.get(0).unwrap().timestamp, 1_300);
+
+    let cold_log = c.get_cold_event_log(&id);
+    assert_eq!(cold_log.len(), 3);
+    assert_eq!(cold_log.get(0).unwrap().timestamp, 1_000);
+    assert_eq!(cold_log.get(1).unwrap().timestamp, 1_100);
+    assert_eq!(cold_log.get(2).unwrap().timestamp, 1_200);
+
+    let full_log = c.get_full_event_log(&id);
+    assert_eq!(full_log.len(), 4);
+}
+
+#[test]
+fn test_archive_events_batch() {
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let payer = Address::generate(&env);
+
+    StellarAssetClient::new(&env, &token_id).mint(&payer, &10_000);
+
+    let id1 = make_invoice(&env, &c, &creator, &recipient, 10_000, &token_id, 9_999);
+    let id2 = make_invoice(&env, &c, &creator, &recipient, 10_000, &token_id, 9_999);
+
+    env.ledger().set_timestamp(1_000);
+    c.pay(&payer, &id1, &100_i128, &0_u64, &false, &false, &None);
+    c.pay(&payer, &id2, &100_i128, &0_u64, &false, &false, &None);
+
+    env.ledger().set_timestamp(1_100);
+    c.pay(&payer, &id1, &100_i128, &1_u64, &false, &false, &None);
+    c.pay(&payer, &id2, &100_i128, &1_u64, &false, &false, &None);
+
+    let mut batch_ids = Vec::new(&env);
+    batch_ids.push_back(id1);
+    batch_ids.push_back(id2);
+
+    let total_moved = c.archive_events_batch(&batch_ids, &1_050);
+    // Each invoice has 1 event at 1_000 <= 1_050
+    assert_eq!(total_moved, 2);
+
+    assert_eq!(c.get_cold_event_log(&id1).len(), 1);
+    assert_eq!(c.get_cold_event_log(&id2).len(), 1);
+    assert_eq!(c.get_audit_log(&id1).len(), 1);
+    assert_eq!(c.get_audit_log(&id2).len(), 1);
+}
+
+#[test]
+fn test_archive_events_on_archived_invoice() {
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let payer = Address::generate(&env);
+
+    StellarAssetClient::new(&env, &token_id).mint(&payer, &1_000);
+
+    let id = make_invoice(&env, &c, &creator, &recipient, 500, &token_id, 9_999);
+
+    env.ledger().set_timestamp(1_000);
+    c.pay(&payer, &id, &100_i128, &0_u64, &false, &false, &None);
+
+    env.ledger().set_timestamp(1_100);
+    c.pay(&payer, &id, &400_i128, &1_u64, &false, &false, &None);
+
+    // Archive the invoice itself to instance storage
+    c.archive_invoice(&id);
+
+    // Now archive events on this invoice
+    let moved = c.archive_events(&id, &1_050);
+    assert_eq!(moved, 1);
+    assert_eq!(c.get_cold_event_log(&id).len(), 1);
+    assert_eq!(c.get_audit_log(&id).len(), 2);
+    assert_eq!(c.get_full_event_log(&id).len(), 3);
+}
+
+#[test]
+fn test_archive_events_none_matching_returns_zero() {
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let payer = Address::generate(&env);
+
+    StellarAssetClient::new(&env, &token_id).mint(&payer, &10_000);
+
+    let id = make_invoice(&env, &c, &creator, &recipient, 100, &token_id, 9_999);
+
+    env.ledger().set_timestamp(2_000);
+    c.pay(&payer, &id, &50_i128, &0_u64, &false, &false, &None);
+
+    let moved = c.archive_events(&id, &1_000);
+    assert_eq!(moved, 0);
+    assert_eq!(c.get_cold_event_log(&id).len(), 0);
+    assert_eq!(c.get_audit_log(&id).len(), 1);
+}
+
+
