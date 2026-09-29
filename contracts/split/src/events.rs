@@ -1,3 +1,6 @@
+use crate::futures::FutureOutcome;
+use crate::securitization::SecTranche;
+use crate::types::{DisputeOutcome, FeeSplit, InvoiceStatus, RepScore, TimelockAction};
 //! # Event naming convention
 //!
 //! All split-contracts events follow a consistent topic layout:
@@ -1896,6 +1899,289 @@ pub fn recipient_share_unlocked(
     );
 }
 
+// ---------------------------------------------------------------------------
+// Issue #864: Recipient performance SLA guarantees
+// ---------------------------------------------------------------------------
+
+/// Emitted when a creator proposes a bonded delivery SLA to a recipient.
+/// Topics: (split, sla_prop, invoice_id)
+/// Data: (recipient, beneficiary, bond, delivery_deadline)
+pub fn sla_proposed(
+    env: &Env,
+    invoice_id: u64,
+    recipient: &Address,
+    beneficiary: &Address,
+    bond: i128,
+    delivery_deadline: u64,
+) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("sla_prop"), invoice_id),
+        (recipient.clone(), beneficiary.clone(), bond, delivery_deadline),
+    );
+}
+
+/// Emitted when a recipient accepts an SLA and posts its bond.
+/// Topics: (split, sla_acc, invoice_id)
+/// Data: (recipient, bond)
+pub fn sla_accepted(env: &Env, invoice_id: u64, recipient: &Address, bond: i128) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("sla_acc"), invoice_id),
+        (recipient.clone(), bond),
+    );
+}
+
+/// Emitted when a proposed SLA is withdrawn before acceptance.
+/// Topics: (split, sla_cncl, invoice_id)
+/// Data: recipient
+pub fn sla_cancelled(env: &Env, invoice_id: u64, recipient: &Address) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("sla_cncl"), invoice_id),
+        recipient.clone(),
+    );
+}
+
+/// Emitted when an SLA settles, either by delivery confirmation or breach claim.
+/// Topics: (split, sla_setl, invoice_id)
+/// Data: (recipient, met, penalty, bond_refunded)
+pub fn sla_settled(
+    env: &Env,
+    invoice_id: u64,
+    recipient: &Address,
+    met: bool,
+    penalty: i128,
+    bond_refunded: i128,
+) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("sla_setl"), invoice_id),
+        (recipient.clone(), met, penalty, bond_refunded),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Issue #863: Invoice futures contracts
+// ---------------------------------------------------------------------------
+
+/// Emitted when a futures market is opened on an invoice.
+/// Topics: (split, fut_open, invoice_id)
+/// Data: (future_id, opener, stake_token, expiry)
+pub fn future_opened(
+    env: &Env,
+    invoice_id: u64,
+    future_id: u64,
+    opener: &Address,
+    stake_token: &Address,
+    expiry: u64,
+) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("fut_open"), invoice_id),
+        (future_id, opener.clone(), stake_token.clone(), expiry),
+    );
+}
+
+/// Emitted when a trader stakes on a futures market.
+/// Topics: (split, fut_pos, invoice_id)
+/// Data: (future_id, trader, predict_paid, amount)
+pub fn future_position_taken(
+    env: &Env,
+    invoice_id: u64,
+    future_id: u64,
+    trader: &Address,
+    predict_paid: bool,
+    amount: i128,
+) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("fut_pos"), invoice_id),
+        (future_id, trader.clone(), predict_paid, amount),
+    );
+}
+
+/// Emitted when a futures market is resolved.
+/// Topics: (split, fut_setl, invoice_id)
+/// Data: (future_id, outcome, paid_pool, unpaid_pool)
+pub fn future_settled(
+    env: &Env,
+    invoice_id: u64,
+    future_id: u64,
+    outcome: FutureOutcome,
+    paid_pool: i128,
+    unpaid_pool: i128,
+) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("fut_setl"), invoice_id),
+        (future_id, outcome, paid_pool, unpaid_pool),
+    );
+}
+
+/// Emitted when a trader claims a futures payout.
+/// Topics: (split, fut_clm, invoice_id)
+/// Data: (future_id, trader, payout)
+pub fn future_payout_claimed(
+    env: &Env,
+    invoice_id: u64,
+    future_id: u64,
+    trader: &Address,
+    payout: i128,
+) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("fut_clm"), invoice_id),
+        (future_id, trader.clone(), payout),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Issue #862: Invoice bundling with smart grouping
+// ---------------------------------------------------------------------------
+
+/// Emitted when an invoice bundle is created (manually or by smart grouping).
+/// Topics: (split, bdl_new, bundle_id)
+/// Data: (creator, label, invoice_ids)
+pub fn bundle_created(
+    env: &Env,
+    bundle_id: u64,
+    creator: &Address,
+    label: &Symbol,
+    invoice_ids: &Vec<u64>,
+) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("bdl_new"), bundle_id),
+        (creator.clone(), label.clone(), invoice_ids.clone()),
+    );
+}
+
+/// Emitted once per `smart_bundle_invoices` call.
+/// Topics: (split, bdl_smrt, creator)
+/// Data: (candidates_considered, bundle_ids_created)
+pub fn bundles_smart_grouped(env: &Env, creator: &Address, candidates: u32, bundle_ids: &Vec<u64>) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("bdl_smrt"), creator.clone()),
+        (candidates, bundle_ids.clone()),
+    );
+}
+
+/// Emitted when an invoice is added to (`added = true`) or removed from a bundle.
+/// Topics: (split, bdl_mbr, bundle_id)
+/// Data: (invoice_id, added)
+pub fn bundle_member_changed(env: &Env, bundle_id: u64, invoice_id: u64, added: bool) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("bdl_mbr"), bundle_id),
+        (invoice_id, added),
+    );
+}
+
+/// Emitted when a bundle is dissolved.
+/// Topics: (split, bdl_diss, bundle_id)
+/// Data: creator
+pub fn bundle_dissolved(env: &Env, bundle_id: u64, creator: &Address) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("bdl_diss"), bundle_id),
+        creator.clone(),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Issue #861: Invoice securitization
+// ---------------------------------------------------------------------------
+
+/// Emitted when an originator creates a securitization pool.
+/// Topics: (split, sec_new, pool_id)
+/// Data: (originator, face_value, offering_size)
+pub fn securitization_created(
+    env: &Env,
+    pool_id: u64,
+    originator: &Address,
+    face_value: i128,
+    offering_size: i128,
+) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("sec_new"), pool_id),
+        (originator.clone(), face_value, offering_size),
+    );
+}
+
+/// Emitted when an investor buys tranche units.
+/// Topics: (split, sec_buy, pool_id)
+/// Data: (investor, tranche, units, cost)
+pub fn securitization_units_bought(
+    env: &Env,
+    pool_id: u64,
+    investor: &Address,
+    tranche: SecTranche,
+    units: u64,
+    cost: i128,
+) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("sec_buy"), pool_id),
+        (investor.clone(), tranche, units, cost),
+    );
+}
+
+/// Emitted when the offering closes and distribution begins.
+/// Topics: (split, sec_actv, pool_id)
+/// Data: (senior_units, junior_units)
+pub fn securitization_activated(env: &Env, pool_id: u64, senior_units: u64, junior_units: u64) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("sec_actv"), pool_id),
+        (senior_units, junior_units),
+    );
+}
+
+/// Emitted when collections are deposited into a pool.
+/// Topics: (split, sec_coll, pool_id)
+/// Data: (depositor, amount, senior_pool, junior_pool)
+pub fn securitization_collected(
+    env: &Env,
+    pool_id: u64,
+    depositor: &Address,
+    amount: i128,
+    senior_pool: i128,
+    junior_pool: i128,
+) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("sec_coll"), pool_id),
+        (depositor.clone(), amount, senior_pool, junior_pool),
+    );
+}
+
+/// Emitted when tranche units change hands.
+/// Topics: (split, sec_xfer, pool_id)
+/// Data: (from, to, tranche, units)
+pub fn securitization_units_transferred(
+    env: &Env,
+    pool_id: u64,
+    from: &Address,
+    to: &Address,
+    tranche: SecTranche,
+    units: u64,
+) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("sec_xfer"), pool_id),
+        (from.clone(), to.clone(), tranche, units),
+    );
+}
+
+/// Emitted when a holder claims their share of collections.
+/// Topics: (split, sec_clm, pool_id)
+/// Data: (holder, tranche, amount)
+pub fn securitization_payout_claimed(
+    env: &Env,
+    pool_id: u64,
+    holder: &Address,
+    tranche: SecTranche,
+    amount: i128,
+) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("sec_clm"), pool_id),
+        (holder.clone(), tranche, amount),
+    );
+}
+
+/// Emitted when a pool stops accepting collections.
+/// Topics: (split, sec_cls, pool_id)
+/// Data: (caller, total_collected)
+pub fn securitization_closed(env: &Env, pool_id: u64, caller: &Address, total_collected: i128) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("sec_cls"), pool_id),
+        (caller.clone(), total_collected),
 /// Issue #528: Emitted when an admin transfer is proposed.
 /// Topics: (split, adm_prop)
 /// Data: (current_admin, proposed_admin)
