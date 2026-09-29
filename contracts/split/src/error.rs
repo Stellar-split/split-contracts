@@ -162,4 +162,31 @@ pub enum ContractError {
     AlreadySigned = 73,
     /// Issue #833: The creator is locked due to one or more pending disputes.
     CreatorLocked = 74,
+    /// Issue #822: Payment priority level is outside the valid range (0–2).
+    InvalidPriority = 71,
+    /// Issue #825: The pending payment has not yet reached the required
+    /// number of confirmation ledgers.
+    ConfirmationPending = 72,
+    /// Issue #825: No pending payment exists for this payer and invoice.
+    NoPendingPayment = 73,
+    /// Issue #872: No pricing model is configured for this invoice.
+    NoPricingModel = 74,
+    /// Issue #872: Surge pricing is already in the requested state.
+    SurgeStateUnchanged = 75,
+    /// Issue #870: Delegation has expired.
+    DelegationExpired = 76,
+    /// Issue #870: No delegation exists for this recipient.
+    NoDelegation = 77,
+    /// Issue #871: An invoice time-lock is active and the action is not yet permitted.
+    TimeLockActive = 78,
+    /// Issue #871: No time-lock is configured on this invoice.
+    NoTimeLock = 79,
+    /// Issue #869: The redemption token does not exist.
+    RedemptionTokenNotFound = 80,
+    /// Issue #869: The redemption token has already been redeemed.
+    TokenAlreadyRedeemed = 81,
+    /// Issue #869: The redemption token has expired.
+    TokenExpired = 82,
+    /// Issue #869: Caller is not the current token holder.
+    NotTokenHolder = 83,
 }

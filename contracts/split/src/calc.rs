@@ -230,12 +230,57 @@ pub fn calc_platform_fee(funded: i128, fee_bps: u32) -> Result<i128, ContractErr
 }
 
 // ---------------------------------------------------------------------------
+// Issue #828: Recipient earnings distribution helper
+// ---------------------------------------------------------------------------
+
+/// Pair each recipient with the amount they would earn from distributing
+/// `total` according to `ratios`/`denom`, using the same largest-remainder
+/// method as [`distribute_with_remainder`].
+///
+/// This is a pure preview helper: it performs no storage access and does not
+/// move funds. It is meant to let callers (or the contract itself) compute
+/// "what would each recipient receive right now" without mutating state.
+///
+/// # Arguments
+/// * `env`        – Soroban environment (needed to allocate the result `Vec`)
+/// * `recipients` – recipient addresses, in the same order as `ratios`
+/// * `total`      – total amount to distribute (stroops)
+/// * `ratios`     – relative weight of each recipient
+/// * `denom`      – sum of all ratios
+///
+/// # Errors
+/// * [`ContractError::InvalidRecipients`] if `recipients.len() != ratios.len()`
+/// * anything [`distribute_with_remainder`] can return (empty ratios, non-positive denom)
+pub fn compute_recipient_earnings(
+    env: &Env,
+    recipients: &Vec<Address>,
+    total: i128,
+    ratios: &Vec<i128>,
+    denom: i128,
+) -> Result<Vec<(Address, i128)>, ContractError> {
+    if recipients.len() != ratios.len() {
+        return Err(ContractError::InvalidRecipients);
+    }
+
+    let shares = distribute_with_remainder(env, total, ratios, denom)?;
+
+    let mut earnings = Vec::new(env);
+    for i in 0..recipients.len() {
+        let recipient = recipients.get(i).unwrap();
+        let share = shares.get(i).unwrap();
+        earnings.push_back((recipient, share));
+    }
+    Ok(earnings)
+}
+
+// ---------------------------------------------------------------------------
 // Unit tests
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use soroban_sdk::testutils::Address as _;
     use soroban_sdk::Env;
 
     fn make_ratios(env: &Env, vals: &[i128]) -> Vec<i128> {
@@ -464,5 +509,65 @@ mod tests {
         // i128::MAX * 2 overflows the intermediate multiplication
         let result = calc_platform_fee(i128::MAX, 2);
         assert_eq!(result, Err(crate::error::ContractError::ArithmeticOverflow));
+    }
+
+    // -----------------------------------------------------------------------
+    // compute_recipient_earnings tests (issue #828)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_compute_recipient_earnings_even_split() {
+        let env = Env::default();
+        let recipients = soroban_sdk::vec![
+            &env,
+            Address::generate(&env),
+            Address::generate(&env),
+            Address::generate(&env),
+        ];
+        let ratios = make_ratios(&env, &[1, 1, 1]);
+        let result = compute_recipient_earnings(&env, &recipients, 300, &ratios, 3).unwrap();
+
+        assert_eq!(result.len(), 3);
+        let sum: i128 = result.iter().map(|(_, amt)| amt).sum();
+        assert_eq!(sum, 300);
+        for (addr, amt) in result.iter() {
+            assert!(recipients.contains(&addr));
+            assert_eq!(amt, 100);
+        }
+    }
+
+    #[test]
+    fn test_compute_recipient_earnings_weighted_split_pairs_correctly() {
+        let env = Env::default();
+        let r0 = Address::generate(&env);
+        let r1 = Address::generate(&env);
+        let recipients = soroban_sdk::vec![&env, r0.clone(), r1.clone()];
+        let ratios = make_ratios(&env, &[1, 3]);
+        let result = compute_recipient_earnings(&env, &recipients, 100, &ratios, 4).unwrap();
+
+        assert_eq!(result.get(0).unwrap().0, r0);
+        assert_eq!(result.get(1).unwrap().0, r1);
+        let sum: i128 = result.iter().map(|(_, amt)| amt).sum();
+        assert_eq!(sum, 100);
+    }
+
+    #[test]
+    fn test_compute_recipient_earnings_mismatched_lengths_errors() {
+        let env = Env::default();
+        let recipients = soroban_sdk::vec![&env, Address::generate(&env)];
+        let ratios = make_ratios(&env, &[1, 1]);
+        let result = compute_recipient_earnings(&env, &recipients, 100, &ratios, 2);
+        assert_eq!(result, Err(ContractError::InvalidRecipients));
+    }
+
+    #[test]
+    fn test_compute_recipient_earnings_zero_total() {
+        let env = Env::default();
+        let recipients = soroban_sdk::vec![&env, Address::generate(&env), Address::generate(&env)];
+        let ratios = make_ratios(&env, &[1, 1]);
+        let result = compute_recipient_earnings(&env, &recipients, 0, &ratios, 2).unwrap();
+        for (_, amt) in result.iter() {
+            assert_eq!(amt, 0);
+        }
     }
 }

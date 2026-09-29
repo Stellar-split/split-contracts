@@ -216,6 +216,16 @@ pub enum InvoiceKey {
     /// Per-invoice event sequence counter — typed replacement for the former
     /// `(symbol_short!("ev_seq"), invoice_id)` inline key (issue #708).
     EvSeq(u64),
+    /// Issue #763: per-invoice history ring buffer — Vec<HistoryEntry>.
+    InvoiceHistory(u64),
+    /// Issue #760: per-invoice milestone list — Vec<Milestone>.
+    MilestoneData(u64),
+    /// Issue #872: Per-invoice advanced pricing model.
+    PricingModel(u64),
+    /// Issue #871: Per-invoice time-lock configuration.
+    TimeLock(u64),
+    /// Issue #869: Counter of redemption tokens issued for an invoice.
+    RedemptionTokenCount(u64),
 }
 
 // ---------------------------------------------------------------------------
@@ -251,6 +261,8 @@ pub enum AddressKey {
     CreatorVolMile(Address),
     /// Issue #527: Payment history for a contributor address.
     PayerHistory(Address),
+    /// Issue #870: Aggregate performance metrics for a recipient.
+    RecipientPerformance(Address),
 }
 
 // ---------------------------------------------------------------------------
@@ -275,6 +287,10 @@ pub enum CompoundKey {
     Template(Address, Symbol),
     TemplateVersion(Address, Symbol, u32),
     TemplateVersionCount(Address, Symbol),
+    /// Issue #870: Per-(invoice, recipient) delegation record.
+    RecipientDelegation(u64, Address),
+    /// Issue #869: Per-(invoice, token_id) redemption token record.
+    RedemptionToken(u64, u64),
 }
 
 // ---------------------------------------------------------------------------
@@ -390,6 +406,8 @@ mod tests {
             InvoiceKey::PaidFlags(id), InvoiceKey::MilestoneFlags(id),
             InvoiceKey::ArchiveMarker(id), InvoiceKey::CreatedLedger(id),
             InvoiceKey::EvSeq(id),
+            InvoiceKey::InvoiceHistory(id),
+            InvoiceKey::MilestoneData(id),
         ];
         for i in 0..keys.len() {
             for j in (i + 1)..keys.len() {

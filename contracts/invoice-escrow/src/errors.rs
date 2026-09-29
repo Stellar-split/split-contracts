@@ -46,4 +46,76 @@ pub enum Error {
     AlreadyFinalised = 18,
     /// Caller is not the blacklisted payer.
     NotBlacklistedPayer = 19,
+
+    // ── Recipient approval workflow (#855) ──────────────────────────────
+    /// Invoice has a recipient proposal that has not been approved yet.
+    RecipientsNotApproved = 20,
+    /// Recipient shares must be non-zero and sum to exactly 10 000 bps.
+    InvalidShares = 21,
+    /// No recipient proposal exists for this invoice.
+    ProposalNotFound = 22,
+    /// Caller is not one of the proposed recipients (or has no vote to revoke).
+    NotARecipient = 23,
+    /// Recipient has already approved or rejected this proposal version.
+    AlreadyVoted = 24,
+    /// Vote targets a proposal version that has been superseded.
+    ProposalVersionMismatch = 25,
+    /// Proposal is no longer pending (already approved or rejected).
+    ProposalClosed = 26,
+    /// Required approvals must be between 1 and the number of recipients.
+    InvalidThreshold = 27,
+
+    // ── Milestone escrow (#854) ─────────────────────────────────────────
+    /// Milestone escrow ID was not found in storage.
+    MilestoneEscrowNotFound = 28,
+    /// Milestone list is empty, too long, or contains a non-positive amount.
+    InvalidMilestones = 29,
+    /// Milestone index is outside the escrow's milestone list.
+    MilestoneIndexOutOfRange = 30,
+    /// Milestone has already been released.
+    MilestoneAlreadyReleased = 31,
+    /// The milestone's trigger condition is not satisfied for this caller.
+    TriggerNotSatisfied = 32,
+    /// Milestone escrow is completed or cancelled.
+    EscrowClosed = 33,
+
+    // ── Insurance pool (#853) ───────────────────────────────────────────
+    /// No refund-protection policy exists for this payer and invoice.
+    PolicyNotFound = 34,
+    /// Payer already holds a policy on this invoice.
+    PolicyAlreadyExists = 35,
+    /// Payer has no deposit on this invoice to protect.
+    NoDepositToInsure = 36,
+    /// Pool has too little unlocked (or any) liquidity for this operation.
+    InsufficientPoolLiquidity = 37,
+    /// Provider does not hold enough pool shares.
+    InsufficientShares = 38,
+    /// Policy is not active (already claimed or expired).
+    PolicyNotActive = 39,
+    /// Invoice default has already been declared.
+    InvoiceAlreadyDefaulted = 40,
+    /// Insurance configuration value is out of range.
+    InvalidConfig = 41,
+
+    // ── Lending marketplace (#856) ──────────────────────────────────────
+    /// No loan listing exists for this invoice.
+    LoanNotFound = 42,
+    /// Loan listing is not open for funding or cancellation.
+    LoanNotOpen = 43,
+    /// Loan has not been funded (or is already settled).
+    LoanNotFunded = 44,
+    /// Invoice already has an open or funded loan.
+    ActiveLoanExists = 45,
+    /// Invoice has a recipient proposal; it cannot be used as collateral.
+    RecipientProposalExists = 46,
+    /// Principal / repayment / expiry terms are invalid.
+    InvalidLoanTerms = 47,
+
+    // ── Shared ──────────────────────────────────────────────────────────
+    /// A bounded list (marketplace listings, policies per invoice) is full.
+    CapacityReached = 48,
+    /// Counterparties must be distinct addresses.
+    SelfDealing = 49,
+    /// Caller is not the invoice creator.
+    NotCreator = 20,
 }

@@ -237,6 +237,7 @@ Creates a new invoice. Returns the auto-incremented invoice ID.
 | `cross_chain_ref` | `Option<String>` | Cross-chain reference identifier |
 | `allowed_payers` | `Option<Vec<Address>>` | Restrict payments to this allowlist; `None` = open |
 | `payment_cooldown_secs` | `Option<u64>` | Per-payer cooldown window in seconds |
+| `milestone_list` | `Option<Vec<Milestone>>` | Ordered milestone plan (max 10) for sequential unlocking; only the active milestone accepts payments |
 | `max_payments_per_window` | `Option<u32>` | Max payments per payer per window |
 | `payment_window_secs` | `Option<u64>` | Window duration for payment rate limiting |
 | `priorities` | `Vec<u32>` | Per-recipient release priority ordering |
@@ -294,7 +295,35 @@ pub fn clone_invoice(
 ) -> u64
 ```
 
-Creates a new invoice as a clone of `source_id`, optionally overriding deadline, amounts, recipients, or overflow behavior. Tracks lineage via `parent_invoice_id`. Emits `invoice_cloned`.
+Creates a new invoice as a clone of `source_id`, optionally overriding deadline, amounts, recipients, or overflow behavior. Tracks lineage via `parent_invoice_id`. Emits `invoice_cloned` and `invoice_cloned_with_creator` (which adds the creator to the event data).
+
+Cloning is rejected with `CannotCloneTerminalInvoice` when the source is in a terminal state (`Expired` or `Refunded`), when the caller is not the source creator, or when the source's `clone_depth` is already 5.
+
+### `get_lineage`
+
+```rust
+pub fn get_lineage(env: Env, invoice_id: u64) -> Vec<u64>
+```
+
+Returns the full clone lineage for `invoice_id`, ordered from the root ancestor down to `invoice_id` itself. A non-cloned invoice returns a single-element vector containing its own id (issue #750).
+
+### `add_to_whitelist`
+
+```rust
+pub fn add_to_whitelist(env: Env, invoice_id: u64, creator: Address, address: Address)
+```
+
+Issue #749: creator- (or co-creator-) only. Adds `address` to the invoice's payer whitelist (`allowed_payers`). Calling this on an invoice with no whitelist converts it into a restricted invoice. Adding a duplicate address is a no-op. Panics with `whitelist is full (max 50)` at 50 entries. Emits `payer_whitelist_updated`.
+
+### `remove_from_whitelist`
+
+```rust
+pub fn remove_from_whitelist(env: Env, invoice_id: u64, creator: Address, address: Address)
+```
+
+Issue #749: creator- (or co-creator-) only. Removes `address` from the payer whitelist; payments already made by that address are untouched, only future payments are blocked. Removing an address that is not listed is a no-op and emits no event.
+
+Payments from an address that is not whitelisted fail with `PayerNotWhitelisted`.
 
 ### `migrate_invoice`
 
@@ -303,6 +332,25 @@ pub fn migrate_invoice(env: Env, admin: Address, invoice_id: u64)
 ```
 
 Admin-only: migrates a legacy invoice format to the current schema.
+
+### `complete_milestone`
+
+```rust
+pub fn complete_milestone(env: Env, invoice_id: u64, creator: Address, index: u32)
+```
+
+Creator-only: releases the active milestone's `target_amount` to the recipients, pro-rata
+by `amounts[]`, marks milestone `index` as `Completed`, and activates the next milestone.
+
+Milestones are configured at creation through `InvoiceOptions.ext.milestone_list` (max 10
+entries); only the first is `Active` initially and each subsequent one transitions
+`Pending → Active` as its predecessor is completed. While a milestone plan is set, only
+the active milestone accepts payments.
+
+Panics if the caller is not the invoice creator, the invoice is not `Pending`, or `index`
+does not refer to the currently active milestone (`"milestone is not active"`). Emits
+`MilestoneCompleted { invoice_id, index, amount_released }` and, when a further milestone
+exists, `MilestoneActivated { invoice_id, index }`.
 
 ---
 
@@ -689,6 +737,63 @@ pub fn set_template(
 
 Saves a reusable invoice template under `(creator, name)`.
 
+### `save_template`
+
+```rust
+pub fn save_template(
+    env: Env,
+    creator: Address,
+    name: Symbol,
+    recipients: Vec<Address>,
+    amounts: Vec<i128>,
+    token: Address,
+) -> u32
+```
+
+Issue #748: saves (or re-saves) a reusable invoice template and returns the new version number for `(creator, name)`. Every call increments the version counter, so an "update" is simply a new version. Emits `template_saved`.
+
+### `create_from_template`
+
+```rust
+pub fn create_from_template(
+    env: Env,
+    creator: Address,
+    name: Symbol,
+    deadline: u64,
+    version: Option<u32>,
+) -> u64
+```
+
+Instantiates an invoice from the stored template. `version: None` uses the latest version.
+
+### `create_invoice_from_template`
+
+```rust
+pub fn create_invoice_from_template(
+    env: Env,
+    creator: Address,
+    name: Symbol,
+    deadline: u64,
+    version: Option<u32>,
+    overrides: Option<TemplateOverrides>,
+) -> u64
+```
+
+Issue #748: instantiates an invoice from a stored template, applying optional `TemplateOverrides { recipients, amounts, token, deadline }` on top of the stored configuration. Every override field is optional — `None` keeps the template value. The merged result is validated with the same rules as `save_template` (parallel recipients/amounts, positive amounts, at least one recipient) and the stored template itself is not modified. Emits `invoice_created_from_template`.
+
+### `get_template_by_name`
+
+```rust
+pub fn get_template_by_name(
+    env: Env,
+    creator: Address,
+    name: Symbol,
+    version: Option<u32>,
+) -> InvoiceTemplate
+```
+
+Issue #748: returns the stored name-based template for `(creator, name)`; `version: None` returns the latest version.
+
 ### `get_template`
 
 ```rust
@@ -696,6 +801,22 @@ pub fn get_template(env: Env, creator: Address, name: Symbol) -> InvoiceTemplate
 ```
 
 Returns the template for `(creator, name)`.
+
+### `create_template` / `delete_template` (by id)
+
+```rust
+pub fn create_template(
+    env: Env,
+    creator: Address,
+    recipients: Vec<Address>,
+    ratios: Vec<u32>,
+    token: Address,
+) -> u64
+
+pub fn delete_template(env: Env, creator: Address, template_id: u64)
+```
+
+Issue #476: ID-based reusable templates. `create_template` stores a template keyed by a numeric ID scoped to the creator (ratios must sum to 10 000 bps) and emits `template_created`; `delete_template` removes it and only the creator that owns it may delete it, emitting `template_deleted`. Invoices are instantiated with `invoice_from_template(creator, template_id, total_amount, deadline)`.
 
 ---
 
@@ -778,6 +899,38 @@ pub fn get_creation_fee(env: Env) -> i128
 ```
 
 Returns the current creation fee.
+
+### `set_protocol_fee_bps`
+
+```rust
+pub fn set_protocol_fee_bps(env: Env, admin: Address, bps: u32)
+```
+
+Issue #751: admin-only. Sets the protocol fee rate in basis points (max 500 = 5%) while keeping the currently configured treasury address. The rate is stored in instance storage and defaults to 0 (disabled).
+
+### `get_protocol_fee_bps`
+
+```rust
+pub fn get_protocol_fee_bps(env: Env) -> u32
+```
+
+Issue #751: returns the current protocol fee rate in basis points (0 = disabled).
+
+### `get_treasury_balance`
+
+```rust
+pub fn get_treasury_balance(env: Env) -> i128
+```
+
+Issue #751: returns the protocol fees currently held by the contract. The fee `amount * protocol_fee_bps / 10_000` is withheld from every `pay` call and credited to this balance instead of being paid out to recipients. Emits `protocol_fee_charged`.
+
+### `withdraw_treasury`
+
+```rust
+pub fn withdraw_treasury(env: Env, admin: Address, amount: i128)
+```
+
+Issue #751: admin-only. Transfers `amount` of accumulated protocol fees from the contract to the admin's wallet, in the settlement token set by `initialize`. Panics if `amount` is not positive or exceeds `get_treasury_balance`. Emits `treasury_withdrawn`.
 
 ### `set_fee_tiers`
 
@@ -908,6 +1061,27 @@ pub fn get_audit_log(env: Env, id: u64) -> Vec<AuditEntry>
 ```
 
 Returns the ordered list of `{ action, actor, timestamp }` entries for an invoice.
+
+### `get_active_milestone`
+
+```rust
+pub fn get_active_milestone(env: Env, invoice_id: u64) -> u32
+```
+
+Returns the 0-based index of the currently active milestone. Panics with
+`"no active milestone"` if the invoice has no milestone plan or every milestone has
+already been completed.
+
+### `get_history`
+
+```rust
+pub fn get_history(env: Env, invoice_id: u64) -> Vec<HistoryEntry>
+```
+
+Returns the per-invoice history ring buffer in chronological order. The buffer retains
+the most recent 20 entries (`{ event_type, timestamp, actor, amount }`); once full, the
+oldest entry is evicted before the new one is appended. Entries are written by `pay`,
+`release`, `refund`, `cancel`, `clone`, milestone completion, and dispute operations.
 
 ### `get_receipt_token`
 

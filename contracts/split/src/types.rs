@@ -130,6 +130,21 @@ pub struct RebateTier {
     pub rebate_bps: u32,
 }
 
+/// Issue #815: Filtered creator earnings aggregate returned by
+/// `get_creator_earnings`.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct CreatorEarnings {
+    /// Number of matching invoices in the scanned range.
+    pub invoice_count: u32,
+    /// Sum of the target amounts of matching invoices.
+    pub total_amount: i128,
+    /// Sum of the funded amounts of matching invoices.
+    pub total_funded: i128,
+    /// Sum of funded amounts on matching Released invoices.
+    pub total_released: i128,
+}
+
 /// Issue #299: Per-creator analytics aggregator.
 #[contracttype]
 #[derive(Clone, Debug)]
@@ -163,8 +178,42 @@ pub struct Bid {
     pub amount: i128,
 }
 
+/// Issue #824: Explicit creator commission tier, assigned directly by an
+/// admin. Distinct from the volume-based [`FeeTier`] system, which derives a
+/// fee automatically from a creator's lifetime volume — `CreatorTier` lets an
+/// admin grant a specific commission rate regardless of volume (e.g. for
+/// partners or promotional arrangements).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum CreatorTier {
+    Bronze,
+    Silver,
+    Gold,
+    Platinum,
+}
+
+/// Issue #826: A single payer-signed payment instruction used for batch
+/// signature verification ahead of relayed / meta-transaction multi-pay
+/// flows. The signature is an Ed25519 signature (produced off-chain by
+/// `payer`, whose public key is `signer_pubkey`) over the canonical encoding
+/// of `(invoice_id, payer, amount, nonce)`.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct SignedPayment {
+    pub invoice_id: u64,
+    pub payer: Address,
+    pub amount: i128,
+    pub nonce: u64,
+    pub signer_pubkey: BytesN<32>,
+    pub signature: BytesN<64>,
+}
+
 // ---------------------------------------------------------------------------
 // Invoice status
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Core invoice types
 // ---------------------------------------------------------------------------
 
 /// Status of an invoice lifecycle.
@@ -498,6 +547,11 @@ pub struct InvoiceOptions2 {
     pub payment_cooldown_secs: Option<u64>,
     /// Maximum payments allowed per window (issue #168).
     pub max_payments_per_window: Option<u32>,
+    /// Issue #760: ordered milestone list for sequentially-unlocked invoices.
+    /// Max 10 milestones.  When set, payments are only accepted for the
+    /// currently active milestone; calling `complete_milestone` releases the
+    /// active milestone's funds and activates the next one.
+    pub milestone_list: Option<Vec<Milestone>>,
     /// Window duration in seconds for payment rate limiting (issue #168).
     pub payment_window_secs: Option<u64>,
     /// Oracle contract used for oracle-priced invoices: the funding target is
@@ -925,6 +979,69 @@ impl InvoiceExt2 {
 pub struct PenaltyTier {
     pub seconds_after_deadline: u64,
     pub bps: u32,
+}
+
+// ---------------------------------------------------------------------------
+// Issue #763: Per-invoice history ring buffer
+// ---------------------------------------------------------------------------
+
+/// A single entry in the per-invoice history ring buffer (issue #763).
+///
+/// Written on every state-changing operation: pay, release, refund, cancel,
+/// clone, milestone completion, and dispute events.  The buffer is capped at
+/// [`HISTORY_RING_CAP`] entries; the oldest entry is overwritten when the
+/// buffer is full.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct HistoryEntry {
+    /// Short description of the operation (e.g. `Symbol::new(env, "pay")`).
+    pub event_type: Symbol,
+    /// Unix timestamp from `env.ledger().timestamp()` at the time the entry
+    /// was written.
+    pub timestamp: u64,
+    /// The address that triggered the operation (payer, creator, etc.).
+    pub actor: Address,
+    /// Optional token amount involved (present for pay/refund/release, absent
+    /// for state-only transitions like dispute or cancel).
+    pub amount: Option<i128>,
+}
+
+/// Maximum number of entries the per-invoice history ring buffer retains.
+/// When the 21st entry is written the oldest (index 0) is evicted.
+pub const HISTORY_RING_CAP: u32 = 20;
+
+// ---------------------------------------------------------------------------
+// Issue #760: Milestone-based invoice with sequential unlocking
+// ---------------------------------------------------------------------------
+
+/// Lifecycle status of a single milestone (issue #760).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum MilestoneStatus {
+    /// Waiting for the previous milestone to complete before accepting funds.
+    Pending,
+    /// Currently accepting payments.
+    Active,
+    /// Fully funded; creator has called `complete_milestone` and funds were
+    /// released to recipients.
+    Completed,
+}
+
+/// A single milestone in a sequentially-unlocked invoice (issue #760).
+///
+/// Milestones are created via `InvoiceOptions::milestone_list` at invoice
+/// creation time and stored under `InvoiceKey::MilestoneData(invoice_id)`.
+/// Only the *active* milestone (determined by `get_active_milestone`) accepts
+/// payments; attempting to pay a completed or still-pending milestone panics.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct Milestone {
+    /// Token amount that must be collected before this milestone is complete.
+    pub target_amount: i128,
+    /// Human-readable description stored as raw bytes (UTF-8 recommended).
+    pub description: Bytes,
+    /// Current lifecycle state.
+    pub status: MilestoneStatus,
 }
 
 /// Issue #475: Multi-signature admin set — replaces the single-admin model.
@@ -1691,6 +1808,8 @@ pub struct ConfidentialPayment {
 pub struct InvoiceParams {
     pub creator: Address,
     pub recipients: Vec<Address>,
+    pub payment_token: Option<Address>,
+    pub tags: Option<Vec<String>>,
     // ... add all other fields here ...
 }
 
@@ -1854,6 +1973,29 @@ pub struct TemplateCounter {
     pub next_id: u64,
 }
 
+/// Issue #748: Optional field overrides applied when instantiating an invoice
+/// from a saved template.
+///
+/// Every field is optional; a `None` field means "keep the value stored in the
+/// template". Overrides are validated with exactly the same rules as
+/// `create_invoice` (parallel `recipients`/`amounts`, positive amounts, at
+/// least one recipient), so a partially-filled override struct cannot produce
+/// a malformed invoice.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct TemplateOverrides {
+    /// Replacement recipient list. When set, `amounts` must be set too and the
+    /// two lists must have the same length.
+    pub recipients: Option<Vec<Address>>,
+    /// Replacement per-recipient amounts, parallel to `recipients`.
+    pub amounts: Option<Vec<i128>>,
+    /// Replacement payment token.
+    pub token: Option<Address>,
+    /// Replacement deadline (unix timestamp). Takes precedence over the
+    /// `deadline` argument of `create_invoice_from_template`.
+    pub deadline: Option<u64>,
+}
+
 /// Issue #437: Delayed payout stored per recipient until claimable.
 #[contracttype]
 #[derive(Clone, Debug)]
@@ -1888,6 +2030,32 @@ pub struct RecipientShare {
     pub locked: bool,
 }
 
+/// Issue #790: a co-funding round with a hard cap. While open, `total_raised`
+/// and `overflow` are live; once closed they record the values at close.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RoundInfo {
+    pub total_raised: i128,
+    pub hard_cap: i128,
+    /// Ledger timestamp after which `close_round` may be called.
+    pub round_end: u64,
+    pub closed: bool,
+    /// Amount raised above `hard_cap` (refunded pro-rata on close).
+    pub overflow: i128,
+}
+
+/// Issue #788: summary of an invoice's reward (bonus) pool.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RewardPoolInfo {
+    /// Amount the creator funded at creation.
+    pub pool_amount: i128,
+    /// Number of payers the pool is shared between.
+    pub top_n: u32,
+    /// Whether the pool has been paid out (on release).
+    pub distributed: bool,
+}
+
 /// Issue #527: A single payment record stored in a contributor's persistent history.
 #[contracttype]
 #[derive(Clone, Debug)]
@@ -1895,6 +2063,38 @@ pub struct PaymentRecord {
     pub invoice_id: u64,
     pub amount: i128,
     pub ledger: u32,
+}
+
+/// Issue #809: condition under which anyone may release an invoice through
+/// `trigger_auto_release`, without a manual `release` call by the creator.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AutoReleaseCondition {
+    /// Releasable once the ledger timestamp reaches this value (unix seconds).
+    AtTimestamp(u64),
+}
+
+/// Issue #810: aggregate on-chain performance metrics for a recipient.
+#[contracttype]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct RecipientMetrics {
+    /// Number of released invoices that listed this address as a recipient.
+    pub invoices_received_count: u32,
+}
+
+/// Issue #812: point-in-time export of contract-level configuration, for
+/// backup and for checking a migrated deployment against its source.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConfigSnapshot {
+    pub admin: Option<Address>,
+    pub treasury: Option<Address>,
+    pub usdc_token: Option<Address>,
+    pub paused: bool,
+    pub platform_fee_bps: u32,
+    /// Highest invoice id assigned so far.
+    pub invoice_count: u64,
+    pub schema_version: u32,
 }
 
 
@@ -1968,4 +2168,172 @@ mod tests {
         assert_eq!(InvoiceStatus::from_u8(10), InvoiceStatus::Pending);
         assert_eq!(InvoiceStatus::from_u8(100), InvoiceStatus::Pending);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Issue #759: Creator rating aggregate
+// ---------------------------------------------------------------------------
+
+/// Aggregate on-chain rating for a creator, stored under creator_rating_key.
+///
+/// `average_stars_bps` is the mean star rating expressed in basis points
+/// (e.g. 4.5 stars = 45 000 bps).  Using basis points avoids floating-point
+/// arithmetic inside the contract.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct CreatorRating {
+    /// Total number of ratings submitted for this creator.
+    pub total_ratings: u32,
+    /// Average star rating in basis points (mean * 10 000).
+    pub average_stars_bps: u32,
+}
+
+// ---------------------------------------------------------------------------
+// Issue #756: On-chain invoice notes
+// ---------------------------------------------------------------------------
+
+/// An immutable on-chain note posted by the invoice creator.
+///
+/// Notes are appended to a `Vec<Note>` stored under `notes_key(invoice_id)`
+/// and can never be deleted or edited after posting.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct Note {
+    /// Ledger timestamp when the note was posted.
+    pub timestamp: u64,
+    /// Raw note content — maximum 512 bytes enforced at `add_note`.
+    pub content: Bytes,
+    /// Zero-based position of this note in the invoice's note list.
+    pub index: u32,
+}
+
+// ---------------------------------------------------------------------------
+// Issue #758: Recurring subscription
+// ---------------------------------------------------------------------------
+
+/// On-chain subscription record created by `create_subscription`.
+///
+/// Anyone may call `trigger_subscription` once `last_triggered + interval_seconds`
+/// has elapsed to generate the next invoice in the series.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct Subscription {
+    /// Creator / owner of the subscription.
+    pub creator: Address,
+    /// Recipient addresses for each generated invoice.
+    pub recipients: Vec<Address>,
+    /// Amounts owed to each recipient per cycle (parallel to `recipients`).
+    pub amounts: Vec<i128>,
+    /// Payment token used for all generated invoices.
+    pub token: Address,
+    /// Minimum seconds between invoice generations.
+    pub interval_seconds: u64,
+    /// Ledger timestamp of the last trigger (0 = never triggered).
+    pub last_triggered: u64,
+    /// Whether the subscription is currently paused.
+    pub paused: bool,
+}
+
+// ---------------------------------------------------------------------------
+// #865 – Creator collateral system
+// ---------------------------------------------------------------------------
+
+/// Collateral deposited by a creator to back their invoices.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct CreatorCollateral {
+    /// Address of the creator who deposited collateral.
+    pub creator: Address,
+    /// Token used for collateral (typically USDC).
+    pub token: Address,
+    /// Amount of collateral currently held.
+    pub amount: i128,
+    /// Amount of collateral that is currently locked (backing active invoices).
+    pub locked: i128,
+}
+
+// ---------------------------------------------------------------------------
+// #866 – Invoice rating-based discount tiers
+// ---------------------------------------------------------------------------
+
+/// Rating record for a creator based on completed invoices.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct CreatorRating {
+    /// Address of the rated creator.
+    pub creator: Address,
+    /// Cumulative sum of all rating scores (1–5 per invoice).
+    pub total_score: u32,
+    /// Total number of ratings received.
+    pub count: u32,
+}
+
+/// Discount tier applied when creating an invoice based on creator rating.
+///
+/// Average rating brackets → basis-point discount on the invoice total:
+/// - avg ≥ 4.5  → Tier1 (500 bps = 5 %)
+/// - avg ≥ 3.5  → Tier2 (300 bps = 3 %)
+/// - avg ≥ 2.5  → Tier3 (100 bps = 1 %)
+/// - avg < 2.5  → None  (0 %)
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum DiscountTier {
+    None,
+    Tier1,
+    Tier2,
+    Tier3,
+}
+
+// ---------------------------------------------------------------------------
+// #867 – Smart invoice routing based on recipient performance
+// ---------------------------------------------------------------------------
+
+/// Tracks how well a recipient fulfils their obligations (on-time deliveries, etc.).
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct RecipientPerformance {
+    /// Address of the recipient.
+    pub recipient: Address,
+    /// Number of invoices successfully completed (funds received).
+    pub completed: u32,
+    /// Number of invoices where the recipient was flagged (e.g. late/disputed).
+    pub flagged: u32,
+    /// Cumulative performance score (higher = better; incremented on completion,
+    /// decremented on flag).
+    pub score: i32,
+}
+
+/// Routing preference used when selecting recipients for a new invoice.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum RoutingStrategy {
+    /// Use recipients exactly as supplied (default behaviour).
+    Default,
+    /// Prefer recipients with the highest performance score.
+    PerformanceBased,
+    /// Exclude any recipient whose score is below the supplied threshold.
+    ThresholdBased,
+}
+
+// ---------------------------------------------------------------------------
+// #868 – Creator covenant system with penalties
+// ---------------------------------------------------------------------------
+
+/// A covenant (commitment) made by a creator when submitting an invoice.
+///
+/// If the creator violates the covenant (e.g. cancels funded invoice, misses
+/// delivery) a penalty is applied and deducted from their collateral.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct CreatorCovenant {
+    /// Invoice this covenant is attached to.
+    pub invoice_id: u64,
+    /// Creator who made the commitment.
+    pub creator: Address,
+    /// Penalty amount (in stroops) slashed from collateral on violation.
+    pub penalty_amount: i128,
+    /// Whether the covenant has been violated.
+    pub violated: bool,
+    /// Whether the covenant was fulfilled (invoice released on time).
+    pub fulfilled: bool,
 }

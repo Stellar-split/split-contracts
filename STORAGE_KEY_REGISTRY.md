@@ -154,6 +154,35 @@ Keys with two or three fields for efficient multi-dimensional lookups.
 | `TemplateVersion(creator, name, version)` | `(Symbol, Address, Symbol, u32)` | #210 | InvoiceTemplate | Versioned template for (creator, name, version) |
 | `TemplateVersionCount(creator, name)` | `(Symbol, Address, Symbol)` | #210 | u32 | Template version counter for (creator, name) |
 
+## Feature-module keys (`symbol_short!` tuples)
+
+Keys owned by self-contained feature modules. Each is a `symbol_short!` tuple defined next to the code that uses it.
+
+| Key | Shape | Tier | Issue | Value | Module | Purpose |
+|-----|-------|------|-------|-------|--------|---------|
+| `sla_rec` | `(Symbol, u64, Address)` | persistent | #864 | `RecipientSla` | `sla.rs` | SLA for (invoice_id, recipient) |
+| `sla_perf` | `(Symbol, Address)` | persistent | #864 | `RecipientPerformance` | `sla.rs` | Recipient's cross-invoice SLA record |
+| `fut_ctr` | `Symbol` | instance | #863 | u64 | `futures.rs` | Last issued future ID |
+| `fut_mkt` | `(Symbol, u64)` | persistent | #863 | `InvoiceFuture` | `futures.rs` | Futures market by ID |
+| `fut_pos` | `(Symbol, u64, Address)` | persistent | #863 | `FuturePosition` | `futures.rs` | Trader position in a market |
+| `fut_inv` | `(Symbol, u64)` | persistent | #863 | `Vec<u64>` | `futures.rs` | Future IDs opened on an invoice |
+| `bdl_ctr` | `Symbol` | instance | #862 | u64 | `bundling.rs` | Last issued bundle ID |
+| `bdl_rec` | `(Symbol, u64)` | persistent | #862 | `InvoiceBundle` | `bundling.rs` | Bundle by ID |
+| `bdl_inv` | `(Symbol, u64)` | persistent | #862 | u64 | `bundling.rs` | Live bundle ID for an invoice |
+| `bdl_cr` | `(Symbol, Address)` | persistent | #862 | `Vec<u64>` | `bundling.rs` | Bundle IDs created by a creator |
+| `sec_ctr` | `Symbol` | instance | #861 | u64 | `securitization.rs` | Last issued pool ID |
+| `sec_pool` | `(Symbol, u64)` | persistent | #861 | `SecuritizationPool` | `securitization.rs` | Securitization pool by ID |
+| `sec_hold` | `(Symbol, u64, SecTranche, Address)` | persistent | #861 | `SecHolding` | `securitization.rs` | Holder's units in one tranche |
+| `sec_inv` | `(Symbol, u64, Address)` | persistent | #861 | u64 | `securitization.rs` | Pool backing (invoice_id, originator) receivable |
+## Extension modules (own key enums)
+
+| Enum | Variant | Tier | Issue | Value | Purpose |
+|------|---------|------|-------|-------|---------|
+| `MatchKey` (`match_pool_ext.rs`) | `Pool(u64)` | persistent | #786 | Vec<MatchPledge> | Matching pledges per invoice |
+| `AnalyticsKey` (`analytics_ext.rs`) | `Stats` | instance | #787 | StoredStats | Invoice count, paid total, unique creator/payer counts |
+| `AnalyticsKey` (`analytics_ext.rs`) | `Creator(Address)` | persistent | #787 | bool | Creator already counted |
+| `AnalyticsKey` (`analytics_ext.rs`) | `Payer(Address)` | persistent | #787 | bool | Payer already counted |
+
 ## Migration Guide
 
 When renaming a storage key between contract versions, use the migration helpers in `storage_keys.rs`:
@@ -179,6 +208,25 @@ pub fn upgrade(env: Env) {
 }
 ```
 
+## Additional key helpers (issues #748–#751)
+
+Newer entry points declare their keys through standalone helper functions in
+`contracts/split/src/lib.rs` rather than `StorageKey` variants. The keys added
+by issues #748–#751 are:
+
+| Key helper | XDR value | Tier | Value type | Purpose |
+|------------|-----------|------|------------|---------|
+| `treasury_balance_key()` | `0000000f000000077472735f62616c00` (`trs_bal`) | instance | `i128` | Issue #751: protocol fees withheld from payments, awaiting `withdraw_treasury` |
+
+The remaining functionality in this group introduces no new storage keys:
+
+- **#748** (templates with overrides) reuses `Template(creator, name)`,
+  `TemplateVersion(creator, name, version)` and `TemplateVersionCount(creator, name)`.
+- **#749** (payer whitelist) reuses the per-invoice `InvoiceExt` entry, where
+  `allowed_payers` already lives.
+- **#750** (clone lineage) reuses the per-invoice `parent_invoice_id` /
+  `clone_depth` fields; `get_lineage` is a pure read that walks them.
+
 ## Uniqueness Validation
 
 Unit tests in `storage_keys.rs` verify that:
@@ -192,3 +240,16 @@ Run tests with:
 ```sh
 cargo test --lib storage_keys
 ```
+
+## Persistent Storage: module-owned key enums
+
+Newer features keep their keys in small `#[contracttype]` enums that live next to
+their logic, so the shared `StorageKey` / `InvoiceKey` enums (50-variant Soroban
+limit) are not consumed.
+
+| Enum::Variant | Module | Issue | Value | Purpose |
+|---------------|--------|-------|-------|---------|
+| `AttestKey::Attestations(id)` | `attest_ext.rs` | #768 | Vec<Attestation> | Third-party attestations for an invoice (max 5) |
+| `DelegateKey::Delegates(id)` | `delegate_ext.rs` | #769 | Vec<Address> | Creator-appointed delegates (max 3) |
+| `TtlKey::ExtendedUntil(id)` | `ttl_ext.rs` | #770 | u32 | Ledger up to which the invoice TTL was last extended |
+| `TierKey::Tiers(id)` / `TierKey::Unlocked(id)` | `tiers_ext.rs` | #771 | Vec<FundingTier> / Vec<u32> | Funding tiers and indices of unlocked tiers |

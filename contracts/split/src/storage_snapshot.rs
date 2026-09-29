@@ -41,6 +41,10 @@ fn storage_key_snapshot() {
     keys.push(("paused_key", hex_xdr(&env, paused_key())));
     keys.push(("paused_fns_key", hex_xdr(&env, paused_fns_key())));
     keys.push(("treasury_key", hex_xdr(&env, treasury_key())));
+    keys.push((
+        "treasury_balance_key",
+        hex_xdr(&env, treasury_balance_key()),
+    ));
     keys.push(("usdc_token_key", hex_xdr(&env, usdc_token_key())));
     keys.push(("creation_fee_key", hex_xdr(&env, creation_fee_key())));
     keys.push((

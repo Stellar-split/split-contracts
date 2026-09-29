@@ -819,3 +819,131 @@ fn test_release_emits_escrow_released_event() {
     }
     assert!(found, "EscrowReleased event was not emitted during release");
 }
+
+// ---------------------------------------------------------------------------
+// Issue #827: update_invoice_config / get_invoice_config_history
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_update_invoice_config_success_bumps_version_and_records_history() {
+    let (env, contract_id) = setup();
+    let client = InvoiceEscrowContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let creator = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = create_token(&env, &token_admin);
+
+    client.initialize(&admin);
+    let deadline = env.ledger().timestamp() + 10_000;
+    let id = client.create_invoice(&creator, &token, &1_000_000, &deadline);
+
+    assert!(client.get_invoice_config_history(&id).is_empty());
+
+    let new_deadline = deadline + 5_000;
+    let version = client.update_invoice_config(&creator, &id, &2_000_000, &new_deadline);
+    assert_eq!(version, 1);
+
+    let invoice = client.get_invoice(&id);
+    assert_eq!(invoice.total_amount, 2_000_000);
+    assert_eq!(invoice.deadline, new_deadline);
+
+    let history = client.get_invoice_config_history(&id);
+    assert_eq!(history.len(), 1);
+    let snapshot = history.get(0).unwrap();
+    assert_eq!(snapshot.version, 1);
+    assert_eq!(snapshot.total_amount, 1_000_000);
+    assert_eq!(snapshot.deadline, deadline);
+
+    // A second update should append another history entry with version 2.
+    let version2 = client.update_invoice_config(&creator, &id, &3_000_000, &(new_deadline + 1_000));
+    assert_eq!(version2, 2);
+    assert_eq!(client.get_invoice_config_history(&id).len(), 2);
+}
+
+#[test]
+fn test_update_invoice_config_non_creator_fails() {
+    let (env, contract_id) = setup();
+    let client = InvoiceEscrowContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let creator = Address::generate(&env);
+    let stranger = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = create_token(&env, &token_admin);
+
+    client.initialize(&admin);
+    let deadline = env.ledger().timestamp() + 10_000;
+    let id = client.create_invoice(&creator, &token, &1_000_000, &deadline);
+
+    let result = client.try_update_invoice_config(&stranger, &id, &2_000_000, &(deadline + 1));
+    assert_eq!(result, Err(Ok(Error::NotCreator)));
+}
+
+#[test]
+fn test_update_invoice_config_after_funding_started_fails() {
+    let (env, contract_id) = setup();
+    let client = InvoiceEscrowContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let creator = Address::generate(&env);
+    let payer = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = create_token(&env, &token_admin);
+    mint(&env, &token, &token_admin, &payer, 1_000_000);
+
+    client.initialize(&admin);
+    let deadline = env.ledger().timestamp() + 10_000;
+    let id = client.create_invoice(&creator, &token, &1_000_000, &deadline);
+    client.deposit(&payer, &id, &100);
+
+    let result = client.try_update_invoice_config(&creator, &id, &2_000_000, &(deadline + 1));
+    assert_eq!(result, Err(Ok(Error::InvalidStatus)));
+}
+
+#[test]
+fn test_update_invoice_config_invalid_amount_fails() {
+    let (env, contract_id) = setup();
+    let client = InvoiceEscrowContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let creator = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = create_token(&env, &token_admin);
+
+    client.initialize(&admin);
+    let deadline = env.ledger().timestamp() + 10_000;
+    let id = client.create_invoice(&creator, &token, &1_000_000, &deadline);
+
+    let result = client.try_update_invoice_config(&creator, &id, &0, &(deadline + 1));
+    assert_eq!(result, Err(Ok(Error::InvalidTotalAmount)));
+}
+
+#[test]
+fn test_update_invoice_config_past_deadline_fails() {
+    let (env, contract_id) = setup();
+    let client = InvoiceEscrowContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let creator = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = create_token(&env, &token_admin);
+
+    client.initialize(&admin);
+    let deadline = env.ledger().timestamp() + 10_000;
+    let id = client.create_invoice(&creator, &token, &1_000_000, &deadline);
+
+    let result = client.try_update_invoice_config(&creator, &id, &2_000_000, &env.ledger().timestamp());
+    assert_eq!(result, Err(Ok(Error::DeadlinePassed)));
+}
+
+#[test]
+fn test_get_invoice_config_history_empty_for_unmodified_invoice() {
+    let (env, contract_id) = setup();
+    let client = InvoiceEscrowContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let creator = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = create_token(&env, &token_admin);
+
+    client.initialize(&admin);
+    let deadline = env.ledger().timestamp() + 10_000;
+    let id = client.create_invoice(&creator, &token, &1_000_000, &deadline);
+
+    assert!(client.get_invoice_config_history(&id).is_empty());
+}
