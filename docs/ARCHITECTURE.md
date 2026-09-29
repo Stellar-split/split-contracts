@@ -28,7 +28,7 @@ Soroban has three storage tiers with different rent / eviction behaviour.
 
 | Tier | Used For | Key examples |
 |------|----------|-------------|
-| `instance` | Contract-level singletons that live as long as the contract | `admin_key`, `paused_key`, `usdc_token_key`, `treasury_key`, `platform_fee_bps_key`, `circuit_breaker_key` |
+| `instance` | Contract-level singletons that live as long as the contract | `admin_key`, `paused_key`, `usdc_token_key`, `treasury_key`, `treasury_balance_key`, `platform_fee_bps_key`, `circuit_breaker_key` |
 | `persistent` | Per-entity data that needs long retention (invoice bodies, payer records) | `invoice_key`, `invoice_ext_key`, `invoice_hot_key`, `confidential_pay_key`, `vel_key` |
 | `temporary` | Short-lived ephemeral state (not currently used in production paths) | — |
 
@@ -139,6 +139,9 @@ compact_deadline_ledger_key(id)→ u32            — deadline in ledgers for fa
 ```
 payer sends amount
        │
+       ├─► protocol_fee = amount * protocol_fee_bps / 10_000  →  contract treasury
+       │         (issue #751; defaults to 0, max 500 bps)
+       │         (accumulates in treasury_balance_key, released by withdraw_treasury)
        ├─► platform_fee = amount * platform_fee_bps / 10_000
        │         (waived if creator on fee_waiver list)
        │         (reduced if creator qualifies for a fee tier)

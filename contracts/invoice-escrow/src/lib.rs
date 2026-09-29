@@ -27,7 +27,7 @@ use errors::Error;
 use soroban_sdk::{
     contract, contractimpl, symbol_short, token, Address, BytesN, Env, Symbol, Vec,
 };
-use types::{BlacklistEntry, EscrowInvoice, EscrowStatus};
+use types::{BlacklistEntry, EscrowInvoice, EscrowReleased, EscrowStatus, InvoiceConfigVersion};
 
 // ---------------------------------------------------------------------------
 // Storage key helpers
@@ -61,6 +61,11 @@ fn deposit_key(id: u64, payer: &Address) -> (Symbol, u64, Address) {
 /// Persistent storage: blacklist entry for a payer.
 fn blacklist_key(payer: &Address) -> (Symbol, Address) {
     (symbol_short!("blacklist"), payer.clone())
+}
+
+/// Persistent storage: history of config-version snapshots for an invoice.
+fn config_history_key(id: u64) -> (Symbol, u64) {
+    (symbol_short!("cfg_hist"), id)
 }
 
 // ---------------------------------------------------------------------------
@@ -177,6 +182,14 @@ fn emit_blacklist_finalised(env: &Env, payer: &Address, upheld: bool) {
     env.events().publish(
         (symbol_short!("blacklist"), symbol_short!("bl_fin")),
         (payer.clone(), upheld),
+    );
+}
+
+/// Topics: `(escrow, cfg_upd, id)` — Data: `(new_version, total_amount, deadline)`
+fn emit_config_updated(env: &Env, id: u64, version: u32, total_amount: i128, deadline: u64) {
+    env.events().publish(
+        (symbol_short!("escrow"), symbol_short!("cfg_upd"), id),
+        (version, total_amount, deadline),
     );
 }
 
@@ -476,6 +489,17 @@ impl InvoiceEscrowContract {
         let token_client = token::Client::new(&env, &invoice.token);
         token_client.transfer(&env.current_contract_address(), &creator, &total);
         emit_released(&env, invoice_id, total);
+
+        // Emit structured EscrowReleased event for off-chain indexers.
+        env.events().publish(
+            (symbol_short!("escrow"), symbol_short!("released")),
+            EscrowReleased {
+                invoice_id,
+                recipient: creator,
+                amount: total,
+            },
+        );
+
         Ok(())
     }
 
@@ -553,6 +577,86 @@ impl InvoiceEscrowContract {
         invoice.status = EscrowStatus::Cancelled;
         save_invoice(&env, invoice_id, &invoice);
         Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Invoice config versioning
+    // -----------------------------------------------------------------------
+
+    /// Update an invoice's mutable config (`total_amount`, `deadline`).
+    ///
+    /// Only the invoice creator may call this, and only while the invoice is
+    /// still `Pending` (i.e. before any deposit has been made) — this avoids
+    /// having to reconcile an in-flight `funded_amount` against a changed
+    /// target. The invoice's current config is snapshotted into the version
+    /// history before the new values are applied, so `get_invoice_config_history`
+    /// always returns every prior configuration in order.
+    ///
+    /// Returns the new version number (starting at 1 for the first update).
+    ///
+    /// # Errors
+    /// * [`Error::InvoiceNotFound`]    — Unknown invoice ID.
+    /// * [`Error::NotCreator`]         — Caller is not the invoice creator.
+    /// * [`Error::InvalidStatus`]      — Invoice is not `Pending`.
+    /// * [`Error::InvalidTotalAmount`] — `new_total_amount` <= 0.
+    /// * [`Error::DeadlinePassed`]     — `new_deadline` is not in the future.
+    pub fn update_invoice_config(
+        env: Env,
+        creator: Address,
+        invoice_id: u64,
+        new_total_amount: i128,
+        new_deadline: u64,
+    ) -> Result<u32, Error> {
+        creator.require_auth();
+
+        let mut invoice = get_invoice(&env, invoice_id)?;
+        if invoice.creator != creator {
+            return Err(Error::NotCreator);
+        }
+        if invoice.status != EscrowStatus::Pending {
+            return Err(Error::InvalidStatus);
+        }
+        if new_total_amount <= 0 {
+            return Err(Error::InvalidTotalAmount);
+        }
+        if new_deadline <= env.ledger().timestamp() {
+            return Err(Error::DeadlinePassed);
+        }
+
+        let now = env.ledger().timestamp();
+        let mut history: Vec<InvoiceConfigVersion> = env
+            .storage()
+            .persistent()
+            .get(&config_history_key(invoice_id))
+            .unwrap_or(Vec::new(&env));
+        let next_version = history.len() + 1;
+        history.push_back(InvoiceConfigVersion {
+            version: next_version,
+            total_amount: invoice.total_amount,
+            deadline: invoice.deadline,
+            updated_at: now,
+        });
+        env.storage()
+            .persistent()
+            .set(&config_history_key(invoice_id), &history);
+
+        invoice.total_amount = new_total_amount;
+        invoice.deadline = new_deadline;
+        save_invoice(&env, invoice_id, &invoice);
+
+        emit_config_updated(&env, invoice_id, next_version, new_total_amount, new_deadline);
+        Ok(next_version)
+    }
+
+    /// Return the full history of config versions recorded for an invoice
+    /// (i.e. every configuration superseded by `update_invoice_config`, in
+    /// chronological order). Returns an empty vec if the invoice's config
+    /// has never been updated.
+    pub fn get_invoice_config_history(env: Env, invoice_id: u64) -> Vec<InvoiceConfigVersion> {
+        env.storage()
+            .persistent()
+            .get(&config_history_key(invoice_id))
+            .unwrap_or(Vec::new(&env))
     }
 
     // -----------------------------------------------------------------------
@@ -772,6 +876,26 @@ impl InvoiceEscrowContract {
     /// * [`Error::InvoiceNotFound`] — Unknown invoice ID.
     pub fn get_invoice(env: Env, invoice_id: u64) -> Result<EscrowInvoice, Error> {
         get_invoice(&env, invoice_id)
+    }
+
+    /// Return the current locked balance held in escrow for a given invoice.
+    ///
+    /// This is a read-only view function — it performs no state mutations.
+    /// Returns `0` when no escrow entry exists for `invoice_id` (i.e. the
+    /// invoice has never been created or has already been released/refunded).
+    ///
+    /// # Arguments
+    /// * `invoice_id` — The ID of the invoice to query.
+    ///
+    /// # Returns
+    /// The `funded_amount` currently locked in this escrow invoice, or `0`
+    /// if the invoice does not exist.
+    pub fn get_escrow_balance(env: Env, invoice_id: u64) -> i128 {
+        env.storage()
+            .persistent()
+            .get::<_, EscrowInvoice>(&invoice_key(invoice_id))
+            .map(|inv| inv.funded_amount)
+            .unwrap_or(0)
     }
 
     /// Return the amount a specific payer has deposited toward an invoice.

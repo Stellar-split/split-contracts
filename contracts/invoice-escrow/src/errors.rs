@@ -46,4 +46,6 @@ pub enum Error {
     AlreadyFinalised = 18,
     /// Caller is not the blacklisted payer.
     NotBlacklistedPayer = 19,
+    /// Caller is not the invoice creator.
+    NotCreator = 20,
 }

@@ -75,7 +75,7 @@ pub fn default_options(env: &Env) -> InvoiceOptions {
         forward_invoice_id: None,
         split_rules: Vec::new(env),
         auto_resolve_rules: Vec::new(env),
-        oracle_address: None,
+        condition_oracle: None,
         cross_chain_ref: None,
         allowed_payers: None,
         priorities: Vec::new(env),

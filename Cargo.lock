@@ -1597,8 +1597,17 @@ dependencies = [
 name = "split"
 version = "0.1.0"
 dependencies = [
+ "ed25519-dalek",
  "proptest",
  "soroban-sdk",
+]
+
+[[package]]
+name = "split-view"
+version = "0.1.0"
+dependencies = [
+ "soroban-sdk",
+ "split",
 ]
 
 [[package]]

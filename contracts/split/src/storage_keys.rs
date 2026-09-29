@@ -41,6 +41,16 @@ use soroban_sdk::{contracttype, symbol_short, Address, Env, IntoVal, Symbol, Try
 ///
 /// All variants are unit (carry no data). Instance storage is wiped on
 /// upgrade unless explicitly preserved, so these represent live config.
+///
+/// Soroban's XDR spec caps a `#[contracttype]` enum at **50 variants**, so
+/// this enum must never grow past that limit — it is already one of four
+/// enums the key registry is split across for exactly this reason (see the
+/// module-level docs above). When adding a new instance-storage key, always
+/// **append** a new variant at the end; never reorder or remove an existing
+/// variant, since XDR encodes variants positionally and reordering would
+/// silently corrupt every value already written under the old positions. If
+/// this enum is at or near 50 variants, add the new key to a fifth enum
+/// instead of extending this one.
 #[contracttype]
 #[derive(Clone)]
 pub enum StorageKey {
@@ -153,6 +163,8 @@ pub enum StorageKey {
     // --- Reentrancy ---
     /// Reentrancy guard flag (stored in temporary storage; cleared each tx).
     ReentrancyGuard,
+    /// Issue #526: Minimum number of recipients required per invoice.
+    MinRecipients,
 }
 
 // ---------------------------------------------------------------------------
@@ -200,6 +212,14 @@ pub enum InvoiceKey {
     Group(u64),
     GroupTreasury(u64),
     TimelockAction(u64),
+    PayoutCheckpoint(u64),
+    /// Per-invoice event sequence counter — typed replacement for the former
+    /// `(symbol_short!("ev_seq"), invoice_id)` inline key (issue #708).
+    EvSeq(u64),
+    /// Issue #763: per-invoice history ring buffer — Vec<HistoryEntry>.
+    InvoiceHistory(u64),
+    /// Issue #760: per-invoice milestone list — Vec<Milestone>.
+    MilestoneData(u64),
 }
 
 // ---------------------------------------------------------------------------
@@ -233,6 +253,8 @@ pub enum AddressKey {
     PauseExempt(Address),
     GlobalVelocity(Address),
     CreatorVolMile(Address),
+    /// Issue #527: Payment history for a contributor address.
+    PayerHistory(Address),
 }
 
 // ---------------------------------------------------------------------------
@@ -346,6 +368,7 @@ mod tests {
             StorageKey::PlatformVolThresh, StorageKey::PlatformVolMile,
             StorageKey::CreatorVolThresh, StorageKey::UpgradeProposal,
             StorageKey::ProtocolFee, StorageKey::ReentrancyGuard,
+            StorageKey::MinRecipients,
         ];
         for i in 0..keys.len() {
             for j in (i + 1)..keys.len() {
@@ -370,6 +393,9 @@ mod tests {
             InvoiceKey::RecipientsList(id), InvoiceKey::AmountsList(id),
             InvoiceKey::PaidFlags(id), InvoiceKey::MilestoneFlags(id),
             InvoiceKey::ArchiveMarker(id), InvoiceKey::CreatedLedger(id),
+            InvoiceKey::EvSeq(id),
+            InvoiceKey::InvoiceHistory(id),
+            InvoiceKey::MilestoneData(id),
         ];
         for i in 0..keys.len() {
             for j in (i + 1)..keys.len() {
@@ -413,6 +439,7 @@ mod tests {
             AddressKey::CreatorStatsPayers(addr.clone()),
             AddressKey::GlobalVelocity(addr.clone()),
             AddressKey::PauseExempt(addr.clone()),
+            AddressKey::PayerHistory(addr.clone()),
         ];
         for i in 0..keys.len() {
             for j in (i + 1)..keys.len() {
@@ -491,5 +518,46 @@ pub fn pending_creator_key(invoice_id: u64) -> (Symbol, u64) {
 #[allow(dead_code)]
 pub fn tombstone_key(invoice_id: u64) -> (Symbol, u64) {
     (symbol_short!("tombstone"), invoice_id)
+}
+
+// ---------------------------------------------------------------------------
+// Issue #708: Per-invoice event sequence counter (typed key)
+// ---------------------------------------------------------------------------
+
+/// Per-invoice event sequence counter — temporary storage.
+///
+/// Returns the [`InvoiceKey::EvSeq`] variant for `invoice_id`, replacing the
+/// old inline `(symbol_short!("ev_seq"), invoice_id)` tuple.
+pub fn ev_seq_key(invoice_id: u64) -> InvoiceKey {
+    InvoiceKey::EvSeq(invoice_id)
+}
+
+// ---------------------------------------------------------------------------
+// Issue #747: Per-payer contribution cap total
+// ---------------------------------------------------------------------------
+
+/// Running total contributed by `payer` on `invoice_id` — persistent storage.
+///
+/// Checked against `max_contribution_per_payer` on every `pay` call.
+/// Key: (Symbol "contrb_cap", invoice_id, payer) → i128
+pub fn payer_cap_total_key(invoice_id: u64, payer: &Address) -> (Symbol, u64, Address) {
+    (symbol_short!("cntrb_cap"), invoice_id, payer.clone())
+}
+
+/// Alias for `payer_cap_total_key` (issue #747).
+pub fn payer_total_key(invoice_id: u64, payer: &Address) -> (Symbol, u64, Address) {
+    payer_cap_total_key(invoice_id, payer)
+}
+
+// ---------------------------------------------------------------------------
+// Issue #746: Per-invoice total released basis points
+// ---------------------------------------------------------------------------
+
+/// Cumulative basis points released so far via `release_partial` — persistent storage.
+///
+/// Prevents the sum of partial releases from exceeding 10 000 bps (100%).
+/// Key: (Symbol "rel_bps", invoice_id) → u32
+pub fn total_released_bps_key(invoice_id: u64) -> (Symbol, u64) {
+    (symbol_short!("rel_bps"), invoice_id)
 }
 

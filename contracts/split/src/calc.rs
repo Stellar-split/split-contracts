@@ -3,8 +3,40 @@
 //! Implements the **largest-remainder method** to distribute an integer `total`
 //! across recipients proportionally, ensuring every stroop is accounted for
 //! (i.e. `sum(result) == total` always holds).
+//!
+//! # Why largest-remainder?
+//!
+//! Splitting an integer `total` proportionally by ratios almost never divides evenly.
+//! A naive implementation would compute each recipient's share with floor division
+//! (`total * ratio / denom`) and stop there, but floor division systematically discards
+//! the fractional part of every share. With `n` recipients that can leave up to `n - 1`
+//! stroops undistributed — money that was paid in but never assigned to anyone, silently
+//! stuck in the contract and breaking the `sum(result) == total` invariant the rest of the
+//! contract relies on (e.g. reconciling `funded` against amounts actually paid out).
+//!
+//! The largest-remainder method fixes this without abandoning integer (floor) division:
+//! 1. Compute each recipient's floor share (`total * ratio / denom`) and remainder
+//!    (`total * ratio % denom`).
+//! 2. Sum the floor shares; the difference between `total` and that sum is the number of
+//!    leftover stroops still owed (always `< n`).
+//! 3. Sort recipients by remainder descending and hand out one extra stroop each, in that
+//!    order, until the leftover is exhausted.
+//!
+//! This guarantees `sum(result) == total` exactly, while keeping the discrepancy from
+//! true proportionality to at most one stroop per recipient — the smallest error possible
+//! for integer division — and it deterministically favors the recipients whose exact
+//! (real-valued) share was closest to rounding up.
+//!
+//! **Example:** distributing `10` stroops among 3 recipients with equal ratios (`1:1:1`,
+//! `denom = 3`) gives floor shares of `[3, 3, 3]` (sum `9`) with `1` stroop leftover, all
+//! three remainders tied at `1`. The tie-break (first index wins) assigns the leftover
+//! stroop to the first recipient, producing `[4, 3, 3]` — which sums to `10`.
 
-use soroban_sdk::{Env, Vec};
+#[allow(unused_imports)]
+use crate::types::BASIS_POINTS_TOTAL;
+use soroban_sdk::{Address, Env, Map, Vec};
+
+use crate::error::ContractError;
 
 /// Distribute `total` among recipients according to their `ratios` out of
 /// `denom`, using the largest-remainder method to handle rounding.
@@ -13,7 +45,7 @@ use soroban_sdk::{Env, Vec};
 /// * `env`    – Soroban environment (needed to allocate the result `Vec`)
 /// * `total`  – total amount to distribute (stroops); must be ≥ 0
 /// * `ratios` – relative weight of each recipient (must be non-empty, all ≥ 0)
-/// * `denom`  – sum of all ratios (must be > 0)
+/// * `denom`  – sum of all ratios (must be > 0); typically [`BASIS_POINTS_TOTAL`]
 ///
 /// # Guarantees
 /// * `result.iter().sum::<i128>() == total` always
@@ -23,14 +55,23 @@ use soroban_sdk::{Env, Vec};
 /// # Panics
 /// * if `ratios` is empty
 /// * if `denom` is zero
+// NOTE: if you call this function and ignore its return value the Rust
+// compiler will emit a `#[must_use]` warning:
+//   warning: unused return value of `distribute_with_remainder` that must be used
+// This ensures callers never silently drop the distribution result.
+#[must_use = "the distribution result must be applied to recipients"]
 pub fn distribute_with_remainder(
     env: &Env,
     total: i128,
     ratios: &Vec<i128>,
     denom: i128,
-) -> Vec<i128> {
-    assert!(!ratios.is_empty(), "ratios must not be empty");
-    assert!(denom > 0, "denom must be positive");
+) -> Result<Vec<i128>, ContractError> {
+    if ratios.is_empty() {
+        return Err(ContractError::InvalidAmount);
+    }
+    if denom <= 0 {
+        return Err(ContractError::InvalidAmount);
+    }
 
     let n = ratios.len() as usize;
 
@@ -52,7 +93,9 @@ pub fn distribute_with_remainder(
     // Contracts with more than 64 recipients would need a larger cap, but
     // 64 is a reasonable upper bound for on-chain use.
     const MAX_RECIPIENTS: usize = 64;
-    assert!(n <= MAX_RECIPIENTS, "too many recipients (max 64)");
+    if n > MAX_RECIPIENTS {
+        return Err(ContractError::InvalidAmount);
+    }
 
     let mut indices = [0usize; MAX_RECIPIENTS];
     for i in 0..n {
@@ -88,7 +131,7 @@ pub fn distribute_with_remainder(
         shares_mut.set(idx, current + 1);
     }
 
-    shares_mut
+    Ok(shares_mut)
 }
 
 // ---------------------------------------------------------------------------
@@ -105,41 +148,129 @@ pub fn distribute_with_remainder(
 /// * `env`        – Soroban environment
 /// * `recipients` – mutable list of recipient addresses to sort in-place
 pub fn sort_recipients(env: &Env, recipients: &mut Vec<Address>) {
-    let n = recipients.len() as usize;
+    let n = recipients.len();
     if n <= 1 {
         return;
     }
 
-    // Build byte representations for comparison.
-    let mut bytes_vec: Vec<(BytesN<32>, usize)> = Vec::new(env);
+    // Soroban Map maintains keys in canonical (XDR-sorted) order.
+    // Inserting all addresses as keys then iterating produces deterministic ordering.
+    let mut ordered: Map<Address, u32> = Map::new(env);
     for i in 0..n {
-        let addr = recipients.get(i as u32).unwrap();
-        let bytes = addr.to_bytes();
-        bytes_vec.push_back((bytes, i));
+        let addr = recipients.get(i).unwrap();
+        ordered.set(addr, i);
     }
 
-    // Insertion sort by byte representation (lexicographic).
-    for i in 1..n {
-        let key = bytes_vec.get(i).unwrap();
-        let mut j = i;
-        while j > 0 {
-            let prev = bytes_vec.get(j - 1).unwrap();
-            if prev.0 <= key.0 {
-                break;
-            }
-            bytes_vec.set(j, bytes_vec.get(j - 1).unwrap());
-            j -= 1;
-        }
-        bytes_vec.set(j, key.clone());
-    }
-
-    // Reorder recipients according to sorted indices.
     let mut sorted = Vec::new(env);
-    for i in 0..n {
-        let (_, original_idx) = bytes_vec.get(i).unwrap();
-        sorted.push_back(recipients.get(original_idx as u32).unwrap());
+    for (addr, _) in ordered.iter() {
+        sorted.push_back(addr);
     }
     *recipients = sorted;
+}
+
+// ---------------------------------------------------------------------------
+// Issue #705: Invoice funding completion helper
+// ---------------------------------------------------------------------------
+
+/// Compute the funding completion of an invoice in basis points.
+///
+/// Returns `funded * 10_000 / total`, clamped to `[0, 10_000]`.
+///
+/// # Edge cases
+/// * Returns `0` when `total <= 0` (nothing to fund).
+/// * Returns `0` when `funded <= 0`.
+/// * Returns `10_000` when `funded >= total` (fully funded or overfunded).
+///
+/// # Examples
+/// ```ignore
+/// assert_eq!(funding_bps(500, 1000), 5_000);  // 50%
+/// assert_eq!(funding_bps(1000, 1000), 10_000); // 100%
+/// assert_eq!(funding_bps(1500, 1000), 10_000); // overfunded → clamped
+/// assert_eq!(funding_bps(0, 1000), 0);          // nothing paid
+/// assert_eq!(funding_bps(500, 0), 0);            // invalid total
+/// ```
+pub fn funding_bps(funded: i128, total: i128) -> u32 {
+    if total <= 0 || funded <= 0 {
+        return 0;
+    }
+    if funded >= total {
+        return 10_000;
+    }
+    // funded < total, both positive — safe to cast to u128 and divide.
+    let bps = (funded as u128 * 10_000u128) / (total as u128);
+    // bps is in [0, 9_999] since funded < total; the clamp is a safeguard.
+    bps.min(10_000) as u32
+}
+
+// ---------------------------------------------------------------------------
+// Issue #705: Platform fee computation helper
+// ---------------------------------------------------------------------------
+
+/// Compute the platform fee for a given funded amount and fee rate.
+///
+/// Returns `funded * fee_bps / 10_000`, using checked arithmetic to prevent
+/// overflow on very large amounts.
+///
+/// # Arguments
+/// * `funded`   – gross collected amount (stroops); must be ≥ 0.
+/// * `fee_bps`  – platform fee rate in basis points (0 – 10 000).
+///
+/// # Errors
+/// Returns [`ContractError::ArithmeticOverflow`] when `funded * fee_bps`
+/// overflows `i128` (i.e. `funded` is close to `i128::MAX` and `fee_bps > 0`).
+pub fn calc_platform_fee(funded: i128, fee_bps: u32) -> Result<i128, ContractError> {
+    if fee_bps == 0 || funded == 0 {
+        return Ok(0);
+    }
+    let fee = (funded as i128)
+        .checked_mul(fee_bps as i128)
+        .ok_or(ContractError::ArithmeticOverflow)?
+        / 10_000;
+    Ok(fee)
+}
+
+// ---------------------------------------------------------------------------
+// Issue #828: Recipient earnings distribution helper
+// ---------------------------------------------------------------------------
+
+/// Pair each recipient with the amount they would earn from distributing
+/// `total` according to `ratios`/`denom`, using the same largest-remainder
+/// method as [`distribute_with_remainder`].
+///
+/// This is a pure preview helper: it performs no storage access and does not
+/// move funds. It is meant to let callers (or the contract itself) compute
+/// "what would each recipient receive right now" without mutating state.
+///
+/// # Arguments
+/// * `env`        – Soroban environment (needed to allocate the result `Vec`)
+/// * `recipients` – recipient addresses, in the same order as `ratios`
+/// * `total`      – total amount to distribute (stroops)
+/// * `ratios`     – relative weight of each recipient
+/// * `denom`      – sum of all ratios
+///
+/// # Errors
+/// * [`ContractError::InvalidRecipients`] if `recipients.len() != ratios.len()`
+/// * anything [`distribute_with_remainder`] can return (empty ratios, non-positive denom)
+pub fn compute_recipient_earnings(
+    env: &Env,
+    recipients: &Vec<Address>,
+    total: i128,
+    ratios: &Vec<i128>,
+    denom: i128,
+) -> Result<Vec<(Address, i128)>, ContractError> {
+    if recipients.len() != ratios.len() {
+        return Err(ContractError::InvalidRecipients);
+    }
+
+    let shares = distribute_with_remainder(env, total, ratios, denom)?;
+
+    let mut earnings = Vec::new(env);
+    for i in 0..recipients.len() {
+        let recipient = recipients.get(i).unwrap();
+        let share = shares.get(i).unwrap();
+        earnings.push_back((recipient, share));
+    }
+    Ok(earnings)
 }
 
 // ---------------------------------------------------------------------------
@@ -149,6 +280,7 @@ pub fn sort_recipients(env: &Env, recipients: &mut Vec<Address>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use soroban_sdk::testutils::Address as _;
     use soroban_sdk::Env;
 
     fn make_ratios(env: &Env, vals: &[i128]) -> Vec<i128> {
@@ -162,7 +294,8 @@ mod tests {
     /// Assert sum equals total and return shares.
     fn assert_exact(env: &Env, total: i128, ratios: &[i128], denom: i128) -> Vec<i128> {
         let r_vec = make_ratios(env, ratios);
-        let result = distribute_with_remainder(env, total, &r_vec, denom);
+        let result = distribute_with_remainder(env, total, &r_vec, denom)
+            .expect("distribute_with_remainder should not fail for valid inputs");
         let sum: i128 = result.iter().sum();
         assert_eq!(
             sum, total,
@@ -251,6 +384,34 @@ mod tests {
         assert_exact(&env, 1_000_000_000, &[100_000, 200_000, 300_000], 600_000);
     }
 
+    #[test]
+    fn single_recipient_gets_full_amount() {
+        let env = Env::default();
+        let r = distribute_with_remainder(&env, 12345, &make_ratios(&env, &[1]), 1).unwrap();
+        assert_eq!(r.len(), 1);
+        assert_eq!(r.get(0), Some(12345));
+    }
+
+    #[test]
+    fn sum_invariant_holds_with_unequal_ratios() {
+        let env = Env::default();
+        // Case 1: 3 recipients with ratios [1, 1, 1] and total=10
+        // Total is not evenly divisible by denom (10 % 3 != 0)
+        let r1 = distribute_with_remainder(&env, 10, &make_ratios(&env, &[1, 1, 1]), 3).unwrap();
+        let sum1: i128 = r1.iter().sum();
+        assert_eq!(sum1, 10);
+
+        // Case 2: 4 recipients with ratios [2, 3, 1, 4] and total=100
+        let r2 = distribute_with_remainder(&env, 100, &make_ratios(&env, &[2, 3, 1, 4]), 10).unwrap();
+        let sum2: i128 = r2.iter().sum();
+        assert_eq!(sum2, 100);
+
+        // Case 3: 2 recipients with ratios [1, 3] and total=999
+        let r3 = distribute_with_remainder(&env, 999, &make_ratios(&env, &[1, 3]), 4).unwrap();
+        let sum3: i128 = r3.iter().sum();
+        assert_eq!(sum3, 999);
+    }
+
     /// Property-based style test: exhaustively verify sum == total for many inputs.
     #[test]
     fn test_property_sum_equals_total() {
@@ -270,6 +431,143 @@ mod tests {
 
         for &(total, ratios, denom) in cases {
             assert_exact(&env, total, ratios, denom);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // funding_bps tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_funding_bps_partial() {
+        // 500 funded out of 1000 total → 50% → 5_000 bps
+        assert_eq!(funding_bps(500, 1_000), 5_000);
+    }
+
+    #[test]
+    fn test_funding_bps_full() {
+        // Exactly fully funded → 100% → 10_000 bps
+        assert_eq!(funding_bps(1_000, 1_000), 10_000);
+    }
+
+    #[test]
+    fn test_funding_bps_overfunded() {
+        // Overfunded → clamped to 10_000
+        assert_eq!(funding_bps(1_500, 1_000), 10_000);
+    }
+
+    #[test]
+    fn test_funding_bps_zero_funded() {
+        // Nothing paid yet → 0
+        assert_eq!(funding_bps(0, 1_000), 0);
+    }
+
+    #[test]
+    fn test_funding_bps_zero_total() {
+        // Invalid total → 0 to avoid divide-by-zero
+        assert_eq!(funding_bps(500, 0), 0);
+    }
+
+    #[test]
+    fn test_funding_bps_negative_total() {
+        assert_eq!(funding_bps(500, -1), 0);
+    }
+
+    #[test]
+    fn test_funding_bps_one_stroop_below_full() {
+        // funded = total - 1 → result must be < 10_000
+        let bps = funding_bps(999, 1_000);
+        assert!(bps < 10_000);
+        assert!(bps > 9_980); // should be ~9_990
+    }
+
+    // -----------------------------------------------------------------------
+    // calc_platform_fee tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_calc_platform_fee_normal() {
+        // 1_000_000 funded at 250 bps (2.5%) → fee = 25_000
+        let fee = calc_platform_fee(1_000_000, 250).unwrap();
+        assert_eq!(fee, 25_000);
+    }
+
+    #[test]
+    fn test_calc_platform_fee_zero_bps() {
+        // Zero fee rate → always zero fee regardless of funded amount
+        assert_eq!(calc_platform_fee(999_999_999, 0).unwrap(), 0);
+    }
+
+    #[test]
+    fn test_calc_platform_fee_max_bps() {
+        // 10_000 bps = 100% → fee equals funded
+        assert_eq!(calc_platform_fee(500, 10_000).unwrap(), 500);
+    }
+
+    #[test]
+    fn test_calc_platform_fee_overflow() {
+        // i128::MAX * 2 overflows the intermediate multiplication
+        let result = calc_platform_fee(i128::MAX, 2);
+        assert_eq!(result, Err(crate::error::ContractError::ArithmeticOverflow));
+    }
+
+    // -----------------------------------------------------------------------
+    // compute_recipient_earnings tests (issue #828)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_compute_recipient_earnings_even_split() {
+        let env = Env::default();
+        let recipients = soroban_sdk::vec![
+            &env,
+            Address::generate(&env),
+            Address::generate(&env),
+            Address::generate(&env),
+        ];
+        let ratios = make_ratios(&env, &[1, 1, 1]);
+        let result = compute_recipient_earnings(&env, &recipients, 300, &ratios, 3).unwrap();
+
+        assert_eq!(result.len(), 3);
+        let sum: i128 = result.iter().map(|(_, amt)| amt).sum();
+        assert_eq!(sum, 300);
+        for (addr, amt) in result.iter() {
+            assert!(recipients.contains(&addr));
+            assert_eq!(amt, 100);
+        }
+    }
+
+    #[test]
+    fn test_compute_recipient_earnings_weighted_split_pairs_correctly() {
+        let env = Env::default();
+        let r0 = Address::generate(&env);
+        let r1 = Address::generate(&env);
+        let recipients = soroban_sdk::vec![&env, r0.clone(), r1.clone()];
+        let ratios = make_ratios(&env, &[1, 3]);
+        let result = compute_recipient_earnings(&env, &recipients, 100, &ratios, 4).unwrap();
+
+        assert_eq!(result.get(0).unwrap().0, r0);
+        assert_eq!(result.get(1).unwrap().0, r1);
+        let sum: i128 = result.iter().map(|(_, amt)| amt).sum();
+        assert_eq!(sum, 100);
+    }
+
+    #[test]
+    fn test_compute_recipient_earnings_mismatched_lengths_errors() {
+        let env = Env::default();
+        let recipients = soroban_sdk::vec![&env, Address::generate(&env)];
+        let ratios = make_ratios(&env, &[1, 1]);
+        let result = compute_recipient_earnings(&env, &recipients, 100, &ratios, 2);
+        assert_eq!(result, Err(ContractError::InvalidRecipients));
+    }
+
+    #[test]
+    fn test_compute_recipient_earnings_zero_total() {
+        let env = Env::default();
+        let recipients = soroban_sdk::vec![&env, Address::generate(&env), Address::generate(&env)];
+        let ratios = make_ratios(&env, &[1, 1]);
+        let result = compute_recipient_earnings(&env, &recipients, 0, &ratios, 2).unwrap();
+        for (_, amt) in result.iter() {
+            assert_eq!(amt, 0);
         }
     }
 }
