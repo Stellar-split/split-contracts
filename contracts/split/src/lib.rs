@@ -4,6 +4,11 @@
 //! Payers contribute funds; once fully funded the contract auto-routes USDC to
 //! each recipient. If the deadline passes unfunded, payers are refunded.
 //!
+//! Additional features:
+//! - #865 Creator collateral system for risk management
+//! - #866 Invoice rating-based discount tiers
+//! - #867 Smart invoice routing based on recipient performance
+//! - #868 Creator covenant system with penalties
 //! Additionally features audit logging, invoice archival, and a contributor leaderboard.
 //! StellarSplit — on-chain invoice & payment splitting contract.
 
@@ -76,6 +81,9 @@ mod ext_tests;
 mod fuzz_tests;
 
 #[cfg(test)]
+mod test_market_features;
+
+#[cfg(test)]
 mod storage_snapshot;
 
 #[cfg(test)]
@@ -89,22 +97,20 @@ mod hold_ext;
 mod freeze_ext;
 mod treasury_multi_ext;
 mod velocity_ext;
+mod payer_tier_ext;
+mod payment_pool_ext;
+mod payer_feedback_ext;
+mod export_validation_ext;
 #[cfg(test)]
 mod ext_test_util;
 
 mod invoice_ops;
 
-// Issue #864: recipient performance SLA guarantees.
-pub mod sla;
-
-// Issue #863: invoice futures contracts for payment predictions.
-pub mod futures;
-
-// Issue #862: invoice bundling with smart grouping.
-pub mod bundling;
-
-// Issue #861: invoice securitization for tokenization.
-pub mod securitization;
+// Issues #857–#860: feature modules, each with its own `#[contractimpl]` block.
+mod dynamic_fee;
+mod earnings_insurance;
+mod invoice_links;
+mod liquidity_pool;
 
 use error::ContractError;
 use validation::assert_valid_bps;
@@ -130,7 +136,8 @@ use types::{
     ConfidentialPayment, ContributionResult, CreateInvoiceParams, CreatorStats, CreatorTier,
     DelayedPayout,
     DisputeOutcome, DisputeRecord, DisputeStatus, FeeBracket, FeeSplit, FeeTier, InstalmentPlan,
-    Invoice, InvoiceCore, InvoiceExt, InvoiceExt2, InvoiceExt3, InvoiceHot, InvoiceOptions,
+    Invoice, InvoiceCore, InvoiceExt, InvoiceExt2, InvoiceExt3, InvoiceHot, InvoiceLock,
+    InvoiceOptions,
     InvoiceOptions2, InvoicePayment, InvoiceStats, InvoiceStatus, InvoiceTemplate,
     InvoiceTemplateRecord, LegacyInvoice, OverflowBehavior, OverfundingPolicy, Payment,
     PaymentCertificate, PaymentCommitment, PaymentProof, PaymentRecord, PendingAdminAction,
@@ -143,6 +150,14 @@ use types::{
     Note,
     // Issue #758
     Subscription,
+    // Issue #872
+    InvoicePriceTier, InvoicePricingModel,
+    // Issue #870
+    RecipientDelegation, RecipientPerformance,
+    // Issue #871
+    InvoiceTimeLock,
+    // Issue #869
+    RedemptionToken,
 };
 
 // ---------------------------------------------------------------------------
@@ -2563,6 +2578,20 @@ fn require_not_paused(env: &Env) {
     assert_not_paused(env).expect("contract is paused");
 }
 
+/// Issue #837: An invoice is locked once explicitly locked via `lock_invoice`
+/// or as soon as its deadline has passed.
+fn invoice_is_locked(env: &Env, invoice_id: u64, invoice: &Invoice) -> bool {
+    env.ledger().timestamp() > invoice.deadline
+        || env.storage().persistent().has(&invoice_lock_key(invoice_id))
+}
+
+/// Issue #837: Reject modifications to a locked invoice.
+fn require_invoice_unlocked(env: &Env, invoice_id: u64, invoice: &Invoice) {
+    if invoice_is_locked(env, invoice_id, invoice) {
+        panic_with_error!(env, ContractError::InvoiceLocked);
+    }
+}
+
 fn check_not_paused(env: &Env) {
     migrations::require_schema_current(env);
     freeze_ext::require_not_frozen_global(env);
@@ -3983,6 +4012,7 @@ impl SplitContract {
         require_not_paused(&env);
         caller.require_auth();
         let mut invoice = load_invoice(&env, invoice_id);
+        require_invoice_unlocked(&env, invoice_id, &invoice);
         assert!(invoice.status == InvoiceStatus::Pending, "invoice is not pending");
         assert!(invoice.creator == caller, "only the primary creator can add co-creators");
         assert!(
@@ -4003,6 +4033,7 @@ impl SplitContract {
         require_not_paused(&env);
         caller.require_auth();
         let mut invoice = load_invoice(&env, invoice_id);
+        require_invoice_unlocked(&env, invoice_id, &invoice);
         assert!(invoice.status == InvoiceStatus::Pending, "invoice is not pending");
         assert!(invoice.creator == caller, "only the primary creator can remove co-creators");
         let idx = invoice.co_creators.iter().position(|c| c == co_creator).expect("co-creator not found");
@@ -4345,6 +4376,7 @@ impl SplitContract {
         creator.require_auth();
 
         let invoice = load_invoice(&env, invoice_id);
+        require_invoice_unlocked(&env, invoice_id, &invoice);
         assert!(
             invoice.creator == creator,
             "only creator can modify whitelist"
@@ -4389,6 +4421,7 @@ impl SplitContract {
         creator.require_auth();
 
         let invoice = load_invoice(&env, invoice_id);
+        require_invoice_unlocked(&env, invoice_id, &invoice);
         assert!(
             invoice.creator == creator,
             "only creator can modify whitelist"
@@ -10068,6 +10101,7 @@ impl SplitContract {
         require_not_paused(&env);
         creator.require_auth();
         let mut invoice = load_invoice(&env, invoice_id);
+        require_invoice_unlocked(&env, invoice_id, &invoice);
         assert!(
             invoice.creator == creator || invoice.co_creators.contains(&creator),
             "NotAuthorized"
@@ -10099,6 +10133,7 @@ impl SplitContract {
         require_not_paused(&env);
         creator.require_auth();
         let mut invoice = load_invoice(&env, invoice_id);
+        require_invoice_unlocked(&env, invoice_id, &invoice);
         assert!(
             invoice.creator == creator || invoice.co_creators.contains(&creator),
             "NotAuthorized"
@@ -10202,6 +10237,7 @@ impl SplitContract {
         creator.require_auth();
 
         let mut invoice = load_invoice(&env, invoice_id);
+        require_invoice_unlocked(&env, invoice_id, &invoice);
         assert!(
             invoice.creator == creator || invoice.co_creators.iter().any(|c| c == creator),
             "only creator can modify allowlist"
@@ -10233,6 +10269,7 @@ impl SplitContract {
         creator.require_auth();
 
         let mut invoice = load_invoice(&env, invoice_id);
+        require_invoice_unlocked(&env, invoice_id, &invoice);
         assert!(
             invoice.creator == creator || invoice.co_creators.iter().any(|c| c == creator),
             "only creator can modify allowlist"
@@ -10292,6 +10329,7 @@ impl SplitContract {
         creator.require_auth();
 
         let invoice = load_invoice(&env, invoice_id);
+        require_invoice_unlocked(&env, invoice_id, &invoice);
         assert!(
             invoice.creator == creator,
             "only creator can update metadata hash"
@@ -10326,6 +10364,7 @@ impl SplitContract {
         creator.require_auth();
 
         let mut invoice = load_invoice(&env, invoice_id);
+        require_invoice_unlocked(&env, invoice_id, &invoice);
         assert!(
             invoice.creator == creator,
             "only creator can update release condition"
@@ -10356,6 +10395,7 @@ impl SplitContract {
         creator.require_auth();
 
         let mut invoice = load_invoice(&env, invoice_id);
+        require_invoice_unlocked(&env, invoice_id, &invoice);
         assert!(
             invoice.creator == creator,
             "only creator can set overfunding policy"
@@ -10662,6 +10702,7 @@ impl SplitContract {
         require_not_paused(&env);
         creator.require_auth();
         let invoice = load_invoice(&env, invoice_id);
+        require_invoice_unlocked(&env, invoice_id, &invoice);
         assert!(invoice.creator == creator, "only creator can set memo");
         assert!(
             invoice.status == InvoiceStatus::Pending,
@@ -10711,6 +10752,7 @@ impl SplitContract {
         require_not_paused(&env);
         creator.require_auth();
         let invoice = load_invoice(&env, invoice_id);
+        require_invoice_unlocked(&env, invoice_id, &invoice);
         assert!(invoice.creator == creator, "only creator can set tags");
         env.storage()
             .persistent()
@@ -13759,6 +13801,7 @@ impl SplitContract {
     pub fn transfer_invoice(env: Env, invoice_id: u64, new_creator: Address) {
         require_not_paused(&env);
         let mut invoice = load_invoice(&env, invoice_id);
+        require_invoice_unlocked(&env, invoice_id, &invoice);
 
         assert!(
             invoice.status == InvoiceStatus::Pending,
@@ -13777,6 +13820,7 @@ impl SplitContract {
         caller.require_auth();
 
         let mut invoice = load_invoice(&env, invoice_id);
+        require_invoice_unlocked(&env, invoice_id, &invoice);
 
         assert!(
             invoice.status == InvoiceStatus::Pending,
@@ -13970,6 +14014,7 @@ impl SplitContract {
         caller.require_auth();
 
         let mut invoice = load_invoice(&env, invoice_id);
+        require_invoice_unlocked(&env, invoice_id, &invoice);
 
         assert!(
             invoice.status == InvoiceStatus::Pending,
@@ -14019,6 +14064,7 @@ impl SplitContract {
         caller.require_auth();
 
         let mut invoice = load_invoice(&env, invoice_id);
+        require_invoice_unlocked(&env, invoice_id, &invoice);
 
         assert!(
             invoice.status == InvoiceStatus::Pending,
@@ -14732,6 +14778,7 @@ impl SplitContract {
         voter.require_auth();
 
         let invoice = load_invoice(&env, invoice_id);
+        require_invoice_unlocked(&env, invoice_id, &invoice);
 
         assert!(
             invoice.status == InvoiceStatus::Pending,
@@ -15007,6 +15054,7 @@ impl SplitContract {
         require_not_paused(&env);
         creator.require_auth();
         let invoice = load_invoice(&env, invoice_id);
+        require_invoice_unlocked(&env, invoice_id, &invoice);
         assert!(invoice.creator == creator, "only creator can set slippage");
         assert!(slippage_bps <= 10_000, "slippage_bps must be <= 10000");
         env.storage()
@@ -15922,6 +15970,7 @@ impl SplitContract {
             .instance()
             .get(&invoice_rate_limit_max_key())
             .unwrap_or(0u32);
+        let max_payments = payer_tier_ext::max_payments_for(env, payer, max_payments);
         if window_ledgers == 0 || max_payments == 0 {
             return;
         }
@@ -15957,6 +16006,7 @@ impl SplitContract {
             .instance()
             .get(&invoice_rate_limit_max_key())
             .unwrap_or(0u32);
+        let max_payments = payer_tier_ext::max_payments_for(env, payer, max_payments);
         if window_ledgers == 0 || max_payments == 0 {
             return;
         }
@@ -17911,6 +17961,54 @@ impl SplitContract {
             "NotAuthorized: proposer is not a registered admin signer"
         );
 
+use soroban_sdk::{contract, contractimpl, symbol_short, token, Address, Env, Symbol, Vec};
+use types::{
+    CreatorCollateral, CreatorCovenant, CreatorRating, DiscountTier, Invoice, InvoiceStatus,
+    Payment, RecipientPerformance, RoutingStrategy,
+};
+
+// ---------------------------------------------------------------------------
+// Storage key helpers
+// ---------------------------------------------------------------------------
+
+fn counter_key() -> Symbol {
+    symbol_short!("counter")
+}
+
+fn invoice_key(id: u64) -> (Symbol, u64) {
+    (symbol_short!("inv"), id)
+}
+
+/// Storage key for a creator's collateral record.
+fn collateral_key(creator: &Address) -> (Symbol, Address) {
+    (symbol_short!("col"), creator.clone())
+}
+
+/// Storage key for a creator's rating record.
+fn rating_key(creator: &Address) -> (Symbol, Address) {
+    (symbol_short!("rating"), creator.clone())
+}
+
+/// Storage key for a recipient's performance record.
+fn performance_key(recipient: &Address) -> (Symbol, Address) {
+    (symbol_short!("perf"), recipient.clone())
+}
+
+/// Storage key for a covenant attached to an invoice.
+fn covenant_key(invoice_id: u64) -> (Symbol, u64) {
+    (symbol_short!("cov"), invoice_id)
+}
+
+// ---------------------------------------------------------------------------
+// Storage helpers
+// ---------------------------------------------------------------------------
+
+fn load_invoice(env: &Env, id: u64) -> Invoice {
+    env.storage()
+        .persistent()
+        .get(&invoice_key(id))
+        .expect("invoice not found")
+}
         // Compute a deterministic hash over the serialised action to use as key.
         let action_bytes = action.clone().to_xdr(&env);
         let action_hash: BytesN<32> = env.crypto().sha256(&action_bytes).into();
@@ -17940,6 +18038,100 @@ impl SplitContract {
 
         events::admin_action_proposed(&env, &action_hash, &proposer);
 
+fn load_collateral(env: &Env, creator: &Address) -> Option<CreatorCollateral> {
+    env.storage().persistent().get(&collateral_key(creator))
+}
+
+fn save_collateral(env: &Env, collateral: &CreatorCollateral) {
+    env.storage()
+        .persistent()
+        .set(&collateral_key(&collateral.creator), collateral);
+}
+
+fn load_rating(env: &Env, creator: &Address) -> Option<CreatorRating> {
+    env.storage().persistent().get(&rating_key(creator))
+}
+
+fn save_rating(env: &Env, rating: &CreatorRating) {
+    env.storage()
+        .persistent()
+        .set(&rating_key(&rating.creator), rating);
+}
+
+fn load_performance(env: &Env, recipient: &Address) -> Option<RecipientPerformance> {
+    env.storage().persistent().get(&performance_key(recipient))
+}
+
+fn save_performance(env: &Env, perf: &RecipientPerformance) {
+    env.storage()
+        .persistent()
+        .set(&performance_key(&perf.recipient), perf);
+}
+
+fn load_covenant(env: &Env, invoice_id: u64) -> Option<CreatorCovenant> {
+    env.storage().persistent().get(&covenant_key(invoice_id))
+}
+
+fn save_covenant(env: &Env, covenant: &CreatorCovenant) {
+    env.storage()
+        .persistent()
+        .set(&covenant_key(covenant.invoice_id), covenant);
+}
+
+// ---------------------------------------------------------------------------
+// Rating helpers (#866)
+// ---------------------------------------------------------------------------
+
+/// Compute the discount tier for a creator based on their average rating score.
+///
+/// Average is expressed as `total_score * 10 / count` (one decimal, ×10) to
+/// avoid floats:
+/// - ≥ 45  (avg ≥ 4.5) → Tier1 (500 bps)
+/// - ≥ 35  (avg ≥ 3.5) → Tier2 (300 bps)
+/// - ≥ 25  (avg ≥ 2.5) → Tier3 (100 bps)
+/// - < 25              → None
+fn compute_discount_tier(rating: &CreatorRating) -> DiscountTier {
+    if rating.count == 0 {
+        return DiscountTier::None;
+    }
+    // avg_x10 = (total_score * 10) / count  — integer, no floats
+    let avg_x10 = (rating.total_score * 10) / rating.count;
+    if avg_x10 >= 45 {
+        DiscountTier::Tier1
+    } else if avg_x10 >= 35 {
+        DiscountTier::Tier2
+    } else if avg_x10 >= 25 {
+        DiscountTier::Tier3
+    } else {
+        DiscountTier::None
+    }
+}
+
+/// Map a discount tier to basis points.
+fn tier_to_bps(tier: &DiscountTier) -> u32 {
+    match tier {
+        DiscountTier::Tier1 => 500,
+        DiscountTier::Tier2 => 300,
+        DiscountTier::Tier3 => 100,
+        DiscountTier::None => 0,
+    }
+}
+
+/// Apply a basis-point discount to a set of amounts (in-place style: returns
+/// a new Vec with discounted values).
+fn apply_discount(env: &Env, amounts: &Vec<i128>, discount_bps: u32) -> Vec<i128> {
+    let mut discounted = Vec::new(env);
+    for amt in amounts.iter() {
+        // reduced = amt - (amt * bps / 10_000)
+        let reduction = amt * (discount_bps as i128) / 10_000_i128;
+        discounted.push_back(amt - reduction);
+    }
+    discounted
+}
+
+// ---------------------------------------------------------------------------
+// Contract
+// ---------------------------------------------------------------------------
         action_hash
     }
 
@@ -17951,6 +18143,24 @@ impl SplitContract {
     pub fn approve_admin_action(env: Env, approver: Address, action_hash: BytesN<32>) {
         approver.require_auth();
 
+#[contractimpl]
+impl SplitContract {
+    // -----------------------------------------------------------------------
+    // Core: create_invoice
+    // -----------------------------------------------------------------------
+
+    /// Create a new invoice.
+    ///
+    /// Automatically applies a rating-based discount (#866) if the creator has
+    /// an established rating.  Pass `RoutingStrategy::Default` and an empty
+    /// `min_performance_score` to use the original behaviour.
+    ///
+    /// # Arguments
+    /// * `creator`    – address that owns the invoice (must authorise)
+    /// * `recipients` – ordered list of recipient addresses
+    /// * `amounts`    – amount owed to each recipient (parallel to `recipients`)
+    /// * `token`      – USDC token contract address
+    /// * `deadline`   – Unix timestamp; after this refunds become available
         let admin_set: AdminSet = env
             .storage()
             .instance()
@@ -18062,6 +18272,40 @@ impl SplitContract {
             recipients.len() == ratios.len(),
             "recipients and ratios must have the same length"
         );
+        for amt in amounts.iter() {
+            assert!(amt > 0, "amounts must be positive");
+        }
+
+        // --- #866: apply rating-based discount ---
+        let final_amounts = if let Some(rating) = load_rating(&env, &creator) {
+            let tier = compute_discount_tier(&rating);
+            let bps = tier_to_bps(&tier);
+            if bps > 0 {
+                let discounted = apply_discount(&env, &amounts, bps);
+                events::discount_applied(&env, 0, &creator, bps); // id=0 before we know it
+                discounted
+            } else {
+                amounts
+            }
+        } else {
+            amounts
+        };
+
+        // Increment counter.
+        let id: u64 = env
+            .storage()
+            .persistent()
+            .get(&counter_key())
+            .unwrap_or(0u64)
+            + 1;
+        env.storage().persistent().set(&counter_key(), &id);
+
+        let total: i128 = final_amounts.iter().sum();
+
+        let invoice = Invoice {
+            creator: creator.clone(),
+            recipients: recipients.clone(),
+            amounts: final_amounts,
 
         // Ratios must sum to exactly 10 000 bps.
         let ratio_sum: u32 = ratios.iter().fold(0u32, |a, b| a.saturating_add(b));
@@ -18094,6 +18338,15 @@ impl SplitContract {
         template_id
     }
 
+    // -----------------------------------------------------------------------
+    // Core: pay
+    // -----------------------------------------------------------------------
+
+    /// Pay toward an invoice.
+    pub fn pay(env: Env, payer: Address, invoice_id: u64, amount: i128) {
+        payer.require_auth();
+
+        let mut invoice = load_invoice(&env, invoice_id);
     /// Delete a previously stored template.
     ///
     /// Only the creator who owns the template may delete it. Deleting a
@@ -18108,6 +18361,8 @@ impl SplitContract {
             "template not found"
         );
 
+        let token_client = token::Client::new(&env, &invoice.token);
+        token_client.transfer(&payer, &env.current_contract_address(), &amount);
         env.storage()
             .persistent()
             .remove(&template_id_key(&creator, template_id));
@@ -18123,6 +18378,8 @@ impl SplitContract {
             .expect("archived invoice not found")
     }
 
+        if invoice.funded >= total {
+            Self::_release(&env, invoice_id, &mut invoice);
     /// Retrieve the leaderboard for an invoice.
     ///
     /// Returns up to `n` top contributors sorted by cumulative paid amount descending.
@@ -18160,6 +18417,12 @@ impl SplitContract {
     }
 
     // -----------------------------------------------------------------------
+    // Core: release
+    // -----------------------------------------------------------------------
+
+    /// Release funds to all recipients once fully funded.
+    pub fn release(env: Env, invoice_id: u64) {
+        let mut invoice = load_invoice(&env, invoice_id);
     // Internal helpers
     // -----------------------------------------------------------------------
     /// Instantiate a new invoice from a stored template in a single call.
@@ -18464,6 +18727,13 @@ impl SplitContract {
         panic!("no active milestone");
     }
 
+    // -----------------------------------------------------------------------
+    // Core: refund
+    // -----------------------------------------------------------------------
+
+    /// Refund all payers if the deadline has passed and the invoice is not funded.
+    pub fn refund(env: Env, invoice_id: u64) {
+        let mut invoice = load_invoice(&env, invoice_id);
     /// Release the funds collected for milestone `index` and activate the
     /// next milestone (if any).
     ///
@@ -18510,6 +18780,452 @@ impl SplitContract {
         let amount_to_release = active.target_amount;
         let token_client = token::Client::new(&env, &invoice.tokens.get(0).expect("no token"));
 
+        invoice.status = InvoiceStatus::Refunded;
+        save_invoice(&env, invoice_id, &invoice);
+        events::invoice_refunded(&env, invoice_id);
+
+        // --- #868: mark covenant violated if one exists ---
+        if let Some(mut covenant) = load_covenant(&env, invoice_id) {
+            if !covenant.violated && !covenant.fulfilled {
+                covenant.violated = true;
+                // Slash collateral if available.
+                if let Some(mut col) = load_collateral(&env, &covenant.creator) {
+                    let slashable = col.amount.min(covenant.penalty_amount);
+                    if slashable > 0 {
+                        col.amount -= slashable;
+                        // Also reduce locked proportionally (locked ≤ amount).
+                        if col.locked > col.amount {
+                            col.locked = col.amount;
+                        }
+                        save_collateral(&env, &col);
+                    }
+                }
+                events::covenant_violated(
+                    &env,
+                    invoice_id,
+                    &covenant.creator.clone(),
+                    covenant.penalty_amount,
+                );
+                save_covenant(&env, &covenant);
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Core: get_invoice
+    // -----------------------------------------------------------------------
+
+    /// Retrieve an invoice by ID.
+    pub fn get_invoice(env: Env, invoice_id: u64) -> Invoice {
+        load_invoice(&env, invoice_id)
+    }
+
+    // -----------------------------------------------------------------------
+    // #865 – Creator collateral system
+    // -----------------------------------------------------------------------
+
+    /// Deposit collateral to back your invoices.
+    ///
+    /// Transfers `amount` of `token` from `creator` to the contract.
+    pub fn deposit_collateral(env: Env, creator: Address, token: Address, amount: i128) {
+        creator.require_auth();
+        assert!(amount > 0, "collateral amount must be positive");
+
+        let token_client = token::Client::new(&env, &token);
+        token_client.transfer(&creator, &env.current_contract_address(), &amount);
+
+        let mut col = load_collateral(&env, &creator).unwrap_or(CreatorCollateral {
+            creator: creator.clone(),
+            token: token.clone(),
+            amount: 0,
+            locked: 0,
+        });
+
+        assert!(col.token == token, "collateral token mismatch");
+
+        col.amount += amount;
+        save_collateral(&env, &col);
+        events::collateral_deposited(&env, &creator, amount);
+    }
+
+    /// Withdraw available (unlocked) collateral.
+    pub fn withdraw_collateral(env: Env, creator: Address, amount: i128) {
+        creator.require_auth();
+        assert!(amount > 0, "withdrawal amount must be positive");
+
+        let mut col = load_collateral(&env, &creator).expect("no collateral record found");
+
+        let available = col.amount - col.locked;
+        assert!(available >= amount, "insufficient unlocked collateral");
+
+        col.amount -= amount;
+        save_collateral(&env, &col);
+
+        let token_client = token::Client::new(&env, &col.token);
+        token_client.transfer(&env.current_contract_address(), &creator, &amount);
+
+        events::collateral_withdrawn(&env, &creator, amount);
+    }
+
+    /// Lock `lock_amount` of collateral to back `invoice_id`.
+    ///
+    /// Callable by the invoice creator after depositing sufficient collateral.
+    pub fn lock_collateral(env: Env, creator: Address, invoice_id: u64, lock_amount: i128) {
+        creator.require_auth();
+        assert!(lock_amount > 0, "lock amount must be positive");
+
+        let invoice = load_invoice(&env, invoice_id);
+        assert!(invoice.creator == creator, "only invoice creator can lock collateral");
+        assert!(
+            invoice.status == InvoiceStatus::Pending,
+            "invoice is not pending"
+        );
+
+        let mut col = load_collateral(&env, &creator).expect("no collateral record found");
+        let available = col.amount - col.locked;
+        assert!(available >= lock_amount, "insufficient unlocked collateral");
+
+        col.locked += lock_amount;
+        save_collateral(&env, &col);
+        events::collateral_locked(&env, &creator, invoice_id, lock_amount);
+    }
+
+    /// Unlock collateral previously locked to `invoice_id`.
+    ///
+    /// Only valid after the invoice is released or refunded.
+    pub fn unlock_collateral(env: Env, creator: Address, invoice_id: u64, unlock_amount: i128) {
+        creator.require_auth();
+        assert!(unlock_amount > 0, "unlock amount must be positive");
+
+        let invoice = load_invoice(&env, invoice_id);
+        assert!(invoice.creator == creator, "only invoice creator can unlock collateral");
+        assert!(
+            invoice.status != InvoiceStatus::Pending,
+            "invoice must be finalised before unlocking collateral"
+        );
+
+        let mut col = load_collateral(&env, &creator).expect("no collateral record found");
+        assert!(col.locked >= unlock_amount, "unlock amount exceeds locked balance");
+
+        col.locked -= unlock_amount;
+        save_collateral(&env, &col);
+        events::collateral_unlocked(&env, &creator, invoice_id, unlock_amount);
+    }
+
+    /// Retrieve a creator's collateral record.
+    pub fn get_collateral(env: Env, creator: Address) -> CreatorCollateral {
+        load_collateral(&env, &creator).expect("no collateral record found")
+    }
+
+    // -----------------------------------------------------------------------
+    // #866 – Rating-based discount tiers
+    // -----------------------------------------------------------------------
+
+    /// Submit a rating (1–5) for a creator after an invoice they created is
+    /// released.  Any payer on the invoice may rate.
+    ///
+    /// The caller must be a payer on the invoice and the invoice must already
+    /// be released.
+    pub fn rate_creator(env: Env, rater: Address, invoice_id: u64, score: u32) {
+        rater.require_auth();
+        assert!((1..=5).contains(&score), "score must be between 1 and 5");
+
+        let invoice = load_invoice(&env, invoice_id);
+        assert!(
+            invoice.status == InvoiceStatus::Released,
+            "invoice must be released before rating"
+        );
+
+        // Verify rater is a payer on this invoice.
+        let mut is_payer = false;
+        for p in invoice.payments.iter() {
+            if p.payer == rater {
+                is_payer = true;
+                break;
+            }
+        }
+        assert!(is_payer, "only a payer on this invoice can rate the creator");
+
+        let mut rating = load_rating(&env, &invoice.creator).unwrap_or(CreatorRating {
+            creator: invoice.creator.clone(),
+            total_score: 0,
+            count: 0,
+        });
+
+        rating.total_score += score;
+        rating.count += 1;
+
+        let avg_bps = (rating.total_score * 10_000) / (rating.count * 5); // out of 10_000
+        save_rating(&env, &rating);
+        events::creator_rated(&env, &invoice.creator, score, avg_bps);
+    }
+
+    /// Get the current discount tier for a creator based on their rating.
+    pub fn get_discount_tier(env: Env, creator: Address) -> DiscountTier {
+        match load_rating(&env, &creator) {
+            Some(rating) => compute_discount_tier(&rating),
+            None => DiscountTier::None,
+        }
+    }
+
+    /// Get a creator's rating record.
+    pub fn get_creator_rating(env: Env, creator: Address) -> CreatorRating {
+        load_rating(&env, &creator).unwrap_or(CreatorRating {
+            creator: creator.clone(),
+            total_score: 0,
+            count: 0,
+        })
+    }
+
+    // -----------------------------------------------------------------------
+    // #867 – Smart invoice routing based on recipient performance
+    // -----------------------------------------------------------------------
+
+    /// Create an invoice using smart routing to filter/order recipients by
+    /// their on-chain performance score.
+    ///
+    /// # Arguments
+    /// * `strategy`            – routing strategy to apply
+    /// * `min_score`           – minimum performance score (only for ThresholdBased)
+    /// * All other args same as `create_invoice`
+    ///
+    /// For `PerformanceBased`, the supplied recipients are kept but the
+    /// routing event records that performance-based selection was requested.
+    /// For `ThresholdBased`, any recipient with a score below `min_score` is
+    /// excluded (panics if that leaves zero recipients).
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_invoice_routed(
+        env: Env,
+        creator: Address,
+        recipients: Vec<Address>,
+        amounts: Vec<i128>,
+        token: Address,
+        deadline: u64,
+        strategy: RoutingStrategy,
+        min_score: i32,
+    ) -> u64 {
+        creator.require_auth();
+
+        assert!(
+            recipients.len() == amounts.len(),
+            "recipients and amounts length mismatch"
+        );
+        assert!(!recipients.is_empty(), "must have at least one recipient");
+        assert!(
+            deadline > env.ledger().timestamp(),
+            "deadline must be in the future"
+        );
+        for amt in amounts.iter() {
+            assert!(amt > 0, "amounts must be positive");
+        }
+
+        // Apply routing strategy.
+        let (final_recipients, final_amounts) = match strategy {
+            RoutingStrategy::Default => (recipients, amounts),
+            RoutingStrategy::PerformanceBased => {
+                // Keep all, but record a performance-based routing event.
+                // Future improvement: sort by score.
+                (recipients, amounts)
+            }
+            RoutingStrategy::ThresholdBased => {
+                let mut filtered_recipients = Vec::new(&env);
+                let mut filtered_amounts = Vec::new(&env);
+                for (recipient, amount) in recipients.iter().zip(amounts.iter()) {
+                    let score = load_performance(&env, &recipient)
+                        .map(|p| p.score)
+                        .unwrap_or(0);
+                    if score >= min_score {
+                        filtered_recipients.push_back(recipient);
+                        filtered_amounts.push_back(amount);
+                    }
+                }
+                assert!(
+                    !filtered_recipients.is_empty(),
+                    "no recipients meet the performance threshold"
+                );
+                (filtered_recipients, filtered_amounts)
+            }
+        };
+
+        // Apply rating-based discount (#866).
+        let discounted_amounts = if let Some(rating) = load_rating(&env, &creator) {
+            let tier = compute_discount_tier(&rating);
+            let bps = tier_to_bps(&tier);
+            if bps > 0 {
+                let d = apply_discount(&env, &final_amounts, bps);
+                events::discount_applied(&env, 0, &creator, bps);
+                d
+            } else {
+                final_amounts
+            }
+        } else {
+            final_amounts
+        };
+
+        let id: u64 = env
+            .storage()
+            .persistent()
+            .get(&counter_key())
+            .unwrap_or(0u64)
+            + 1;
+        env.storage().persistent().set(&counter_key(), &id);
+
+        let total: i128 = discounted_amounts.iter().sum();
+
+        let invoice = Invoice {
+            creator: creator.clone(),
+            recipients: final_recipients,
+            amounts: discounted_amounts,
+            token,
+            deadline,
+            funded: 0,
+            status: InvoiceStatus::Pending,
+            payments: Vec::new(&env),
+        };
+
+        save_invoice(&env, id, &invoice);
+        events::invoice_created(&env, id, &creator, total);
+
+        id
+    }
+
+    /// Record that a recipient completed their obligations (called after invoice
+    /// is released).  Increments their performance score.
+    pub fn record_recipient_completion(env: Env, caller: Address, recipient: Address, invoice_id: u64) {
+        caller.require_auth();
+
+        let invoice = load_invoice(&env, invoice_id);
+        assert!(
+            invoice.status == InvoiceStatus::Released,
+            "invoice must be released"
+        );
+        // Caller must be the invoice creator.
+        assert!(invoice.creator == caller, "only invoice creator can record completion");
+
+        let mut perf = load_performance(&env, &recipient).unwrap_or(RecipientPerformance {
+            recipient: recipient.clone(),
+            completed: 0,
+            flagged: 0,
+            score: 0,
+        });
+
+        perf.completed += 1;
+        perf.score += 1;
+        save_performance(&env, &perf);
+        events::performance_updated(&env, &recipient, perf.score);
+    }
+
+    /// Flag a recipient for poor performance.  Decrements their score.
+    pub fn flag_recipient(env: Env, caller: Address, recipient: Address, invoice_id: u64) {
+        caller.require_auth();
+
+        let invoice = load_invoice(&env, invoice_id);
+        // Caller must be the invoice creator.
+        assert!(invoice.creator == caller, "only invoice creator can flag recipients");
+
+        let mut perf = load_performance(&env, &recipient).unwrap_or(RecipientPerformance {
+            recipient: recipient.clone(),
+            completed: 0,
+            flagged: 0,
+            score: 0,
+        });
+
+        perf.flagged += 1;
+        perf.score -= 1;
+        save_performance(&env, &perf);
+        events::performance_updated(&env, &recipient, perf.score);
+        events::recipient_flagged(&env, &recipient, invoice_id);
+    }
+
+    /// Get a recipient's performance record.
+    pub fn get_recipient_performance(env: Env, recipient: Address) -> RecipientPerformance {
+        load_performance(&env, &recipient).unwrap_or(RecipientPerformance {
+            recipient: recipient.clone(),
+            completed: 0,
+            flagged: 0,
+            score: 0,
+        })
+    }
+
+    // -----------------------------------------------------------------------
+    // #868 – Creator covenant system with penalties
+    // -----------------------------------------------------------------------
+
+    /// Attach a covenant to an invoice.
+    ///
+    /// The covenant commits the creator to fulfilling the invoice; if it is
+    /// refunded (cancelled / missed deadline) the `penalty_amount` is slashed
+    /// from the creator's collateral.
+    ///
+    /// The invoice must be Pending and the creator must have at least
+    /// `penalty_amount` of unlocked collateral.
+    pub fn create_covenant(
+        env: Env,
+        creator: Address,
+        invoice_id: u64,
+        penalty_amount: i128,
+    ) {
+        creator.require_auth();
+        assert!(penalty_amount > 0, "penalty amount must be positive");
+
+        let invoice = load_invoice(&env, invoice_id);
+        assert!(invoice.creator == creator, "only invoice creator can create a covenant");
+        assert!(
+            invoice.status == InvoiceStatus::Pending,
+            "invoice must be pending"
+        );
+        assert!(
+            load_covenant(&env, invoice_id).is_none(),
+            "covenant already exists for this invoice"
+        );
+
+        // Creator must have sufficient unlocked collateral.
+        let col = load_collateral(&env, &creator).expect("creator must have collateral to create a covenant");
+        let available = col.amount - col.locked;
+        assert!(
+            available >= penalty_amount,
+            "insufficient unlocked collateral for covenant"
+        );
+
+        let covenant = CreatorCovenant {
+            invoice_id,
+            creator: creator.clone(),
+            penalty_amount,
+            violated: false,
+            fulfilled: false,
+        };
+
+        save_covenant(&env, &covenant);
+        events::covenant_created(&env, invoice_id, &creator, penalty_amount);
+    }
+
+    /// Mark a covenant as fulfilled once the invoice is released.
+    ///
+    /// Can be called by anyone after the invoice reaches Released status.
+    pub fn fulfill_covenant(env: Env, invoice_id: u64) {
+        let invoice = load_invoice(&env, invoice_id);
+        assert!(
+            invoice.status == InvoiceStatus::Released,
+            "invoice must be released before fulfilling covenant"
+        );
+
+        let mut covenant = load_covenant(&env, invoice_id).expect("no covenant found for this invoice");
+        assert!(!covenant.violated, "covenant already violated");
+        assert!(!covenant.fulfilled, "covenant already fulfilled");
+
+        covenant.fulfilled = true;
+        save_covenant(&env, &covenant);
+        events::covenant_fulfilled(&env, invoice_id, &covenant.creator.clone());
+    }
+
+    /// Get the covenant attached to an invoice.
+    pub fn get_covenant(env: Env, invoice_id: u64) -> CreatorCovenant {
+        load_covenant(&env, invoice_id).expect("no covenant found for this invoice")
+    }
+
+    // -----------------------------------------------------------------------
+    // Internal helpers
+    // -----------------------------------------------------------------------
         if total_amounts > 0 && amount_to_release > 0 {
             for i in 0..invoice.recipients.len() {
                 let recipient = invoice.recipients.get(i).unwrap();
@@ -18558,6 +19274,32 @@ impl SplitContract {
             Some(amount_to_release),
         );
 
+        invoice.status = InvoiceStatus::Released;
+        save_invoice(env, invoice_id, invoice);
+        events::invoice_released(env, invoice_id, &invoice.recipients);
+
+        // --- #867: update recipient performance scores ---
+        for recipient in invoice.recipients.iter() {
+            let mut perf = load_performance(env, &recipient).unwrap_or(RecipientPerformance {
+                recipient: recipient.clone(),
+                completed: 0,
+                flagged: 0,
+                score: 0,
+            });
+            perf.completed += 1;
+            perf.score += 1;
+            save_performance(env, &perf);
+            events::performance_updated(env, &recipient, perf.score);
+        }
+
+        // --- #868: auto-fulfill covenant if one exists ---
+        if let Some(mut covenant) = load_covenant(env, invoice_id) {
+            if !covenant.violated && !covenant.fulfilled {
+                covenant.fulfilled = true;
+                events::covenant_fulfilled(env, invoice_id, &covenant.creator.clone());
+                save_covenant(env, &covenant);
+            }
+        }
         events::milestone_completed(&env, invoice_id, index, amount_to_release);
     }
 }
@@ -18570,4 +19312,441 @@ fn archive_invoice(env: &Env, invoice_id: u64, invoice: &Invoice) {
         .persistent()
         .set(&archived_key(invoice_id), &core);
     remove_invoice(env, invoice_id);
+}
+// ---------------------------------------------------------------------------
+// Issue #838: Creator reputation recovery constants
+// ---------------------------------------------------------------------------
+
+/// Ratings at or below this score may be contested by the creator.
+const LOW_RATING_THRESHOLD: u32 = 2;
+
+// ---------------------------------------------------------------------------
+// Issue #839: Payment stream constants and helpers
+// ---------------------------------------------------------------------------
+
+/// Upper bound on the number of streams folded in a single aggregation call.
+const MAX_AGGREGATE_STREAMS: u32 = 10;
+
+fn load_payment_stream(env: &Env, stream_id: u64) -> PaymentStream {
+    env.storage()
+        .persistent()
+        .get(&payment_stream_key(stream_id))
+        .expect("stream not found")
+}
+
+fn save_payment_stream(env: &Env, stream: &PaymentStream) {
+    env.storage()
+        .persistent()
+        .set(&payment_stream_key(stream.id), stream);
+}
+
+fn next_payment_stream_id(env: &Env) -> u64 {
+    let id: u64 = env
+        .storage()
+        .persistent()
+        .get(&payment_stream_counter_key())
+        .unwrap_or(0u64)
+        + 1;
+    env.storage()
+        .persistent()
+        .set(&payment_stream_counter_key(), &id);
+    id
+}
+
+/// Total amount that has accrued to the recipient so far, capped at `deposit`.
+fn stream_streamed_amount(env: &Env, stream: &PaymentStream) -> i128 {
+    let now = env.ledger().sequence();
+    if now <= stream.start_ledger {
+        return 0;
+    }
+    let elapsed = (now - stream.start_ledger) as i128;
+    elapsed
+        .saturating_mul(stream.rate_per_ledger)
+        .min(stream.deposit)
+}
+
+/// Accrued amount not yet withdrawn by the recipient.
+fn stream_withdrawable_amount(env: &Env, stream: &PaymentStream) -> i128 {
+    if !stream.active {
+        return 0;
+    }
+    stream_streamed_amount(env, stream).saturating_sub(stream.withdrawn)
+}
+
+// ---------------------------------------------------------------------------
+// Contract (block 3 — invoice locking, reputation recovery, stream aggregation)
+// ---------------------------------------------------------------------------
+#[contractimpl]
+impl SplitContract {
+    // -----------------------------------------------------------------------
+    // Issue #837: Invoice locking
+    // -----------------------------------------------------------------------
+
+    /// Lock an invoice so it can no longer be modified.
+    ///
+    /// The creator (or a co-creator) may lock at any time. Anyone else may
+    /// lock only once the deadline has passed, which persists the implicit
+    /// post-deadline lock and emits an on-chain record of it.
+    pub fn lock_invoice(env: Env, caller: Address, invoice_id: u64) -> InvoiceLock {
+        require_not_paused(&env);
+        caller.require_auth();
+
+        let invoice = load_invoice(&env, invoice_id);
+        assert!(
+            !env.storage().persistent().has(&invoice_lock_key(invoice_id)),
+            "invoice already locked"
+        );
+
+        let now = env.ledger().timestamp();
+        let is_creator =
+            invoice.creator == caller || invoice.co_creators.iter().any(|c| c == caller);
+        assert!(
+            is_creator || now > invoice.deadline,
+            "invoice deadline has not passed"
+        );
+
+        let lock = InvoiceLock {
+            invoice_id,
+            locked_by: caller.clone(),
+            locked_at: now,
+            locked_ledger: env.ledger().sequence(),
+        };
+        env.storage()
+            .persistent()
+            .set(&invoice_lock_key(invoice_id), &lock);
+
+        append_audit_entry(&env, invoice_id, symbol_short!("inv_lock"), &caller);
+        events::invoice_locked(&env, invoice_id, &caller, now, invoice.deadline);
+        lock
+    }
+
+    /// Returns true if the invoice is explicitly locked or its deadline has passed.
+    pub fn is_invoice_locked(env: Env, invoice_id: u64) -> bool {
+        let invoice = load_invoice(&env, invoice_id);
+        invoice_is_locked(&env, invoice_id, &invoice)
+    }
+
+    /// Returns the explicit lock record for an invoice, if one was written.
+    pub fn get_invoice_lock(env: Env, invoice_id: u64) -> Option<InvoiceLock> {
+        env.storage().persistent().get(&invoice_lock_key(invoice_id))
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #838: Creator reputation recovery
+    // -----------------------------------------------------------------------
+
+    /// File an appeal against a low rating (score <= `LOW_RATING_THRESHOLD`)
+    /// that `payer` left on one of the creator's invoices. Each rating may be
+    /// appealed at most once.
+    pub fn appeal_rating(
+        env: Env,
+        creator: Address,
+        invoice_id: u64,
+        payer: Address,
+        reason_hash: BytesN<32>,
+    ) {
+        require_not_paused(&env);
+        creator.require_auth();
+
+        let invoice = load_invoice(&env, invoice_id);
+        assert!(invoice.creator == creator, "only creator can appeal");
+
+        let score: u32 = env
+            .storage()
+            .persistent()
+            .get(&invoice_rating_key(invoice_id, &payer))
+            .expect("rating not found");
+        assert!(score <= LOW_RATING_THRESHOLD, "rating is not appealable");
+
+        let appeal_key = rating_appeal_key(invoice_id, &payer);
+        assert!(
+            !env.storage().persistent().has(&appeal_key),
+            "rating already appealed"
+        );
+
+        let appeal = RatingAppeal {
+            invoice_id,
+            payer: payer.clone(),
+            creator: creator.clone(),
+            score,
+            reason_hash: reason_hash.clone(),
+            status: AppealStatus::Pending,
+            filed_at: env.ledger().timestamp(),
+            resolved_at: 0,
+            resolved_by: None,
+        };
+        env.storage().persistent().set(&appeal_key, &appeal);
+
+        events::rating_appealed(&env, invoice_id, &creator, &payer, score, &reason_hash);
+    }
+
+    /// Withdraw a pending appeal. The rating stays in place and cannot be
+    /// appealed again.
+    pub fn withdraw_rating_appeal(env: Env, creator: Address, invoice_id: u64, payer: Address) {
+        require_not_paused(&env);
+        creator.require_auth();
+
+        let appeal_key = rating_appeal_key(invoice_id, &payer);
+        let mut appeal: RatingAppeal = env
+            .storage()
+            .persistent()
+            .get(&appeal_key)
+            .expect("appeal not found");
+        assert!(appeal.creator == creator, "only creator can withdraw appeal");
+        assert!(appeal.status == AppealStatus::Pending, "appeal not pending");
+
+        appeal.status = AppealStatus::Rejected;
+        appeal.resolved_at = env.ledger().timestamp();
+        appeal.resolved_by = Some(creator.clone());
+        env.storage().persistent().set(&appeal_key, &appeal);
+
+        events::rating_appeal_withdrawn(&env, invoice_id, &creator, &payer);
+    }
+
+    /// Resolve a pending appeal (Operator or higher).
+    ///
+    /// When `upheld`, the contested score is struck from both the invoice's
+    /// and the creator's rating aggregates. The per-payer rating record is
+    /// kept so the payer cannot re-rate the invoice.
+    pub fn resolve_rating_appeal(
+        env: Env,
+        admin: Address,
+        invoice_id: u64,
+        payer: Address,
+        upheld: bool,
+    ) {
+        require_admin_role(&env, &admin, AdminRole::Operator);
+
+        let appeal_key = rating_appeal_key(invoice_id, &payer);
+        let mut appeal: RatingAppeal = env
+            .storage()
+            .persistent()
+            .get(&appeal_key)
+            .expect("appeal not found");
+        assert!(appeal.status == AppealStatus::Pending, "appeal not pending");
+
+        let creator_key = creator_rating_key(&appeal.creator);
+        let mut creator_rating: (u32, u32) = env
+            .storage()
+            .persistent()
+            .get(&creator_key)
+            .unwrap_or((0u32, 0u32));
+
+        if upheld {
+            let sum_key = invoice_rating_sum_key(invoice_id);
+            let count_key = invoice_rating_count_key(invoice_id);
+            let sum: u32 = env.storage().persistent().get(&sum_key).unwrap_or(0u32);
+            let count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0u32);
+            env.storage()
+                .persistent()
+                .set(&sum_key, &sum.saturating_sub(appeal.score));
+            env.storage()
+                .persistent()
+                .set(&count_key, &count.saturating_sub(1));
+
+            creator_rating.0 = creator_rating.0.saturating_sub(appeal.score);
+            creator_rating.1 = creator_rating.1.saturating_sub(1);
+            env.storage().persistent().set(&creator_key, &creator_rating);
+
+            appeal.status = AppealStatus::Upheld;
+        } else {
+            appeal.status = AppealStatus::Rejected;
+        }
+        appeal.resolved_at = env.ledger().timestamp();
+        appeal.resolved_by = Some(admin.clone());
+        env.storage().persistent().set(&appeal_key, &appeal);
+
+        events::rating_appeal_resolved(&env, invoice_id, &payer, &admin, upheld, creator_rating);
+    }
+
+    /// Return the appeal filed against `payer`'s rating on `invoice_id`, if any.
+    pub fn get_rating_appeal(env: Env, invoice_id: u64, payer: Address) -> Option<RatingAppeal> {
+        env.storage()
+            .persistent()
+            .get(&rating_appeal_key(invoice_id, &payer))
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #839: Payment streams and aggregation
+    // -----------------------------------------------------------------------
+
+    /// Create a linear payment stream. `deposit` is transferred from `sender`
+    /// up-front and accrues to `recipient` at `rate_per_ledger` starting at
+    /// the current ledger.
+    pub fn create_payment_stream(
+        env: Env,
+        sender: Address,
+        recipient: Address,
+        token: Address,
+        deposit: i128,
+        rate_per_ledger: i128,
+    ) -> u64 {
+        require_not_paused(&env);
+        sender.require_auth();
+        assert!(deposit > 0, "deposit must be positive");
+        assert!(rate_per_ledger > 0, "rate must be positive");
+        assert!(sender != recipient, "sender cannot be recipient");
+        validate_allowed_token(&env, &token);
+
+        token::Client::new(&env, &token).transfer(
+            &sender,
+            &env.current_contract_address(),
+            &deposit,
+        );
+
+        let stream = PaymentStream {
+            id: next_payment_stream_id(&env),
+            sender: sender.clone(),
+            recipient: recipient.clone(),
+            token: token.clone(),
+            deposit,
+            rate_per_ledger,
+            start_ledger: env.ledger().sequence(),
+            withdrawn: 0,
+            active: true,
+            aggregated_into: None,
+        };
+        save_payment_stream(&env, &stream);
+
+        events::stream_created(
+            &env,
+            stream.id,
+            &sender,
+            &recipient,
+            &token,
+            deposit,
+            rate_per_ledger,
+            stream.start_ledger,
+        );
+        stream.id
+    }
+
+    /// Withdraw everything accrued on a stream so far. Returns the amount paid.
+    pub fn withdraw_from_stream(env: Env, recipient: Address, stream_id: u64) -> i128 {
+        require_not_paused(&env);
+        recipient.require_auth();
+
+        let mut stream = load_payment_stream(&env, stream_id);
+        assert!(stream.recipient == recipient, "not stream recipient");
+        assert!(stream.active, "stream not active");
+
+        let amount = stream_withdrawable_amount(&env, &stream);
+        assert!(amount > 0, "nothing to withdraw");
+
+        stream.withdrawn = stream.withdrawn.saturating_add(amount);
+        if stream.withdrawn >= stream.deposit {
+            stream.active = false;
+        }
+        save_payment_stream(&env, &stream);
+
+        token::Client::new(&env, &stream.token).transfer(
+            &env.current_contract_address(),
+            &recipient,
+            &amount,
+        );
+
+        events::stream_withdrawn(&env, stream_id, &recipient, amount, stream.withdrawn);
+        amount
+    }
+
+    /// Combine several active streams sharing the same sender, recipient and
+    /// token into a single new stream.
+    ///
+    /// Each source stream is settled first — anything already accrued is paid
+    /// to the recipient — then closed and linked to the new stream via
+    /// `aggregated_into`. The new stream carries the sum of the unstreamed
+    /// balances as its deposit and the sum of the rates of the sources that
+    /// still had a balance, starting at the current ledger.
+    pub fn aggregate_streams(env: Env, sender: Address, stream_ids: Vec<u64>) -> u64 {
+        require_not_paused(&env);
+        sender.require_auth();
+
+        let n = stream_ids.len();
+        assert!(n >= 2, "need at least two streams");
+        assert!(n <= MAX_AGGREGATE_STREAMS, "too many streams");
+
+        let first = load_payment_stream(&env, stream_ids.get(0).expect("stream id"));
+        let recipient = first.recipient.clone();
+        let token_addr = first.token.clone();
+        let new_id = next_payment_stream_id(&env);
+
+        let mut seen: Vec<u64> = Vec::new(&env);
+        let mut total_remaining: i128 = 0;
+        let mut total_rate: i128 = 0;
+        let mut total_settled: i128 = 0;
+
+        for id in stream_ids.iter() {
+            assert!(!seen.contains(id), "duplicate stream id");
+            seen.push_back(id);
+
+            let mut stream = load_payment_stream(&env, id);
+            assert!(stream.active, "stream not active");
+            assert!(stream.sender == sender, "not stream sender");
+            assert!(stream.recipient == recipient, "recipient mismatch");
+            assert!(stream.token == token_addr, "token mismatch");
+
+            let streamed = stream_streamed_amount(&env, &stream);
+            let settled = streamed.saturating_sub(stream.withdrawn);
+            let remaining = stream.deposit.saturating_sub(streamed);
+
+            stream.withdrawn = streamed;
+            stream.active = false;
+            stream.aggregated_into = Some(new_id);
+            save_payment_stream(&env, &stream);
+
+            total_settled = total_settled.saturating_add(settled);
+            if remaining > 0 {
+                total_remaining = total_remaining.saturating_add(remaining);
+                total_rate = total_rate.saturating_add(stream.rate_per_ledger);
+            }
+
+            events::stream_merged(&env, id, new_id, settled, remaining);
+        }
+
+        assert!(total_remaining > 0, "nothing left to aggregate");
+
+        if total_settled > 0 {
+            token::Client::new(&env, &token_addr).transfer(
+                &env.current_contract_address(),
+                &recipient,
+                &total_settled,
+            );
+        }
+
+        let aggregate = PaymentStream {
+            id: new_id,
+            sender: sender.clone(),
+            recipient: recipient.clone(),
+            token: token_addr,
+            deposit: total_remaining,
+            rate_per_ledger: total_rate,
+            start_ledger: env.ledger().sequence(),
+            withdrawn: 0,
+            active: true,
+            aggregated_into: None,
+        };
+        save_payment_stream(&env, &aggregate);
+
+        events::streams_aggregated(
+            &env,
+            new_id,
+            &sender,
+            &recipient,
+            &stream_ids,
+            total_remaining,
+            total_rate,
+        );
+        new_id
+    }
+
+    /// Return a payment stream by ID.
+    pub fn get_payment_stream(env: Env, stream_id: u64) -> PaymentStream {
+        load_payment_stream(&env, stream_id)
+    }
+
+    /// Amount currently withdrawable by the stream's recipient.
+    pub fn get_stream_withdrawable(env: Env, stream_id: u64) -> i128 {
+        let stream = load_payment_stream(&env, stream_id);
+        stream_withdrawable_amount(&env, &stream)
+    }
 }

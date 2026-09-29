@@ -105,3 +105,4 @@ pub(crate) fn default_options(env: &Env) -> InvoiceOptions {
         cosigner_threshold: None,
         ext: types::InvoiceOptions2::default(),
     }
+}

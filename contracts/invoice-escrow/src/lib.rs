@@ -14,18 +14,43 @@
 //! admin can cancel the pending proposal at any time via
 //! [`InvoiceEscrowContract::cancel_transfer`]. This prevents accidental or
 //! malicious lock-out by ensuring the new admin actively confirms the transfer.
+//!
+//! # Extensions
+//!
+//! - [`approval`]   — recipient approval workflow for release payouts (#855).
+//! - [`milestones`] — pre-funded payment escrow with milestone triggers (#854).
+//! - [`insurance`]  — insurance pool with automatic refund protection (#853).
+//! - [`lending`]    — invoice-backed lending marketplace (#856).
 
 #![no_std]
 
+pub mod approval;
 mod errors;
+pub mod insurance;
+pub mod lending;
+pub mod milestones;
 mod types;
 
 #[cfg(test)]
 mod test;
+#[cfg(test)]
+mod test_approval;
+#[cfg(test)]
+mod test_helpers;
+#[cfg(test)]
+mod test_insurance;
+#[cfg(test)]
+mod test_lending;
+#[cfg(test)]
+mod test_milestones;
 
 use errors::Error;
 use soroban_sdk::{
     contract, contractimpl, symbol_short, token, Address, BytesN, Env, Symbol, Vec,
+};
+use types::{
+    BlacklistEntry, EscrowInvoice, EscrowStatus, InsuranceConfig, InsurancePolicy, InsurancePool,
+    LoanListing, MilestoneEscrow, MilestoneInput, ProposalStatus, RecipientProposal,
 };
 use types::{BlacklistEntry, EscrowInvoice, EscrowReleased, EscrowStatus, InvoiceConfigVersion};
 
@@ -80,6 +105,14 @@ const APPEAL_WINDOW_LEDGERS: u32 = 360;
 // Internal helpers
 // ---------------------------------------------------------------------------
 
+fn require_initialized(env: &Env) -> Result<(), Error> {
+    if env.storage().instance().has(&admin_key()) {
+        Ok(())
+    } else {
+        Err(Error::NotInitialized)
+    }
+}
+
 fn require_admin(env: &Env) -> Address {
     let admin: Address = env
         .storage()
@@ -99,6 +132,34 @@ fn get_invoice(env: &Env, id: u64) -> Result<EscrowInvoice, Error> {
 
 fn save_invoice(env: &Env, id: u64, invoice: &EscrowInvoice) {
     env.storage().persistent().set(&invoice_key(id), invoice);
+}
+
+fn deposit_of(env: &Env, id: u64, payer: &Address) -> i128 {
+    env.storage()
+        .persistent()
+        .get(&deposit_key(id, payer))
+        .unwrap_or(0)
+}
+
+/// Mark a fully funded invoice `Released` and pay out the escrowed total.
+///
+/// Payout order: a funded lender is repaid first (see [`lending`]); the rest
+/// goes to the approved recipients (see [`approval`]) or, if there are none,
+/// to the creator.
+fn settle_release(env: &Env, id: u64, invoice: &mut EscrowInvoice) {
+    let total = invoice.total_amount;
+    invoice.status = EscrowStatus::Released;
+    save_invoice(env, id, invoice);
+
+    let remaining = lending::settle_on_release(env, id, &invoice.token, total);
+    if remaining > 0 && !approval::distribute(env, id, &invoice.token, remaining) {
+        token::Client::new(env, &invoice.token).transfer(
+            &env.current_contract_address(),
+            &invoice.creator,
+            &remaining,
+        );
+    }
+    emit_released(env, id, total);
 }
 
 // ---------------------------------------------------------------------------
@@ -444,14 +505,10 @@ impl InvoiceEscrowContract {
 
         emit_deposited(&env, invoice_id, &payer, amount, new_funded);
 
-        // Auto-release on full funding.
-        if new_funded >= invoice.total_amount {
-            let total = invoice.total_amount;
-            let creator = invoice.creator.clone();
-            invoice.status = EscrowStatus::Released;
-            save_invoice(&env, invoice_id, &invoice);
-            token_client.transfer(&env.current_contract_address(), &creator, &total);
-            emit_released(&env, invoice_id, total);
+        // Auto-release on full funding, unless a recipient proposal is still
+        // awaiting approval (approval then triggers the release).
+        if new_funded >= invoice.total_amount && approval::release_allowed(&env, invoice_id) {
+            settle_release(&env, invoice_id, &mut invoice);
         } else {
             save_invoice(&env, invoice_id, &invoice);
         }
@@ -468,6 +525,7 @@ impl InvoiceEscrowContract {
     /// * [`Error::InvoiceNotFound`]    — Unknown invoice ID.
     /// * [`Error::InvalidStatus`]      — Invoice was already released/refunded/cancelled.
     /// * [`Error::InsufficientFunding`] — Not fully funded yet.
+    /// * [`Error::RecipientsNotApproved`] — A recipient proposal is pending or rejected.
     pub fn release(env: Env, invoice_id: u64) -> Result<(), Error> {
         let mut invoice = get_invoice(&env, invoice_id)?;
 
@@ -480,7 +538,11 @@ impl InvoiceEscrowContract {
         if invoice.funded_amount < invoice.total_amount {
             return Err(Error::InsufficientFunding);
         }
+        if !approval::release_allowed(&env, invoice_id) {
+            return Err(Error::RecipientsNotApproved);
+        }
 
+        settle_release(&env, invoice_id, &mut invoice);
         let total = invoice.total_amount;
         let creator = invoice.creator.clone();
         invoice.status = EscrowStatus::Released;
@@ -919,5 +981,378 @@ impl InvoiceEscrowContract {
             .persistent()
             .get::<_, BlacklistEntry>(&blacklist_key(&payer))
             .map_or(false, |entry| entry.finalised && entry.upheld)
+    }
+
+    // -----------------------------------------------------------------------
+    // Recipient approval workflow (#855)
+    // -----------------------------------------------------------------------
+
+    /// Propose (or revise) the recipients that will receive this invoice's
+    /// release, with basis-point shares summing to 10 000 and an N-of-M
+    /// approval threshold. Revising bumps the version and clears all votes.
+    /// Returns the new proposal version.
+    ///
+    /// # Events
+    /// Emits `("approval", "proposed", invoice_id)`.
+    ///
+    /// # Errors
+    /// * [`Error::Unauthorized`] — `creator` is not the invoice creator.
+    /// * [`Error::InvalidStatus`] — Invoice already released/refunded/cancelled.
+    /// * [`Error::ActiveLoanExists`] — Invoice is pledged on the lending marketplace.
+    /// * [`Error::InvalidRecipients`] — Empty, too many, duplicated, or length mismatch.
+    /// * [`Error::InvalidShares`] — A zero share, or shares do not sum to 10 000.
+    /// * [`Error::InvalidThreshold`] — `required_approvals` not in `1..=recipients`.
+    /// * [`Error::DeadlinePassed`] — Deadline is not in the future.
+    pub fn propose_recipients(
+        env: Env,
+        creator: Address,
+        invoice_id: u64,
+        recipients: Vec<Address>,
+        shares_bps: Vec<u32>,
+        required_approvals: u32,
+        approval_deadline: u64,
+    ) -> Result<u32, Error> {
+        approval::propose(
+            &env,
+            creator,
+            invoice_id,
+            recipients,
+            shares_bps,
+            required_approvals,
+            approval_deadline,
+        )
+    }
+
+    /// Approve proposal `version` as one of its recipients. When the threshold
+    /// is reached the proposal becomes `Approved` and, if the invoice is
+    /// already fully funded, the release is paid out immediately.
+    ///
+    /// # Events
+    /// Emits `("approval", "vote_yes", invoice_id)`, plus
+    /// `("approval", "approved", invoice_id)` when the threshold is reached.
+    pub fn approve_recipients(
+        env: Env,
+        recipient: Address,
+        invoice_id: u64,
+        version: u32,
+    ) -> Result<ProposalStatus, Error> {
+        approval::approve(&env, recipient, invoice_id, version)
+    }
+
+    /// Reject proposal `version` as one of its recipients. The proposal
+    /// becomes `Rejected` once the threshold can no longer be met.
+    ///
+    /// # Events
+    /// Emits `("approval", "vote_no", invoice_id)`, plus
+    /// `("approval", "rejected", invoice_id)` when the proposal fails.
+    pub fn reject_recipients(
+        env: Env,
+        recipient: Address,
+        invoice_id: u64,
+        version: u32,
+        reason_hash: BytesN<32>,
+    ) -> Result<ProposalStatus, Error> {
+        approval::reject(&env, recipient, invoice_id, version, reason_hash)
+    }
+
+    /// Withdraw a previously cast approval while the proposal is pending.
+    ///
+    /// # Events
+    /// Emits `("approval", "revoked", invoice_id)`.
+    pub fn revoke_recipient_approval(
+        env: Env,
+        recipient: Address,
+        invoice_id: u64,
+    ) -> Result<(), Error> {
+        approval::revoke(&env, recipient, invoice_id)
+    }
+
+    /// Remove the recipient proposal so the release goes to the creator again.
+    ///
+    /// # Events
+    /// Emits `("approval", "withdrawn", invoice_id)`.
+    pub fn withdraw_recipient_proposal(
+        env: Env,
+        creator: Address,
+        invoice_id: u64,
+    ) -> Result<(), Error> {
+        approval::withdraw(&env, creator, invoice_id)
+    }
+
+    /// Return the recipient proposal for an invoice, if any.
+    pub fn get_recipient_proposal(env: Env, invoice_id: u64) -> Option<RecipientProposal> {
+        approval::get_proposal(&env, invoice_id)
+    }
+
+    /// `true` when the invoice may be released (no proposal, or approved).
+    pub fn is_release_approved(env: Env, invoice_id: u64) -> bool {
+        approval::release_allowed(&env, invoice_id)
+    }
+
+    // -----------------------------------------------------------------------
+    // Milestone escrow (#854)
+    // -----------------------------------------------------------------------
+
+    /// Create a milestone escrow funded up front by `payer`. Each milestone
+    /// pays its amount to `payee` once its trigger is satisfied. Returns the
+    /// escrow ID.
+    ///
+    /// # Events
+    /// Emits `("milestone", "created", id)`.
+    ///
+    /// # Errors
+    /// * [`Error::NotInitialized`] — Contract not initialized.
+    /// * [`Error::SelfDealing`] — `payer == payee`.
+    /// * [`Error::InvalidMilestones`] — Empty/too many milestones or amount ≤ 0.
+    pub fn create_milestone_escrow(
+        env: Env,
+        payer: Address,
+        payee: Address,
+        token: Address,
+        milestones: Vec<MilestoneInput>,
+    ) -> Result<u64, Error> {
+        milestones::create(&env, payer, payee, token, milestones)
+    }
+
+    /// Release milestone `index` if `caller` satisfies its trigger. Returns
+    /// the amount paid to the payee.
+    ///
+    /// # Events
+    /// Emits `("milestone", "released", id)`, plus
+    /// `("milestone", "completed", id)` when the final milestone is paid.
+    ///
+    /// # Errors
+    /// * [`Error::EscrowClosed`] — Escrow completed or cancelled.
+    /// * [`Error::MilestoneIndexOutOfRange`] / [`Error::MilestoneAlreadyReleased`].
+    /// * [`Error::TriggerNotSatisfied`] — Wrong signer or timestamp not reached.
+    pub fn trigger_milestone(
+        env: Env,
+        caller: Address,
+        escrow_id: u64,
+        index: u32,
+    ) -> Result<i128, Error> {
+        milestones::trigger(&env, caller, escrow_id, index)
+    }
+
+    /// Permissionlessly release every timestamp-triggered milestone that is
+    /// due. Returns the number of milestones released.
+    pub fn trigger_due_milestones(env: Env, escrow_id: u64) -> Result<u32, Error> {
+        milestones::trigger_due(&env, escrow_id)
+    }
+
+    /// Cancel an active milestone escrow with the consent of both payer and
+    /// payee, refunding the unreleased remainder to the payer.
+    ///
+    /// # Events
+    /// Emits `("milestone", "cancelled", id)`.
+    pub fn cancel_milestone_escrow(env: Env, escrow_id: u64) -> Result<i128, Error> {
+        milestones::cancel(&env, escrow_id)
+    }
+
+    /// Admin dispute resolution: send the unreleased remainder to the payee
+    /// (`pay_payee = true`) or back to the payer.
+    ///
+    /// # Events
+    /// Emits `("milestone", "resolved", id)`.
+    pub fn resolve_milestone_dispute(
+        env: Env,
+        escrow_id: u64,
+        pay_payee: bool,
+    ) -> Result<i128, Error> {
+        milestones::resolve(&env, escrow_id, pay_payee)
+    }
+
+    /// Return a milestone escrow record.
+    pub fn get_milestone_escrow(env: Env, escrow_id: u64) -> Result<MilestoneEscrow, Error> {
+        milestones::get_escrow(&env, escrow_id)
+    }
+
+    // -----------------------------------------------------------------------
+    // Insurance pool — automatic refund protection (#853)
+    // -----------------------------------------------------------------------
+
+    /// Admin: set the premium rate (1..=5000 bps) and policy term (seconds).
+    ///
+    /// # Events
+    /// Emits `("insurance", "config")`.
+    pub fn set_insurance_config(
+        env: Env,
+        premium_bps: u32,
+        policy_duration: u64,
+    ) -> Result<(), Error> {
+        insurance::set_config(&env, premium_bps, policy_duration)
+    }
+
+    /// Return the current insurance configuration.
+    pub fn get_insurance_config(env: Env) -> InsuranceConfig {
+        insurance::get_config(&env)
+    }
+
+    /// Deposit underwriting liquidity for `token`. Returns shares minted.
+    ///
+    /// # Events
+    /// Emits `("insurance", "lp_add", token)`.
+    pub fn provide_insurance_liquidity(
+        env: Env,
+        provider: Address,
+        token: Address,
+        amount: i128,
+    ) -> Result<i128, Error> {
+        insurance::provide(&env, provider, token, amount)
+    }
+
+    /// Redeem pool shares for their share of unlocked liquidity. Returns the
+    /// token amount paid out.
+    ///
+    /// # Events
+    /// Emits `("insurance", "lp_remove", token)`.
+    pub fn withdraw_insurance_liquidity(
+        env: Env,
+        provider: Address,
+        token: Address,
+        shares: i128,
+    ) -> Result<i128, Error> {
+        insurance::withdraw(&env, provider, token, shares)
+    }
+
+    /// Buy refund protection covering the payer's current deposit on an
+    /// invoice. Returns the premium paid.
+    ///
+    /// # Events
+    /// Emits `("insurance", "policy", invoice_id)`.
+    pub fn buy_refund_protection(env: Env, payer: Address, invoice_id: u64) -> Result<i128, Error> {
+        insurance::buy(&env, payer, invoice_id)
+    }
+
+    /// Admin: declare a released invoice defaulted. Every active, in-term
+    /// policy on it is refunded from the pool in this call. Returns the total
+    /// paid out.
+    ///
+    /// # Events
+    /// Emits `("insurance", "claimed", invoice_id)` per payout and
+    /// `("insurance", "default", invoice_id)` once.
+    pub fn declare_invoice_default(env: Env, invoice_id: u64) -> Result<i128, Error> {
+        insurance::declare_default(&env, invoice_id)
+    }
+
+    /// Lapse a policy whose term ended or whose invoice was refunded or
+    /// cancelled, unlocking its coverage. Callable by anyone.
+    ///
+    /// # Events
+    /// Emits `("insurance", "expired", invoice_id)`.
+    pub fn expire_refund_protection(
+        env: Env,
+        invoice_id: u64,
+        payer: Address,
+    ) -> Result<(), Error> {
+        insurance::expire(&env, invoice_id, payer)
+    }
+
+    /// Return pool state for `token`.
+    pub fn get_insurance_pool(env: Env, token: Address) -> InsurancePool {
+        insurance::get_pool(&env, &token)
+    }
+
+    /// Return the policy held by `payer` on `invoice_id`, if any.
+    pub fn get_insurance_policy(
+        env: Env,
+        invoice_id: u64,
+        payer: Address,
+    ) -> Option<InsurancePolicy> {
+        insurance::get_policy(&env, invoice_id, &payer)
+    }
+
+    /// Return the pool shares held by `provider` for `token`.
+    pub fn get_insurance_shares(env: Env, token: Address, provider: Address) -> i128 {
+        insurance::get_shares(&env, &token, &provider)
+    }
+
+    /// `true` once the admin has declared the invoice defaulted.
+    pub fn is_invoice_defaulted(env: Env, invoice_id: u64) -> bool {
+        insurance::is_defaulted(&env, invoice_id)
+    }
+
+    // -----------------------------------------------------------------------
+    // Lending marketplace (#856)
+    // -----------------------------------------------------------------------
+
+    /// List an escrow invoice as collateral for a loan. The lender is repaid
+    /// `repayment` out of the invoice release.
+    ///
+    /// # Events
+    /// Emits `("lending", "listed", invoice_id)`.
+    ///
+    /// # Errors
+    /// * [`Error::Unauthorized`] — `borrower` is not the invoice creator.
+    /// * [`Error::InvalidStatus`] — Invoice already settled.
+    /// * [`Error::ActiveLoanExists`] — Invoice already has an open/funded loan.
+    /// * [`Error::RecipientProposalExists`] — Invoice has a recipient proposal.
+    /// * [`Error::InvalidLoanTerms`] — Bad principal/repayment/expiry.
+    /// * [`Error::CapacityReached`] — Too many open listings.
+    pub fn list_invoice_for_loan(
+        env: Env,
+        borrower: Address,
+        invoice_id: u64,
+        principal: i128,
+        repayment: i128,
+        expires_at: u64,
+    ) -> Result<(), Error> {
+        lending::list(&env, borrower, invoice_id, principal, repayment, expires_at)
+    }
+
+    /// Withdraw an unfunded listing.
+    ///
+    /// # Events
+    /// Emits `("lending", "cancelled", invoice_id)`.
+    pub fn cancel_loan_listing(env: Env, borrower: Address, invoice_id: u64) -> Result<(), Error> {
+        lending::cancel(&env, borrower, invoice_id)
+    }
+
+    /// Fund an open listing: the principal moves from `lender` to the borrower.
+    ///
+    /// # Events
+    /// Emits `("lending", "funded", invoice_id)`.
+    pub fn fund_invoice_loan(env: Env, lender: Address, invoice_id: u64) -> Result<(), Error> {
+        lending::fund(&env, lender, invoice_id)
+    }
+
+    /// Repay a funded loan early, directly from the borrower to the lender.
+    ///
+    /// # Events
+    /// Emits `("lending", "repaid", invoice_id)`.
+    pub fn repay_invoice_loan(env: Env, borrower: Address, invoice_id: u64) -> Result<(), Error> {
+        lending::repay(&env, borrower, invoice_id)
+    }
+
+    /// Sell a funded loan position to `new_lender`.
+    ///
+    /// # Events
+    /// Emits `("lending", "transfer", invoice_id)`.
+    pub fn transfer_loan_position(
+        env: Env,
+        lender: Address,
+        invoice_id: u64,
+        new_lender: Address,
+    ) -> Result<(), Error> {
+        lending::transfer_position(&env, lender, invoice_id, new_lender)
+    }
+
+    /// Record a default on a funded loan whose invoice was refunded or
+    /// cancelled. Callable by anyone.
+    ///
+    /// # Events
+    /// Emits `("lending", "defaulted", invoice_id)`.
+    pub fn mark_loan_defaulted(env: Env, invoice_id: u64) -> Result<(), Error> {
+        lending::mark_defaulted(&env, invoice_id)
+    }
+
+    /// Return the loan listing for an invoice, if any.
+    pub fn get_loan_listing(env: Env, invoice_id: u64) -> Option<LoanListing> {
+        lending::get_loan(&env, invoice_id)
+    }
+
+    /// Return invoice IDs with an open, unexpired loan listing.
+    pub fn get_open_loan_listings(env: Env) -> Vec<u64> {
+        lending::open_listings(&env)
     }
 }
