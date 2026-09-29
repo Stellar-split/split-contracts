@@ -165,6 +165,8 @@ pub enum StorageKey {
     ReentrancyGuard,
     /// Issue #526: Minimum number of recipients required per invoice.
     MinRecipients,
+    /// Issue #882: Minimum derived reputation score to mint a reputation NFT.
+    RepNftThreshold,
 }
 
 // ---------------------------------------------------------------------------
@@ -226,6 +228,8 @@ pub enum InvoiceKey {
     TimeLock(u64),
     /// Issue #869: Counter of redemption tokens issued for an invoice.
     RedemptionTokenCount(u64),
+    /// Issue #881: Arbitration tournament record for a disputed invoice.
+    ArbitrationTournament(u64),
 }
 
 // ---------------------------------------------------------------------------
@@ -263,6 +267,8 @@ pub enum AddressKey {
     PayerHistory(Address),
     /// Issue #870: Aggregate performance metrics for a recipient.
     RecipientPerformance(Address),
+    /// Issue #882: Count of reputation NFTs minted for a creator.
+    RepNftCount(Address),
 }
 
 // ---------------------------------------------------------------------------
@@ -291,6 +297,10 @@ pub enum CompoundKey {
     RecipientDelegation(u64, Address),
     /// Issue #869: Per-(invoice, token_id) redemption token record.
     RedemptionToken(u64, u64),
+    /// Issue #881: Per-(invoice_id, arbiter) tournament vote record.
+    TournamentVote(u64, Address),
+    /// Issue #882: Per-(creator, nft_id) reputation NFT record.
+    RepNft(Address, u64),
 }
 
 // ---------------------------------------------------------------------------

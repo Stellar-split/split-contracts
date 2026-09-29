@@ -112,6 +112,12 @@ mod earnings_insurance;
 mod invoice_links;
 mod liquidity_pool;
 
+// Issue #881: Invoice dispute arbitration tournament.
+mod arbitration_tournament_ext;
+
+// Issue #882: Creator reputation NFT minting.
+mod rep_nft_ext;
+
 use error::ContractError;
 use validation::assert_valid_bps;
 use calc::{calc_platform_fee, funding_bps};
@@ -158,6 +164,10 @@ use types::{
     InvoiceTimeLock,
     // Issue #869
     RedemptionToken,
+    // Issue #881
+    ArbitrationTournament, ArbitrationTournamentStatus, TournamentVote,
+    // Issue #882
+    RepNFT,
 };
 
 // ---------------------------------------------------------------------------
@@ -168,7 +178,7 @@ fn governance_contract_key() -> Symbol {
     symbol_short!("gov_ctr")
 }
 
-fn admin_key() -> Symbol {
+pub(crate) fn admin_key() -> Symbol {
     symbol_short!("admin")
 }
 fn admins_key() -> Symbol {
@@ -444,7 +454,7 @@ fn set_created_ledger(env: &Env, id: u64) {
         INVOICE_HOT_TTL_LEDGERS,
     );
 }
-fn invoice_key(id: u64) -> (Symbol, u64) {
+pub(crate) fn invoice_key(id: u64) -> (Symbol, u64) {
     (symbol_short!("inv"), id)
 }
 fn invoice_ext_key(id: u64) -> (Symbol, u64) {
@@ -571,7 +581,7 @@ fn pending_payout_key(invoice_id: u64, recipient: &Address) -> (Symbol, u64, Add
 }
 
 /// Per-address reputation counter key (issue #24, #349).
-fn rep_key(payer: &Address) -> (Symbol, Address) {
+pub(crate) fn rep_key(payer: &Address) -> (Symbol, Address) {
     (symbol_short!("rep"), payer.clone())
 }
 
@@ -2057,7 +2067,7 @@ fn maybe_archive_invoice(env: &Env, id: u64) {
     events::invoice_archived(env, id);
 }
 
-fn load_invoice(env: &Env, id: u64) -> Invoice {
+pub(crate) fn load_invoice(env: &Env, id: u64) -> Invoice {
     maybe_archive_invoice(env, id);
     // Read hot fields from instance storage and extend TTL on every access.
     // For invoices not yet migrated the entry is absent; the persistent path
@@ -2242,7 +2252,7 @@ fn measure_invoice_bytes(env: &Env, invoice: &Invoice) -> u64 {
     (core.to_xdr(env).len() + ext.to_xdr(env).len() + ext2.to_xdr(env).len()) as u64
 }
 
-fn save_invoice(env: &Env, id: u64, invoice: &Invoice) {
+pub(crate) fn save_invoice(env: &Env, id: u64, invoice: &Invoice) {
     // Check no duplicate recipients
     for i in 0..invoice.recipients.len() {
         for j in (i + 1)..invoice.recipients.len() {
@@ -2572,7 +2582,7 @@ fn assert_not_paused(env: &Env) -> Result<(), ContractError> {
     Ok(())
 }
 
-fn require_not_paused(env: &Env) {
+pub(crate) fn require_not_paused(env: &Env) {
     migrations::require_schema_current(env);
     freeze_ext::require_not_frozen_global(env);
     assert_not_paused(env).expect("contract is paused");
@@ -19748,5 +19758,87 @@ impl SplitContract {
     pub fn get_stream_withdrawable(env: Env, stream_id: u64) -> i128 {
         let stream = load_payment_stream(&env, stream_id);
         stream_withdrawable_amount(&env, &stream)
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #881 — Invoice dispute arbitration tournament
+    // -----------------------------------------------------------------------
+
+    /// Open a dispute arbitration tournament for a disputed invoice.
+    ///
+    /// The invoice must already be in `Disputed` status.  `caller` must be
+    /// the invoice creator or the contract admin.  Minimum 3 arbiters; 1–5 rounds.
+    pub fn open_tournament(
+        env: Env,
+        caller: Address,
+        invoice_id: u64,
+        arbiters: Vec<Address>,
+        rounds: u32,
+    ) {
+        arbitration_tournament_ext::open_tournament(&env, caller, invoice_id, arbiters, rounds);
+    }
+
+    /// Cast a vote in the current tournament round for `invoice_id`.
+    ///
+    /// Each registered arbiter may vote exactly once per round.
+    pub fn cast_tournament_vote(
+        env: Env,
+        arbiter: Address,
+        invoice_id: u64,
+        decision: ResolveAction,
+    ) {
+        arbitration_tournament_ext::cast_tournament_vote(&env, arbiter, invoice_id, decision);
+    }
+
+    /// Advance the tournament to the next round or complete it.
+    ///
+    /// Callable by anyone once all arbiters have voted in the current round.
+    pub fn advance_tournament(env: Env, invoice_id: u64) {
+        arbitration_tournament_ext::advance_tournament(&env, invoice_id);
+    }
+
+    /// Return the current tournament state for `invoice_id`.
+    pub fn get_tournament(env: Env, invoice_id: u64) -> ArbitrationTournament {
+        arbitration_tournament_ext::get_tournament(&env, invoice_id)
+    }
+
+    /// Admin-only: cancel an in-progress tournament.
+    pub fn cancel_tournament(env: Env, admin: Address, invoice_id: u64) {
+        arbitration_tournament_ext::cancel_tournament(&env, admin, invoice_id);
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #882 — Creator reputation NFT minting
+    // -----------------------------------------------------------------------
+
+    /// Mint a reputation NFT for `creator` if their derived reputation score
+    /// meets the configured threshold.  Returns the new `nft_id`.
+    pub fn mint_rep_nft(env: Env, caller: Address, creator: Address) -> u64 {
+        rep_nft_ext::mint_rep_nft(&env, caller, creator)
+    }
+
+    /// Return the `RepNFT` record for `creator` at `nft_id`.
+    pub fn get_rep_nft(env: Env, creator: Address, nft_id: u64) -> RepNFT {
+        rep_nft_ext::get_rep_nft(&env, creator, nft_id)
+    }
+
+    /// Return the number of reputation NFTs minted for `creator`.
+    pub fn get_rep_nft_count(env: Env, creator: Address) -> u64 {
+        rep_nft_ext::get_rep_nft_count(&env, creator)
+    }
+
+    /// Admin-only: permanently delete a reputation NFT record.
+    pub fn burn_rep_nft(env: Env, admin: Address, creator: Address, nft_id: u64) {
+        rep_nft_ext::burn_rep_nft(&env, admin, creator, nft_id);
+    }
+
+    /// Admin-only: set the minimum derived score required to mint a reputation NFT.
+    pub fn set_rep_nft_threshold(env: Env, admin: Address, threshold: u32) {
+        rep_nft_ext::set_rep_nft_threshold(&env, admin, threshold);
+    }
+
+    /// Return the current minimum score required to mint a reputation NFT.
+    pub fn get_rep_nft_threshold(env: Env) -> u32 {
+        rep_nft_ext::get_rep_nft_threshold(&env)
     }
 }
