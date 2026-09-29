@@ -9119,3 +9119,446 @@ fn test_contribution_cap_no_cap_set_no_restriction() {
     assert_eq!(c.get_payer_contribution_total(&id, &payer), 1000);
 }
 
+
+// ===========================================================================
+// Issue #836 — Payment fallback recipient tests
+// ===========================================================================
+
+#[test]
+fn test_836_set_fallback_recipient_and_verify_stored() {
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let fallback = Address::generate(&env);
+
+    env.ledger().set_timestamp(1_000);
+    let id = make_invoice(&env, &c, &creator, &recipient, 500, &token_id, 9_999);
+
+    // Creator sets the fallback for `recipient`
+    c.set_fallback_recipient(&creator, &id, &recipient, &fallback);
+
+    // Verify event was emitted
+    let events = env.events().all();
+    let has_fb_set = events.iter().any(|e| {
+        let topics: Vec<soroban_sdk::Val> = e.0;
+        topics.len() >= 2 && {
+            let action = soroban_sdk::Symbol::try_from_val(&env, &topics.get(1).unwrap());
+            action.map(|s: soroban_sdk::Symbol| s == soroban_sdk::symbol_short!("fb_set")).unwrap_or(false)
+        }
+    });
+    assert!(has_fb_set, "fb_set event not emitted");
+}
+
+#[test]
+fn test_836_fallback_not_paid_when_recipient_unlocked() {
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+    let tk = token_client(&env, &token_id);
+
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let fallback = Address::generate(&env);
+    let payer = Address::generate(&env);
+
+    StellarAssetClient::new(&env, &token_id).mint(&payer, &500);
+    env.ledger().set_timestamp(1_000);
+
+    let id = make_invoice(&env, &c, &creator, &recipient, 500, &token_id, 9_999);
+    c.set_fallback_recipient(&creator, &id, &recipient, &fallback);
+
+    // Pay and auto-release — recipient is not locked, should go to primary recipient
+    c.pay(&payer, &id, &500_i128, &0_u64, &false, &false, &None);
+
+    assert!(tk.balance(&recipient) > 0, "primary recipient should be paid");
+    assert_eq!(tk.balance(&fallback), 0, "fallback should not be paid when recipient is unlocked");
+}
+
+#[test]
+fn test_836_fallback_paid_when_recipient_locked() {
+    // Use setup() + explicit initialize so we have a known admin for lock_recipient_share
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+    let tk = token_client(&env, &token_id);
+
+    let admin = Address::generate(&env);
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let fallback = Address::generate(&env);
+    let payer = Address::generate(&env);
+
+    let treasury = Address::generate(&env);
+    c.initialize(&admin, &0_i128, &treasury, &token_id, &0_u32, &None, &0_u32, &0_u32, &0_u64);
+    StellarAssetClient::new(&env, &token_id).mint(&payer, &1000);
+    env.ledger().set_timestamp(1_000);
+
+    let id = make_invoice(&env, &c, &creator, &recipient, 500, &token_id, 9_999);
+    c.set_fallback_recipient(&creator, &id, &recipient, &fallback);
+
+    // Admin locks the recipient (lock_recipient_share uses require_admin internally)
+    c.lock_recipient_share(&id, &recipient);
+
+    // Pay — triggers auto-release with fallback logic
+    c.pay(&payer, &id, &500_i128, &0_u64, &false, &false, &None);
+
+    assert_eq!(tk.balance(&recipient), 0, "locked recipient should not be paid");
+    assert!(tk.balance(&fallback) > 0, "fallback should be paid when recipient is locked");
+}
+
+// ===========================================================================
+// Issue #835 — Multi-signature invoice creation tests
+// ===========================================================================
+
+#[test]
+fn test_835_cosign_status_no_multisig() {
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    env.ledger().set_timestamp(1_000);
+    let id = make_invoice(&env, &c, &creator, &recipient, 100, &token_id, 9_999);
+
+    // No multisig configured — both counts should be 0
+    let (approvals, required) = c.get_cosign_status(&id);
+    assert_eq!(approvals, 0);
+    assert_eq!(required, 0);
+}
+
+#[test]
+fn test_835_cosign_invoice_2_of_3_partial() {
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let signer1 = Address::generate(&env);
+    let signer2 = Address::generate(&env);
+    let signer3 = Address::generate(&env);
+
+    let mut co_signers = Vec::new(&env);
+    co_signers.push_back(signer1.clone());
+    co_signers.push_back(signer2.clone());
+    co_signers.push_back(signer3.clone());
+
+    let mut recipients = Vec::new(&env);
+    recipients.push_back(recipient.clone());
+    let mut amounts = Vec::new(&env);
+    amounts.push_back(300_i128);
+
+    env.ledger().set_timestamp(1_000);
+
+    let options = InvoiceOptions {
+        co_signers: co_signers.clone(),
+        required_signatures: 2,
+        ..default_options(&env)
+    };
+
+    let id = c.create_invoice(&creator, &recipients, &amounts, &token_id, &9_999_u64, &options);
+
+    // Before any signatures
+    let (approvals, required) = c.get_cosign_status(&id);
+    assert_eq!(approvals, 0);
+    assert_eq!(required, 2);
+
+    // First signer approves
+    c.cosign_invoice(&signer1, &id);
+    let (approvals, required) = c.get_cosign_status(&id);
+    assert_eq!(approvals, 1);
+    assert_eq!(required, 2);
+
+    // Second signer approves — threshold met
+    c.cosign_invoice(&signer2, &id);
+    let (approvals, required) = c.get_cosign_status(&id);
+    assert_eq!(approvals, 2);
+    assert_eq!(required, 2);
+}
+
+#[test]
+fn test_835_cosign_duplicate_signer_rejected() {
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let signer1 = Address::generate(&env);
+
+    let mut co_signers = Vec::new(&env);
+    co_signers.push_back(signer1.clone());
+
+    let mut recipients = Vec::new(&env);
+    recipients.push_back(recipient.clone());
+    let mut amounts = Vec::new(&env);
+    amounts.push_back(100_i128);
+
+    env.ledger().set_timestamp(1_000);
+
+    let options = InvoiceOptions {
+        co_signers,
+        required_signatures: 1,
+        ..default_options(&env)
+    };
+
+    let id = c.create_invoice(&creator, &recipients, &amounts, &token_id, &9_999_u64, &options);
+    c.cosign_invoice(&signer1, &id);
+
+    // Second approval from same signer must fail with AlreadySigned
+    let result = c.try_cosign_invoice(&signer1, &id);
+    assert!(result.is_err(), "duplicate cosign should fail");
+}
+
+#[test]
+fn test_835_unauthorised_signer_rejected() {
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let signer1 = Address::generate(&env);
+    let stranger = Address::generate(&env);
+
+    let mut co_signers = Vec::new(&env);
+    co_signers.push_back(signer1.clone());
+
+    let mut recipients = Vec::new(&env);
+    recipients.push_back(recipient.clone());
+    let mut amounts = Vec::new(&env);
+    amounts.push_back(100_i128);
+
+    env.ledger().set_timestamp(1_000);
+
+    let options = InvoiceOptions {
+        co_signers,
+        required_signatures: 1,
+        ..default_options(&env)
+    };
+
+    let id = c.create_invoice(&creator, &recipients, &amounts, &token_id, &9_999_u64, &options);
+
+    // Stranger not in signer list must fail
+    let result = c.try_cosign_invoice(&stranger, &id);
+    assert!(result.is_err(), "unauthorised signer should be rejected");
+}
+
+// ===========================================================================
+// Issue #834 — On-chain invoice sentiment analysis tests
+// ===========================================================================
+
+#[test]
+fn test_834_submit_positive_sentiment() {
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+    let payer = Address::generate(&env);
+
+    StellarAssetClient::new(&env, &token_id).mint(&payer, &500);
+    env.ledger().set_timestamp(1_000);
+
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let id = make_invoice(&env, &c, &creator, &recipient, 100, &token_id, 9_999);
+
+    c.pay(&payer, &id, &100_i128, &0_u64, &false, &false, &None);
+    c.submit_sentiment(&payer, &id, &true);
+
+    let (pos, neg) = c.get_sentiment(&id);
+    assert_eq!(pos, 1);
+    assert_eq!(neg, 0);
+}
+
+#[test]
+fn test_834_submit_negative_sentiment() {
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+    let payer = Address::generate(&env);
+
+    StellarAssetClient::new(&env, &token_id).mint(&payer, &500);
+    env.ledger().set_timestamp(1_000);
+
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let id = make_invoice(&env, &c, &creator, &recipient, 100, &token_id, 9_999);
+
+    c.pay(&payer, &id, &100_i128, &0_u64, &false, &false, &None);
+    c.submit_sentiment(&payer, &id, &false);
+
+    let (pos, neg) = c.get_sentiment(&id);
+    assert_eq!(pos, 0);
+    assert_eq!(neg, 1);
+}
+
+#[test]
+fn test_834_double_vote_rejected() {
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+    let payer = Address::generate(&env);
+
+    StellarAssetClient::new(&env, &token_id).mint(&payer, &500);
+    env.ledger().set_timestamp(1_000);
+
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let id = make_invoice(&env, &c, &creator, &recipient, 100, &token_id, 9_999);
+
+    c.pay(&payer, &id, &100_i128, &0_u64, &false, &false, &None);
+    c.submit_sentiment(&payer, &id, &true);
+
+    let result = c.try_submit_sentiment(&payer, &id, &false);
+    assert!(result.is_err(), "double vote should be rejected");
+}
+
+#[test]
+fn test_834_non_payer_sentiment_rejected() {
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+    let payer = Address::generate(&env);
+    let stranger = Address::generate(&env);
+
+    StellarAssetClient::new(&env, &token_id).mint(&payer, &500);
+    env.ledger().set_timestamp(1_000);
+
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let id = make_invoice(&env, &c, &creator, &recipient, 100, &token_id, 9_999);
+
+    c.pay(&payer, &id, &100_i128, &0_u64, &false, &false, &None);
+
+    let result = c.try_submit_sentiment(&stranger, &id, &true);
+    assert!(result.is_err(), "non-payer sentiment should be rejected");
+}
+
+#[test]
+fn test_834_multiple_payers_sentiment() {
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+    let payer1 = Address::generate(&env);
+    let payer2 = Address::generate(&env);
+
+    StellarAssetClient::new(&env, &token_id).mint(&payer1, &300);
+    StellarAssetClient::new(&env, &token_id).mint(&payer2, &300);
+    env.ledger().set_timestamp(1_000);
+
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let id = make_invoice(&env, &c, &creator, &recipient, 200, &token_id, 9_999);
+
+    c.pay(&payer1, &id, &100_i128, &0_u64, &false, &false, &None);
+    c.pay(&payer2, &id, &100_i128, &0_u64, &false, &false, &None);
+
+    c.submit_sentiment(&payer1, &id, &true);
+    c.submit_sentiment(&payer2, &id, &false);
+
+    let (pos, neg) = c.get_sentiment(&id);
+    assert_eq!(pos, 1);
+    assert_eq!(neg, 1);
+}
+
+// ===========================================================================
+// Issue #833 — Creator bankruptcy protection tests
+// ===========================================================================
+
+#[test]
+fn test_833_creator_not_locked_initially() {
+    let (env, contract_id, _token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+    let creator = Address::generate(&env);
+
+    assert!(!c.get_creator_lock_status(&creator), "creator should not be locked initially");
+}
+
+/// Helper: set up a contract with a known admin for dispute tests.
+fn setup_with_known_admin() -> (Env, Address, Address, Address) {
+    let (env, contract_id, token_id) = setup();
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let c = client(&env, &contract_id);
+    c.initialize(&admin, &0_i128, &treasury, &token_id, &0_u32, &None, &0_u32, &0_u32, &0_u64);
+    (env, contract_id, token_id, admin)
+}
+
+#[test]
+fn test_833_raise_dispute_locks_creator() {
+    let (env, contract_id, token_id, admin) = setup_with_known_admin();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let arbiter = Address::generate(&env);
+
+    env.ledger().set_timestamp(1_000);
+    let id = make_invoice(&env, &c, &creator, &recipient, 100, &token_id, 9_999);
+    c.set_arbiter(&admin, &id, &arbiter);
+    c.raise_dispute(&id, &arbiter);
+
+    assert!(c.get_creator_lock_status(&creator), "creator should be locked after dispute raised");
+}
+
+#[test]
+fn test_833_locked_creator_cannot_create_invoice() {
+    let (env, contract_id, token_id, admin) = setup_with_known_admin();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let arbiter = Address::generate(&env);
+
+    env.ledger().set_timestamp(1_000);
+    let id = make_invoice(&env, &c, &creator, &recipient, 100, &token_id, 9_999);
+    c.set_arbiter(&admin, &id, &arbiter);
+    c.raise_dispute(&id, &arbiter);
+
+    // Creator is now locked — attempting to create another invoice must fail
+    let mut new_recipients = Vec::new(&env);
+    new_recipients.push_back(Address::generate(&env));
+    let mut new_amounts = Vec::new(&env);
+    new_amounts.push_back(50_i128);
+
+    let result = c.try_create_invoice(
+        &creator, &new_recipients, &new_amounts, &token_id, &99_999_u64, &default_options(&env),
+    );
+    assert!(result.is_err(), "locked creator should not be able to create invoices");
+}
+
+#[test]
+fn test_833_resolve_dispute_unlocks_creator() {
+    let (env, contract_id, token_id, admin) = setup_with_known_admin();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let arbiter = Address::generate(&env);
+
+    env.ledger().set_timestamp(1_000);
+    let id = make_invoice(&env, &c, &creator, &recipient, 100, &token_id, 9_999);
+    c.set_arbiter(&admin, &id, &arbiter);
+    c.raise_dispute(&id, &arbiter);
+
+    assert!(c.get_creator_lock_status(&creator));
+
+    // Arbiter resolves the dispute via refund
+    c.resolve_dispute(&id, &arbiter, &types::ResolveAction::Refund);
+
+    assert!(!c.get_creator_lock_status(&creator), "creator should be unlocked after dispute resolved");
+}
+
+#[test]
+fn test_833_unlock_creator_entry_point() {
+    let (env, contract_id, token_id, admin) = setup_with_known_admin();
+    let c = client(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let arbiter = Address::generate(&env);
+
+    env.ledger().set_timestamp(1_000);
+    let id = make_invoice(&env, &c, &creator, &recipient, 100, &token_id, 9_999);
+    c.set_arbiter(&admin, &id, &arbiter);
+    c.raise_dispute(&id, &arbiter);
+
+    // Resolve dispute (so invoice is no longer disputed)
+    c.resolve_dispute(&id, &arbiter, &types::ResolveAction::Refund);
+
+    // resolve_dispute auto-unlocks when count reaches 0
+    assert!(!c.get_creator_lock_status(&creator), "creator should be auto-unlocked after resolve");
+}
+

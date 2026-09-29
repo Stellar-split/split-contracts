@@ -1989,6 +1989,106 @@ pub fn batch_created(env: &Env, creator: &Address, invoice_ids: &Vec<u64>, count
 }
 
 // ---------------------------------------------------------------------------
+// Issue #836: Payment fallback recipient
+// ---------------------------------------------------------------------------
+
+/// Emitted when a fallback recipient is configured for a specific invoice recipient.
+/// Topics: (split, fb_set, invoice_id)
+/// Data:   (recipient, fallback)
+pub fn fallback_set(env: &Env, invoice_id: u64, recipient: &Address, fallback: &Address) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("fb_set"), invoice_id),
+        (recipient.clone(), fallback.clone()),
+    );
+}
+
+/// Emitted when a fallback recipient is used instead of the primary recipient.
+/// Topics: (split, fb_used, invoice_id)
+/// Data:   (original_recipient, fallback_recipient, amount)
+pub fn fallback_used(
+    env: &Env,
+    invoice_id: u64,
+    original: &Address,
+    fallback: &Address,
+    amount: i128,
+) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("fb_used"), invoice_id),
+        (original.clone(), fallback.clone(), amount),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Issue #835: Multi-signature invoice creation
+// ---------------------------------------------------------------------------
+
+/// Emitted when a co-signer approves an invoice.
+/// Topics: (split, cosigned, invoice_id)
+/// Data:   (signer, approvals_so_far, required)
+pub fn invoice_cosigned(
+    env: &Env,
+    invoice_id: u64,
+    signer: &Address,
+    approvals_so_far: u32,
+    required: u32,
+) {
+    let event_seq = next_seq(env, invoice_id);
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("cosigned"), invoice_id),
+        (signer.clone(), approvals_so_far, required, event_seq),
+    );
+}
+
+/// Emitted when the required number of co-signer approvals is reached.
+/// Topics: (split, cs_done, invoice_id)
+/// Data:   invoice_id
+pub fn invoice_cosign_complete(env: &Env, invoice_id: u64) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("cs_done"), invoice_id),
+        invoice_id,
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Issue #834: On-chain invoice sentiment analysis
+// ---------------------------------------------------------------------------
+
+/// Emitted when a payer submits a sentiment signal for an invoice.
+/// Topics: (split, sentmt, invoice_id)
+/// Data:   (payer, positive)
+pub fn sentiment_submitted(env: &Env, invoice_id: u64, payer: &Address, positive: bool) {
+    let event_seq = next_seq(env, invoice_id);
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("sentmt"), invoice_id),
+        (payer.clone(), positive, event_seq),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Issue #833: Creator bankruptcy protection
+// ---------------------------------------------------------------------------
+
+/// Emitted when a creator is locked due to one or more active disputes.
+/// Topics: (split, cr_lkd)
+/// Data:   (creator, dispute_count)
+pub fn creator_locked(env: &Env, creator: &Address, dispute_count: u32) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("cr_lkd")),
+        (creator.clone(), dispute_count),
+    );
+}
+
+/// Emitted when a creator is unlocked after all disputes are resolved.
+/// Topics: (split, cr_ulk)
+/// Data:   creator
+pub fn creator_unlocked(env: &Env, creator: &Address) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("cr_ulk")),
+        creator.clone(),
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Unit tests for the per-invoice event sequence counter (issue #708)
 // ---------------------------------------------------------------------------
 
