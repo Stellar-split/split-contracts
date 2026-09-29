@@ -70,6 +70,18 @@ mod migrations;
 
 mod validation;
 
+// Issue #864: recipient performance SLA guarantees.
+pub mod sla;
+
+// Issue #863: invoice futures contracts for payment predictions.
+pub mod futures;
+
+// Issue #862: invoice bundling with smart grouping.
+pub mod bundling;
+
+// Issue #861: invoice securitization for tokenization.
+pub mod securitization;
+
 use error::ContractError;
 use soroban_sdk::crypto::bls12_381::{Fr, G1Affine};
 use soroban_sdk::xdr::ToXdr;

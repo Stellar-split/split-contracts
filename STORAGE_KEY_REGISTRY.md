@@ -154,6 +154,27 @@ Keys with two or three fields for efficient multi-dimensional lookups.
 | `TemplateVersion(creator, name, version)` | `(Symbol, Address, Symbol, u32)` | #210 | InvoiceTemplate | Versioned template for (creator, name, version) |
 | `TemplateVersionCount(creator, name)` | `(Symbol, Address, Symbol)` | #210 | u32 | Template version counter for (creator, name) |
 
+## Feature-module keys (`symbol_short!` tuples)
+
+Keys owned by self-contained feature modules. Each is a `symbol_short!` tuple defined next to the code that uses it.
+
+| Key | Shape | Tier | Issue | Value | Module | Purpose |
+|-----|-------|------|-------|-------|--------|---------|
+| `sla_rec` | `(Symbol, u64, Address)` | persistent | #864 | `RecipientSla` | `sla.rs` | SLA for (invoice_id, recipient) |
+| `sla_perf` | `(Symbol, Address)` | persistent | #864 | `RecipientPerformance` | `sla.rs` | Recipient's cross-invoice SLA record |
+| `fut_ctr` | `Symbol` | instance | #863 | u64 | `futures.rs` | Last issued future ID |
+| `fut_mkt` | `(Symbol, u64)` | persistent | #863 | `InvoiceFuture` | `futures.rs` | Futures market by ID |
+| `fut_pos` | `(Symbol, u64, Address)` | persistent | #863 | `FuturePosition` | `futures.rs` | Trader position in a market |
+| `fut_inv` | `(Symbol, u64)` | persistent | #863 | `Vec<u64>` | `futures.rs` | Future IDs opened on an invoice |
+| `bdl_ctr` | `Symbol` | instance | #862 | u64 | `bundling.rs` | Last issued bundle ID |
+| `bdl_rec` | `(Symbol, u64)` | persistent | #862 | `InvoiceBundle` | `bundling.rs` | Bundle by ID |
+| `bdl_inv` | `(Symbol, u64)` | persistent | #862 | u64 | `bundling.rs` | Live bundle ID for an invoice |
+| `bdl_cr` | `(Symbol, Address)` | persistent | #862 | `Vec<u64>` | `bundling.rs` | Bundle IDs created by a creator |
+| `sec_ctr` | `Symbol` | instance | #861 | u64 | `securitization.rs` | Last issued pool ID |
+| `sec_pool` | `(Symbol, u64)` | persistent | #861 | `SecuritizationPool` | `securitization.rs` | Securitization pool by ID |
+| `sec_hold` | `(Symbol, u64, SecTranche, Address)` | persistent | #861 | `SecHolding` | `securitization.rs` | Holder's units in one tranche |
+| `sec_inv` | `(Symbol, u64, Address)` | persistent | #861 | u64 | `securitization.rs` | Pool backing (invoice_id, originator) receivable |
+
 ## Migration Guide
 
 When renaming a storage key between contract versions, use the migration helpers in `storage_keys.rs`:
