@@ -1,26 +1,29 @@
-# Build artifacts
-target/
-*.wasm
-
-# Cargo lock (workspace-level managed separately; keep for reproducibility)
-# Cargo.lock  ← intentionally tracked for binary crates
-
-# Test snapshots (soroban / insta)
-**/*.snap
-**/*.snap.new
-snapshots/
-.snapshots/
-test_snapshots/
-**/test_snapshots/
-
-# Environment / secrets
 # ============================================================
-# Build output
+# Build artifacts
 # ============================================================
 target/
 *.wasm
 wasm32-unknown-unknown/
 **/wasm32-unknown-unknown/
+**/*.rs.bk
+**/*.profraw
+**/*.profdata
+Cargo.lock.bak
+
+# ============================================================
+# Test snapshots and generated test artefacts
+# ============================================================
+**/__snapshots__/
+**/test_snapshots/
+tests/snapshots/
+tests/fixtures/
+*.snap
+*.snap.new
+*.snap.orig
+*.snap.bak
+*.snapshot
+snapshots/
+.snapshots/
 
 # ============================================================
 # Environment / secrets
@@ -29,25 +32,6 @@ wasm32-unknown-unknown/
 .env.local
 .env.*.local
 
-# OS artifacts
-.DS_Store
-Thumbs.db
-desktop.ini
-
-# Editor / IDE
-.vscode/
-.idea/
-*.iml
-*.swp
-*.swo
-*~
-
-# Stellar CLI artifacts
-.stellar/
-
-# Misc
-*.bak
-*.orig
 # ============================================================
 # OS / editor artefacts
 # ============================================================
@@ -56,23 +40,12 @@ Thumbs.db
 desktop.ini
 .vscode/
 .idea/
+*.iml
 *.swp
 *.swo
 *~
 *.sublime-project
 *.sublime-workspace
-
-# ============================================================
-# Test snapshots and generated test artefacts
-# ============================================================
-**/__snapshots__/
-**/test_snapshots/
-*.snap
-*.snap.orig
-*.snapshot
-*.snap.bak
-tests/snapshots/
-tests/fixtures/
 
 # ============================================================
 # Stellar CLI
@@ -123,16 +96,20 @@ dist/
 .cache/
 
 # ============================================================
-# Rust / Cargo artefacts not caught by target/
+# Cargo audit / deny cache
 # ============================================================
-**/*.rs.bk
-Cargo.lock.bak
-**/*.profraw
-**/*.profdata
+.cargo-ok
+cargo-audit.toml
 
 # ============================================================
-# Fuzz corpus (generated during fuzzing runs — seed files are
-# committed via explicit !fuzz/corpus/<target>/seed_* rules)
+# Python / misc tooling
+# ============================================================
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# ============================================================
+# Fuzz corpus — seed files are explicitly re-included below
 # ============================================================
 fuzz/corpus/*
 !fuzz/corpus/fuzz_sequence/seed_zeros
@@ -155,16 +132,3 @@ fuzz/corpus/*
 !fuzz/corpus/fuzz_release/seed_empty
 !fuzz/corpus/fuzz_release/seed_mixed
 !fuzz/corpus/fuzz_release/seed_ones
-
-# ============================================================
-# Cargo audit / deny cache
-# ============================================================
-.cargo-ok
-cargo-audit.toml
-
-# ============================================================
-# Python / misc tooling
-# ============================================================
-__pycache__/
-*.pyc
-.pytest_cache/
