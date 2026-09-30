@@ -112,6 +112,9 @@ mod earnings_insurance;
 mod invoice_links;
 mod liquidity_pool;
 
+// Issue #880: recipient reward multiplier system.
+mod reward_multiplier_ext;
+
 use error::ContractError;
 use validation::assert_valid_bps;
 use calc::{calc_platform_fee, funding_bps};
