@@ -112,6 +112,9 @@ mod earnings_insurance;
 mod invoice_links;
 mod liquidity_pool;
 
+// Issue #879: invoice compliance attestation system.
+mod compliance_attest_ext;
+
 use error::ContractError;
 use validation::assert_valid_bps;
 use calc::{calc_platform_fee, funding_bps};
