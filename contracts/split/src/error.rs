@@ -154,6 +154,14 @@ pub enum ContractError {
     BatchTooLarge = 69,
     /// Issue #745: The invoice has already been expired and all payers refunded.
     InvoiceExpired = 70,
+    /// Issue #836: No fallback recipient has been configured for this invoice recipient.
+    FallbackRecipientNotSet = 71,
+    /// Issue #835: The signer is not in the configured co-signer list for this invoice.
+    SignerNotAuthorized = 72,
+    /// Issue #835: The signer has already approved this invoice.
+    AlreadySigned = 73,
+    /// Issue #833: The creator is locked due to one or more pending disputes.
+    CreatorLocked = 74,
     /// Issue #822: Payment priority level is outside the valid range (0–2).
     InvalidPriority = 71,
     /// Issue #825: The pending payment has not yet reached the required
@@ -181,10 +189,10 @@ pub enum ContractError {
     TokenExpired = 82,
     /// Issue #869: Caller is not the current token holder.
     NotTokenHolder = 83,
-    /// Issue #878: No vesting schedule exists for this invoice.
-    VestingNotFound = 84,
-    /// Issue #878: The cliff timestamp has not yet been reached; nothing is claimable.
-    VestingCliffNotReached = 85,
-    /// Issue #878: The vesting schedule is complete; all tokens have been claimed.
-    VestingAlreadyComplete = 86,
+    /// Issue #881: No arbitration tournament exists for this invoice.
+    TournamentNotFound = 84,
+    /// Issue #881: An arbitration tournament is already open for this invoice.
+    TournamentAlreadyOpen = 85,
+    /// Issue #882: Creator's reputation score is below the NFT minting threshold.
+    RepScoreTooLow = 86,
 }
