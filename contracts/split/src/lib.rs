@@ -112,8 +112,11 @@ mod earnings_insurance;
 mod invoice_links;
 mod liquidity_pool;
 
-// Issue #880: recipient reward multiplier system.
-mod reward_multiplier_ext;
+// Issue #881: Invoice dispute arbitration tournament.
+mod arbitration_tournament_ext;
+
+// Issue #882: Creator reputation NFT minting.
+mod rep_nft_ext;
 
 use error::ContractError;
 use validation::assert_valid_bps;
@@ -161,6 +164,10 @@ use types::{
     InvoiceTimeLock,
     // Issue #869
     RedemptionToken,
+    // Issue #881
+    ArbitrationTournament, ArbitrationTournamentStatus, TournamentVote,
+    // Issue #882
+    RepNFT,
 };
 
 // ---------------------------------------------------------------------------
@@ -171,7 +178,7 @@ fn governance_contract_key() -> Symbol {
     symbol_short!("gov_ctr")
 }
 
-fn admin_key() -> Symbol {
+pub(crate) fn admin_key() -> Symbol {
     symbol_short!("admin")
 }
 fn admins_key() -> Symbol {
@@ -447,7 +454,7 @@ fn set_created_ledger(env: &Env, id: u64) {
         INVOICE_HOT_TTL_LEDGERS,
     );
 }
-fn invoice_key(id: u64) -> (Symbol, u64) {
+pub(crate) fn invoice_key(id: u64) -> (Symbol, u64) {
     (symbol_short!("inv"), id)
 }
 fn invoice_ext_key(id: u64) -> (Symbol, u64) {
@@ -574,7 +581,7 @@ fn pending_payout_key(invoice_id: u64, recipient: &Address) -> (Symbol, u64, Add
 }
 
 /// Per-address reputation counter key (issue #24, #349).
-fn rep_key(payer: &Address) -> (Symbol, Address) {
+pub(crate) fn rep_key(payer: &Address) -> (Symbol, Address) {
     (symbol_short!("rep"), payer.clone())
 }
 
@@ -1824,6 +1831,76 @@ fn total_released_bps_key(invoice_id: u64) -> (Symbol, u64) {
 }
 
 // ---------------------------------------------------------------------------
+// Issue #836: Payment fallback recipient storage keys
+// ---------------------------------------------------------------------------
+
+/// Fallback recipient for a specific (invoice_id, primary_recipient) pair.
+/// Key: (Symbol "fb_rcpt", invoice_id, recipient) → Address
+fn fallback_recipient_key(invoice_id: u64, recipient: &Address) -> (Symbol, u64, Address) {
+    (symbol_short!("fb_rcpt"), invoice_id, recipient.clone())
+}
+
+// ---------------------------------------------------------------------------
+// Issue #835: Multi-signature invoice creation storage keys
+// ---------------------------------------------------------------------------
+
+/// Required number of co-signer approvals for an invoice.
+/// Key: (Symbol "ms_req", invoice_id) → u32
+fn multisig_required_key(invoice_id: u64) -> (Symbol, u64) {
+    (symbol_short!("ms_req"), invoice_id)
+}
+
+/// Configured co-signer addresses for an invoice.
+/// Key: (Symbol "ms_sgrs", invoice_id) → Vec<Address>
+fn multisig_signers_key(invoice_id: u64) -> (Symbol, u64) {
+    (symbol_short!("ms_sgrs"), invoice_id)
+}
+
+/// Addresses that have already approved an invoice.
+/// Key: (Symbol "ms_appr", invoice_id) → Vec<Address>
+fn multisig_approvals_key(invoice_id: u64) -> (Symbol, u64) {
+    (symbol_short!("ms_appr"), invoice_id)
+}
+
+// ---------------------------------------------------------------------------
+// Issue #834: On-chain sentiment analysis storage keys
+// ---------------------------------------------------------------------------
+
+/// Count of positive sentiment signals for an invoice.
+/// Key: (Symbol "sent_pos", invoice_id) → u32
+fn sentiment_positive_key(invoice_id: u64) -> (Symbol, u64) {
+    (symbol_short!("sent_pos"), invoice_id)
+}
+
+/// Count of negative sentiment signals for an invoice.
+/// Key: (Symbol "sent_neg", invoice_id) → u32
+fn sentiment_negative_key(invoice_id: u64) -> (Symbol, u64) {
+    (symbol_short!("sent_neg"), invoice_id)
+}
+
+/// Whether a specific payer has already submitted sentiment for an invoice.
+/// Key: (Symbol "sent_pay", invoice_id, payer) → bool
+fn payer_sentiment_key(invoice_id: u64, payer: &Address) -> (Symbol, u64, Address) {
+    (symbol_short!("sent_pay"), invoice_id, payer.clone())
+}
+
+// ---------------------------------------------------------------------------
+// Issue #833: Creator bankruptcy protection storage keys
+// ---------------------------------------------------------------------------
+
+/// Whether a creator is currently locked due to pending disputes.
+/// Key: (Symbol "cr_lock", creator) → bool
+fn creator_lock_key(creator: &Address) -> (Symbol, Address) {
+    (symbol_short!("cr_lock"), creator.clone())
+}
+
+/// Number of pending disputes against a creator's invoices.
+/// Key: (Symbol "cr_disp", creator) → u32
+fn creator_dispute_count_key(creator: &Address) -> (Symbol, Address) {
+    (symbol_short!("cr_disp"), creator.clone())
+}
+
+// ---------------------------------------------------------------------------
 // Invoice storage helpers
 // ---------------------------------------------------------------------------
 
@@ -2060,7 +2137,7 @@ fn maybe_archive_invoice(env: &Env, id: u64) {
     events::invoice_archived(env, id);
 }
 
-fn load_invoice(env: &Env, id: u64) -> Invoice {
+pub(crate) fn load_invoice(env: &Env, id: u64) -> Invoice {
     maybe_archive_invoice(env, id);
     // Read hot fields from instance storage and extend TTL on every access.
     // For invoices not yet migrated the entry is absent; the persistent path
@@ -2245,7 +2322,7 @@ fn measure_invoice_bytes(env: &Env, invoice: &Invoice) -> u64 {
     (core.to_xdr(env).len() + ext.to_xdr(env).len() + ext2.to_xdr(env).len()) as u64
 }
 
-fn save_invoice(env: &Env, id: u64, invoice: &Invoice) {
+pub(crate) fn save_invoice(env: &Env, id: u64, invoice: &Invoice) {
     // Check no duplicate recipients
     for i in 0..invoice.recipients.len() {
         for j in (i + 1)..invoice.recipients.len() {
@@ -2575,7 +2652,7 @@ fn assert_not_paused(env: &Env) -> Result<(), ContractError> {
     Ok(())
 }
 
-fn require_not_paused(env: &Env) {
+pub(crate) fn require_not_paused(env: &Env) {
     migrations::require_schema_current(env);
     freeze_ext::require_not_frozen_global(env);
     assert_not_paused(env).expect("contract is paused");
@@ -4189,6 +4266,21 @@ impl SplitContract {
         invoice.disputed = true;
         save_invoice(&env, invoice_id, &invoice);
         append_audit_entry(&env, invoice_id, symbol_short!("dispute"), &arbiter);
+
+        // Issue #833: increment dispute count and lock creator if >= 1.
+        let dispute_count: u32 = env
+            .storage()
+            .persistent()
+            .get(&creator_dispute_count_key(&invoice.creator))
+            .unwrap_or(0);
+        let new_dispute_count = dispute_count.saturating_add(1);
+        env.storage()
+            .persistent()
+            .set(&creator_dispute_count_key(&invoice.creator), &new_dispute_count);
+        env.storage()
+            .persistent()
+            .set(&creator_lock_key(&invoice.creator), &true);
+        events::creator_locked(&env, &invoice.creator, new_dispute_count);
         // Issue #763: record the dispute in the per-invoice history ring buffer.
         append_history_entry(&env, invoice_id, Symbol::new(&env, "dispute"), &arbiter, None);
     }
@@ -4279,6 +4371,25 @@ impl SplitContract {
                         .expect("total_refunded overflow"),
                 );
             }
+        }
+
+        // Issue #833: decrement dispute count and unlock creator if no more pending disputes.
+        // Re-load invoice to get the creator address after potential mutations above.
+        let resolved_invoice = load_invoice(&env, invoice_id);
+        let dispute_count: u32 = env
+            .storage()
+            .persistent()
+            .get(&creator_dispute_count_key(&resolved_invoice.creator))
+            .unwrap_or(0);
+        let new_dispute_count = dispute_count.saturating_sub(1);
+        env.storage()
+            .persistent()
+            .set(&creator_dispute_count_key(&resolved_invoice.creator), &new_dispute_count);
+        if new_dispute_count == 0 {
+            env.storage()
+                .persistent()
+                .set(&creator_lock_key(&resolved_invoice.creator), &false);
+            events::creator_unlocked(&env, &resolved_invoice.creator);
         }
     }
 
@@ -5626,6 +5737,16 @@ impl SplitContract {
         creator.require_auth();
         let index_creator = creator.clone();
 
+        // Issue #833: reject creator if they are locked due to pending disputes.
+        let creator_is_locked: bool = env
+            .storage()
+            .persistent()
+            .get(&creator_lock_key(&creator))
+            .unwrap_or(false);
+        if creator_is_locked {
+            panic_with_error!(&env, ContractError::CreatorLocked);
+        }
+
         // Issue #439: check creator cancellation cooldown.
         let current_ledger = env.ledger().sequence() as u64;
         let cooldown_until: u64 = env
@@ -5698,6 +5819,9 @@ impl SplitContract {
             }
         }
 
+        // Issue #835: capture co_signers and required_signatures before options is consumed.
+        let ms835_signers = options.co_signers.clone();
+        let ms835_required = options.required_signatures;
         let id = Self::_create_invoice_inner(
             &env,
             creator,
@@ -5788,6 +5912,16 @@ impl SplitContract {
 
         apply_overfunding_policy(&env, id, overfunding_policy);
         apply_cosigner_config(&env, id, cosigners, cosigner_threshold);
+
+        // Issue #835: store multisig creation config for cosign_invoice / get_cosign_status.
+        if ms835_required > 0 && !ms835_signers.is_empty() {
+            env.storage()
+                .persistent()
+                .set(&multisig_required_key(id), &ms835_required);
+            env.storage()
+                .persistent()
+                .set(&multisig_signers_key(id), &ms835_signers);
+        }
         // Issue #747: apply per-payer contribution cap if specified.
         if let Some(cap) = options.ext.max_contribution_per_payer {
             let mut invoice = load_invoice(&env, id);
@@ -5858,6 +5992,9 @@ impl SplitContract {
         let cosigner_threshold = options.cosigner_threshold;
         let tiers = options.ext.tiers.clone();
 
+        // Issue #835: capture co_signers and required_signatures before options is consumed.
+        let ms835_signers = options.co_signers.clone();
+        let ms835_required = options.required_signatures;
         let id = Self::_create_invoice_inner(
             &env,
             creator,
@@ -5928,6 +6065,16 @@ impl SplitContract {
 
         apply_overfunding_policy(&env, id, overfunding_policy);
         apply_cosigner_config(&env, id, cosigners, cosigner_threshold);
+
+        // Issue #835: store multisig creation config for cosign_invoice / get_cosign_status.
+        if ms835_required > 0 && !ms835_signers.is_empty() {
+            env.storage()
+                .persistent()
+                .set(&multisig_required_key(id), &ms835_required);
+            env.storage()
+                .persistent()
+                .set(&multisig_signers_key(id), &ms835_signers);
+        }
         // Issue #747: apply per-payer contribution cap if specified.
         if let Some(cap) = options.ext.max_contribution_per_payer {
             let mut invoice = load_invoice(&env, id);
@@ -11965,8 +12112,40 @@ impl SplitContract {
                 .get(&recipient_lock_key(invoice_id, &recipient))
                 .unwrap_or(false);
             if is_locked {
-                unreleased_locked = unreleased_locked.saturating_add(capped_proportional);
-                payouts.push_back(0i128);
+                // Issue #836: check for a configured fallback recipient.
+                let fallback: Option<Address> = env
+                    .storage()
+                    .persistent()
+                    .get(&fallback_recipient_key(invoice_id, &recipient));
+                if let Some(fallback_addr) = fallback {
+                    // Pay the fallback instead of accumulating to unreleased.
+                    distributed += capped_proportional;
+                    let tax = checked_bps_of(capped_proportional, invoice.tax_bps, 10_000u128)
+                        .expect("ArithmeticOverflow");
+                    total_tax += tax;
+                    let post_tax = capped_proportional - tax;
+                    let is_waived = waivers.iter().any(|a| a == fallback_addr);
+                    let fee = if is_waived || funded == 0 {
+                        0
+                    } else {
+                        checked_proportion(post_tax as u128, total_platform_fee as u128, funded as u128)
+                            .expect("ArithmeticOverflow")
+                    };
+                    total_fee += fee;
+                    let net_payout = (post_tax - fee).max(0);
+                    if net_payout > 0 {
+                        funding_token_client.transfer(
+                            &env.current_contract_address(),
+                            &fallback_addr,
+                            &net_payout,
+                        );
+                        events::fallback_used(env, invoice_id, &recipient, &fallback_addr, net_payout);
+                    }
+                    payouts.push_back(net_payout);
+                } else {
+                    unreleased_locked = unreleased_locked.saturating_add(capped_proportional);
+                    payouts.push_back(0i128);
+                }
                 continue;
             }
 
@@ -18706,6 +18885,251 @@ impl SplitContract {
     }
 
     // -----------------------------------------------------------------------
+    // Issue #836: Payment fallback recipient
+    // -----------------------------------------------------------------------
+
+    /// Set a fallback recipient for a specific primary recipient on an invoice.
+    /// Only callable by the invoice creator.
+    ///
+    /// If the primary recipient is locked (RecipientShare.locked == true) at
+    /// release time, the contract will pay the fallback address instead.
+    pub fn set_fallback_recipient(
+        env: Env,
+        caller: Address,
+        invoice_id: u64,
+        recipient: Address,
+        fallback: Address,
+    ) {
+        bump_invoice_ttl(&env);
+        caller.require_auth();
+        let invoice = load_invoice(&env, invoice_id);
+        if invoice.creator != caller {
+            panic_with_error!(&env, ContractError::NotAuthorized);
+        }
+        // Verify recipient is actually on this invoice.
+        let found = invoice.recipients.iter().any(|r| r == recipient);
+        if !found {
+            panic_with_error!(&env, ContractError::RecipientNotFound);
+        }
+        env.storage()
+            .persistent()
+            .set(&fallback_recipient_key(invoice_id, &recipient), &fallback);
+        events::fallback_set(&env, invoice_id, &recipient, &fallback);
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #835: Multi-signature invoice creation
+    // -----------------------------------------------------------------------
+
+    /// Record approval of an invoice by a configured co-signer.
+    /// Emits `invoice_cosigned` on each approval and `invoice_cosign_complete`
+    /// when the required threshold is reached.
+    pub fn cosign_invoice(env: Env, signer: Address, invoice_id: u64) {
+        bump_invoice_ttl(&env);
+        signer.require_auth();
+
+        let required: u32 = env
+            .storage()
+            .persistent()
+            .get(&multisig_required_key(invoice_id))
+            .unwrap_or(0);
+
+        // If no multisig is configured, nothing to do.
+        if required == 0 {
+            panic_with_error!(&env, ContractError::InvalidStatus);
+        }
+
+        let signers: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&multisig_signers_key(invoice_id))
+            .unwrap_or_else(|| Vec::new(&env));
+
+        // Check signer is authorised.
+        let is_authorised = signers.iter().any(|s| s == signer);
+        if !is_authorised {
+            panic_with_error!(&env, ContractError::SignerNotAuthorized);
+        }
+
+        let mut approvals: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&multisig_approvals_key(invoice_id))
+            .unwrap_or_else(|| Vec::new(&env));
+
+        // Check signer hasn't already approved.
+        let already_signed = approvals.iter().any(|a| a == signer);
+        if already_signed {
+            panic_with_error!(&env, ContractError::AlreadySigned);
+        }
+
+        approvals.push_back(signer.clone());
+        env.storage()
+            .persistent()
+            .set(&multisig_approvals_key(invoice_id), &approvals);
+
+        let approvals_so_far = approvals.len();
+        events::invoice_cosigned(&env, invoice_id, &signer, approvals_so_far, required);
+
+        if approvals_so_far >= required {
+            events::invoice_cosign_complete(&env, invoice_id);
+        }
+    }
+
+    /// Return the current co-signer approval status for an invoice.
+    /// Returns `(approvals_count, required)`.
+    pub fn get_cosign_status(env: Env, invoice_id: u64) -> (u32, u32) {
+        bump_invoice_ttl(&env);
+        let required: u32 = env
+            .storage()
+            .persistent()
+            .get(&multisig_required_key(invoice_id))
+            .unwrap_or(0);
+        let approvals: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&multisig_approvals_key(invoice_id))
+            .unwrap_or_else(|| Vec::new(&env));
+        (approvals.len(), required)
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #834: On-chain invoice sentiment analysis
+    // -----------------------------------------------------------------------
+
+    /// Submit a satisfaction signal (positive = true for thumbs-up, false for
+    /// thumbs-down) for an invoice. The caller must have made at least one
+    /// payment on this invoice. Each payer may only vote once.
+    pub fn submit_sentiment(
+        env: Env,
+        payer: Address,
+        invoice_id: u64,
+        positive: bool,
+    ) {
+        bump_invoice_ttl(&env);
+        payer.require_auth();
+
+        let invoice = load_invoice(&env, invoice_id);
+
+        // Verify payer has actually paid on this invoice.
+        let has_paid = invoice.payments.iter().any(|p| p.payer == payer);
+        if !has_paid {
+            panic_with_error!(&env, ContractError::NotAuthorized);
+        }
+
+        // Prevent double-voting.
+        let already_voted: bool = env
+            .storage()
+            .persistent()
+            .get(&payer_sentiment_key(invoice_id, &payer))
+            .unwrap_or(false);
+        if already_voted {
+            panic_with_error!(&env, ContractError::AlreadyRated);
+        }
+
+        // Record vote.
+        env.storage()
+            .persistent()
+            .set(&payer_sentiment_key(invoice_id, &payer), &true);
+
+        if positive {
+            let count: u32 = env
+                .storage()
+                .persistent()
+                .get(&sentiment_positive_key(invoice_id))
+                .unwrap_or(0);
+            env.storage()
+                .persistent()
+                .set(&sentiment_positive_key(invoice_id), &(count + 1));
+        } else {
+            let count: u32 = env
+                .storage()
+                .persistent()
+                .get(&sentiment_negative_key(invoice_id))
+                .unwrap_or(0);
+            env.storage()
+                .persistent()
+                .set(&sentiment_negative_key(invoice_id), &(count + 1));
+        }
+
+        events::sentiment_submitted(&env, invoice_id, &payer, positive);
+    }
+
+    /// Return `(positive_count, negative_count)` for an invoice.
+    pub fn get_sentiment(env: Env, invoice_id: u64) -> (u32, u32) {
+        bump_invoice_ttl(&env);
+        let pos: u32 = env
+            .storage()
+            .persistent()
+            .get(&sentiment_positive_key(invoice_id))
+            .unwrap_or(0);
+        let neg: u32 = env
+            .storage()
+            .persistent()
+            .get(&sentiment_negative_key(invoice_id))
+            .unwrap_or(0);
+        (pos, neg)
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #833: Creator bankruptcy protection
+    // -----------------------------------------------------------------------
+
+    /// Return `true` if the creator is currently locked due to pending disputes.
+    pub fn get_creator_lock_status(env: Env, creator: Address) -> bool {
+        bump_invoice_ttl(&env);
+        env.storage()
+            .persistent()
+            .get(&creator_lock_key(&creator))
+            .unwrap_or(false)
+    }
+
+    /// Unlock a creator after all their disputes are resolved.
+    /// Verifies that the given `invoice_id` is no longer disputed before
+    /// decrementing the dispute count.
+    pub fn unlock_creator(env: Env, caller: Address, invoice_id: u64) {
+        bump_invoice_ttl(&env);
+        caller.require_auth();
+
+        let invoice = load_invoice(&env, invoice_id);
+
+        // Only the invoice creator (or an admin) may unlock.
+        let is_admin: bool = env
+            .storage()
+            .instance()
+            .get(&admin_key())
+            .map(|a: Address| a == caller)
+            .unwrap_or(false);
+        if invoice.creator != caller && !is_admin {
+            panic_with_error!(&env, ContractError::NotAuthorized);
+        }
+
+        // Invoice must no longer be disputed.
+        if invoice.disputed {
+            panic_with_error!(&env, ContractError::InvoiceDisputed);
+        }
+
+        let count: u32 = env
+            .storage()
+            .persistent()
+            .get(&creator_dispute_count_key(&invoice.creator))
+            .unwrap_or(0);
+
+        let new_count = count.saturating_sub(1);
+        env.storage()
+            .persistent()
+            .set(&creator_dispute_count_key(&invoice.creator), &new_count);
+
+        if new_count == 0 {
+            env.storage()
+                .persistent()
+                .set(&creator_lock_key(&invoice.creator), &false);
+            events::creator_unlocked(&env, &invoice.creator);
+        }
+    }
+}
+
+    // -----------------------------------------------------------------------
     // Issue #760: Milestone-based sequential unlocking
     // -----------------------------------------------------------------------
 
@@ -19751,5 +20175,87 @@ impl SplitContract {
     pub fn get_stream_withdrawable(env: Env, stream_id: u64) -> i128 {
         let stream = load_payment_stream(&env, stream_id);
         stream_withdrawable_amount(&env, &stream)
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #881 — Invoice dispute arbitration tournament
+    // -----------------------------------------------------------------------
+
+    /// Open a dispute arbitration tournament for a disputed invoice.
+    ///
+    /// The invoice must already be in `Disputed` status.  `caller` must be
+    /// the invoice creator or the contract admin.  Minimum 3 arbiters; 1–5 rounds.
+    pub fn open_tournament(
+        env: Env,
+        caller: Address,
+        invoice_id: u64,
+        arbiters: Vec<Address>,
+        rounds: u32,
+    ) {
+        arbitration_tournament_ext::open_tournament(&env, caller, invoice_id, arbiters, rounds);
+    }
+
+    /// Cast a vote in the current tournament round for `invoice_id`.
+    ///
+    /// Each registered arbiter may vote exactly once per round.
+    pub fn cast_tournament_vote(
+        env: Env,
+        arbiter: Address,
+        invoice_id: u64,
+        decision: ResolveAction,
+    ) {
+        arbitration_tournament_ext::cast_tournament_vote(&env, arbiter, invoice_id, decision);
+    }
+
+    /// Advance the tournament to the next round or complete it.
+    ///
+    /// Callable by anyone once all arbiters have voted in the current round.
+    pub fn advance_tournament(env: Env, invoice_id: u64) {
+        arbitration_tournament_ext::advance_tournament(&env, invoice_id);
+    }
+
+    /// Return the current tournament state for `invoice_id`.
+    pub fn get_tournament(env: Env, invoice_id: u64) -> ArbitrationTournament {
+        arbitration_tournament_ext::get_tournament(&env, invoice_id)
+    }
+
+    /// Admin-only: cancel an in-progress tournament.
+    pub fn cancel_tournament(env: Env, admin: Address, invoice_id: u64) {
+        arbitration_tournament_ext::cancel_tournament(&env, admin, invoice_id);
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #882 — Creator reputation NFT minting
+    // -----------------------------------------------------------------------
+
+    /// Mint a reputation NFT for `creator` if their derived reputation score
+    /// meets the configured threshold.  Returns the new `nft_id`.
+    pub fn mint_rep_nft(env: Env, caller: Address, creator: Address) -> u64 {
+        rep_nft_ext::mint_rep_nft(&env, caller, creator)
+    }
+
+    /// Return the `RepNFT` record for `creator` at `nft_id`.
+    pub fn get_rep_nft(env: Env, creator: Address, nft_id: u64) -> RepNFT {
+        rep_nft_ext::get_rep_nft(&env, creator, nft_id)
+    }
+
+    /// Return the number of reputation NFTs minted for `creator`.
+    pub fn get_rep_nft_count(env: Env, creator: Address) -> u64 {
+        rep_nft_ext::get_rep_nft_count(&env, creator)
+    }
+
+    /// Admin-only: permanently delete a reputation NFT record.
+    pub fn burn_rep_nft(env: Env, admin: Address, creator: Address, nft_id: u64) {
+        rep_nft_ext::burn_rep_nft(&env, admin, creator, nft_id);
+    }
+
+    /// Admin-only: set the minimum derived score required to mint a reputation NFT.
+    pub fn set_rep_nft_threshold(env: Env, admin: Address, threshold: u32) {
+        rep_nft_ext::set_rep_nft_threshold(&env, admin, threshold);
+    }
+
+    /// Return the current minimum score required to mint a reputation NFT.
+    pub fn get_rep_nft_threshold(env: Env) -> u32 {
+        rep_nft_ext::get_rep_nft_threshold(&env)
     }
 }

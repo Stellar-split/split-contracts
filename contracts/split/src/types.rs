@@ -2337,3 +2337,80 @@ pub struct CreatorCovenant {
     /// Whether the covenant was fulfilled (invoice released on time).
     pub fulfilled: bool,
 }
+
+// ---------------------------------------------------------------------------
+// Issue #881 – Invoice Dispute Arbitration Tournament
+// ---------------------------------------------------------------------------
+
+/// Status of an arbitration tournament.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum ArbitrationTournamentStatus {
+    /// Tournament is open and accepting votes.
+    Active,
+    /// All rounds have concluded and a final outcome was reached.
+    Completed,
+    /// An admin cancelled the tournament before completion.
+    Cancelled,
+}
+
+/// A single arbiter's vote in a tournament round.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct TournamentVote {
+    /// Address of the arbiter who cast this vote.
+    pub arbiter: Address,
+    /// Round in which this vote was cast (1-indexed).
+    pub round: u32,
+    /// The arbiter's decision for this round.
+    pub decision: ResolveAction,
+}
+
+/// On-chain record of a multi-round dispute arbitration tournament.
+///
+/// A tournament runs up to `total_rounds` rounds.  In each round every
+/// registered arbiter casts a `Release` or `Refund` vote; the majority
+/// decision is tallied by `advance_tournament`.  On the final round the
+/// invoice is resolved automatically.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct ArbitrationTournament {
+    /// Invoice under arbitration.
+    pub invoice_id: u64,
+    /// Ordered list of arbiter addresses eligible to vote.
+    pub arbiters: Vec<Address>,
+    /// Total number of voting rounds configured at tournament open.
+    pub total_rounds: u32,
+    /// Current round (starts at 1).
+    pub current_round: u32,
+    /// Lifecycle status of the tournament.
+    pub status: ArbitrationTournamentStatus,
+    /// Release votes cast in the current round (reset between rounds).
+    pub release_votes: u32,
+    /// Refund votes cast in the current round (reset between rounds).
+    pub refund_votes: u32,
+    /// Final outcome once the tournament completes (`None` while active).
+    pub final_outcome: Option<ResolveAction>,
+}
+
+// ---------------------------------------------------------------------------
+// Issue #882 – Creator Reputation NFT
+// ---------------------------------------------------------------------------
+
+/// An on-chain reputation NFT record minted for a creator who has reached the
+/// minimum reputation score threshold.
+///
+/// NFTs are keyed by `(creator, nft_id)` in persistent storage.  The
+/// `nft_id` is a monotonically incrementing counter per creator.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct RepNFT {
+    /// Creator this NFT was minted for.
+    pub creator: Address,
+    /// Zero-based identifier for this NFT within the creator's minted set.
+    pub nft_id: u64,
+    /// Derived reputation score at the time of minting.
+    pub score: u32,
+    /// Ledger sequence at which this NFT was minted.
+    pub minted_ledger: u32,
+}
