@@ -189,4 +189,10 @@ pub enum ContractError {
     TokenExpired = 82,
     /// Issue #869: Caller is not the current token holder.
     NotTokenHolder = 83,
+    /// Issue #881: No arbitration tournament exists for this invoice.
+    TournamentNotFound = 84,
+    /// Issue #881: An arbitration tournament is already open for this invoice.
+    TournamentAlreadyOpen = 85,
+    /// Issue #882: Creator's reputation score is below the NFT minting threshold.
+    RepScoreTooLow = 86,
 }
