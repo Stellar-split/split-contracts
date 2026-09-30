@@ -2738,3 +2738,37 @@ pub fn covenant_violated(env: &Env, invoice_id: u64, creator: &Address, penalty_
         (creator.clone(), penalty_amount),
     );
 }
+
+// ---------------------------------------------------------------------------
+// #878 – Creator vesting events
+// ---------------------------------------------------------------------------
+
+/// Emitted when a creator attaches a vesting schedule to an invoice.
+pub fn vesting_schedule_created(
+    env: &Env,
+    invoice_id: u64,
+    creator: &Address,
+    total_amount: i128,
+    start_at: u64,
+    cliff_at: u64,
+    end_at: u64,
+) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("vest_crt"), invoice_id),
+        (creator.clone(), total_amount, start_at, cliff_at, end_at),
+    );
+}
+
+/// Emitted when a creator claims a portion of their vested tokens.
+pub fn vesting_claimed(
+    env: &Env,
+    invoice_id: u64,
+    creator: &Address,
+    claimed_amount: i128,
+    total_released: i128,
+) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("vest_clm"), invoice_id),
+        (creator.clone(), claimed_amount, total_released),
+    );
+}

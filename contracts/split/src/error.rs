@@ -181,4 +181,10 @@ pub enum ContractError {
     TokenExpired = 82,
     /// Issue #869: Caller is not the current token holder.
     NotTokenHolder = 83,
+    /// Issue #878: No vesting schedule exists for this invoice.
+    VestingNotFound = 84,
+    /// Issue #878: The cliff timestamp has not yet been reached; nothing is claimable.
+    VestingCliffNotReached = 85,
+    /// Issue #878: The vesting schedule is complete; all tokens have been claimed.
+    VestingAlreadyComplete = 86,
 }

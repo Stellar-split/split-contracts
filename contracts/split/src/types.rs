@@ -2337,3 +2337,31 @@ pub struct CreatorCovenant {
     /// Whether the covenant was fulfilled (invoice released on time).
     pub fulfilled: bool,
 }
+
+// ---------------------------------------------------------------------------
+// #878 – Creator vesting contracts
+// ---------------------------------------------------------------------------
+
+/// A linear vesting schedule attached to an invoice by its creator.
+///
+/// Tokens vest linearly between `start_at` and `end_at`. Nothing is claimable
+/// before `cliff_at` even if vesting has started. The creator calls
+/// `claim_vested` to withdraw the accrued portion.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct VestingSchedule {
+    /// Invoice this schedule is attached to.
+    pub invoice_id: u64,
+    /// Creator who owns this vesting schedule.
+    pub creator: Address,
+    /// Total amount subject to vesting.
+    pub total_amount: i128,
+    /// Amount already claimed by the creator.
+    pub released_amount: i128,
+    /// Unix timestamp when linear vesting begins.
+    pub start_at: u64,
+    /// Unix timestamp before which nothing is claimable.
+    pub cliff_at: u64,
+    /// Unix timestamp at which the full amount is vested.
+    pub end_at: u64,
+}

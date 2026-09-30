@@ -112,6 +112,9 @@ mod earnings_insurance;
 mod invoice_links;
 mod liquidity_pool;
 
+// Issue #878: creator vesting contracts.
+mod creator_vesting_ext;
+
 use error::ContractError;
 use validation::assert_valid_bps;
 use calc::{calc_platform_fee, funding_bps};
@@ -158,6 +161,8 @@ use types::{
     InvoiceTimeLock,
     // Issue #869
     RedemptionToken,
+    // Issue #878
+    VestingSchedule,
 };
 
 // ---------------------------------------------------------------------------
