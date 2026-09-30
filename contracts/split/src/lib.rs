@@ -112,6 +112,9 @@ mod earnings_insurance;
 mod invoice_links;
 mod liquidity_pool;
 
+// Issue #875: creator brand loyalty program on-chain.
+mod brand_loyalty_ext;
+
 use error::ContractError;
 use validation::assert_valid_bps;
 use calc::{calc_platform_fee, funding_bps};
