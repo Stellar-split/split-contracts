@@ -499,8 +499,8 @@ fn test_forward_configured_event_emitted_when_forward_to_set() {
     let has_forward_configured_event = env
         .events()
         .all()
-        .iter()
-        .any(|(_c, topics, _d)| topic1_is(&env, &topics, "fwd_cfg"));
+        .events().iter()
+        .any(|event| xdr_event_topics(&env, event).map(|topics| topic1_is(&env, &topics, "fwd_cfg")).unwrap_or(false));
     assert!(
         has_forward_configured_event,
         "forward_configured event should be emitted when forward_to is set at creation"
@@ -523,8 +523,8 @@ fn test_forward_configured_event_absent_when_forward_to_unset() {
     let has_forward_configured_event = env
         .events()
         .all()
-        .iter()
-        .any(|(_c, topics, _d)| topic1_is(&env, &topics, "fwd_cfg"));
+        .events().iter()
+        .any(|event| xdr_event_topics(&env, event).map(|topics| topic1_is(&env, &topics, "fwd_cfg")).unwrap_or(false));
     assert!(
         !has_forward_configured_event,
         "forward_configured event should not fire when forward_to is not set"
@@ -4856,8 +4856,8 @@ fn test_pause_invoice_emits_frozen_event() {
     let has_frozen_event = env
         .events()
         .all()
-        .iter()
-        .any(|(_c, topics, _d)| topic1_is(&env, &topics, "frozen"));
+        .events().iter()
+        .any(|event| xdr_event_topics(&env, event).map(|topics| topic1_is(&env, &topics, "frozen")).unwrap_or(false));
     assert!(has_frozen_event, "expected an invoice_frozen event on pause");
 }
 
@@ -4893,8 +4893,8 @@ fn test_auto_resume_allows_payment_after_timestamp() {
     let has_auto_resumed_event = env
         .events()
         .all()
-        .iter()
-        .any(|(_c, topics, _d)| topic1_is(&env, &topics, "auto_res"));
+        .events().iter()
+        .any(|event| xdr_event_topics(&env, event).map(|topics| topic1_is(&env, &topics, "auto_res")).unwrap_or(false));
     assert!(
         has_auto_resumed_event,
         "invoice_auto_resumed event should be emitted on lazy auto-resume"
@@ -4903,8 +4903,8 @@ fn test_auto_resume_allows_payment_after_timestamp() {
     let has_manual_resumed_event = env
         .events()
         .all()
-        .iter()
-        .any(|(_c, topics, _d)| topic1_is(&env, &topics, "resumed"));
+        .events().iter()
+        .any(|event| xdr_event_topics(&env, event).map(|topics| topic1_is(&env, &topics, "resumed")).unwrap_or(false));
     assert!(
         !has_manual_resumed_event,
         "manual invoice_resumed should not fire for an automatic resume"
@@ -5069,13 +5069,26 @@ fn test_clone_invoice_emits_ledger_sequence_in_event_data() {
     let cloned_event = env
         .events()
         .all()
-        .iter()
-        .find(|(_c, topics, _d)| topic0_is(&env, topics, "cloned"))
+        .events().iter()
+        .find(|event| {
+            if let soroban_sdk::xdr::ContractEventBody::V0(body) = &event.body {
+                if let Some(topics) = xdr_event_topics(&env, event) {
+                    topic0_is(&env, &topics, "cloned")
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        })
         .expect("expected an invoice_cloned event");
 
-    let (_contract, _topics, data) = cloned_event;
-    let (ledger_seq,): (u32,) = data.try_into_val(&env).unwrap();
-    assert_eq!(ledger_seq, 42);
+    if let soroban_sdk::xdr::ContractEventBody::V0(body) = &cloned_event.body {
+        if let Ok(data_val) = Val::try_from_val(&env, &body.data) {
+            let (ledger_seq,): (u32,) = data_val.try_into_val(&env).unwrap();
+            assert_eq!(ledger_seq, 42);
+        }
+    }
 }
 
 #[test]
@@ -5682,7 +5695,7 @@ fn test_simulate_release_over_limit_fails() {
 // ---------------------------------------------------------------------------
 
 fn has_circuit_breaker_event(env: &Env, topic_name: &str) -> bool {
-    env.events().all().events().iter().any(|(_c, topics, _d)| topic1_is(env, &topics, topic_name))
+    env.events().all().events().iter().any(|event| xdr_event_topics(env, event).map(|topics| topic1_is(env, &topics, topic_name)).unwrap_or(false))
 }
 
 #[test]
@@ -5869,14 +5882,14 @@ fn test_get_applicable_fee_with_tiers() {
 // ---------------------------------------------------------------------------
 
 fn has_state_changed_event(env: &Env) -> bool {
-    env.events().all().events().iter().any(|(_c, topics, _d)| topic1_is(env, &topics, "st_chg"))
+    env.events().all().events().iter().any(|event| xdr_event_topics(env, event).map(|topics| topic1_is(env, &topics, "st_chg")).unwrap_or(false)))
 }
 
 fn state_changed_count(env: &Env) -> usize {
     env.events()
         .all()
-        .iter()
-        .filter(|(_c, topics, _d)| topic1_is(env, topics, "st_chg"))
+        .events().iter()
+        .filter(|event| xdr_event_topics(env, event).map(|topics| topic1_is(env, &topics, "st_chg")).unwrap_or(false)))
         .count()
 }
 
@@ -6077,7 +6090,7 @@ fn test_fee_waiver_grants_event_emitted() {
     c.initialize(&admin, &0_i128, &treasury, &token_id, &0_u32, &None, &0_u32, &0_u32, &0_u64);
 
     c.add_fee_waiver(&admin, &creator);
-    let granted = env.events().all().events().iter().any(|(_c, topics, _d)| topic1_is(&env, &topics, "fw_grant"));
+    let granted = env.events().all().events().iter().any(|event| xdr_event_topics(&env, event).map(|topics| topic1_is(&env, &topics, "fw_grant")).unwrap_or(false));
     assert!(granted, "fw_grant event should be emitted");
 }
 
@@ -6093,7 +6106,7 @@ fn test_fee_waiver_revoke_event_emitted() {
 
     c.add_fee_waiver(&admin, &creator);
     c.remove_fee_waiver(&admin, &creator);
-    let revoked = env.events().all().events().iter().any(|(_c, topics, _d)| topic1_is(&env, &topics, "fw_rev"));
+    let revoked = env.events().all().events().iter().any(|event| xdr_event_topics(&env, event).map(|topics| topic1_is(&env, &topics, "fw_rev")).unwrap_or(false));
     assert!(revoked, "fw_rev event should be emitted");
 }
 
@@ -7062,8 +7075,8 @@ fn test_contributor_allowlist_toggle_events() {
     let toggled_on_count = env
         .events()
         .all()
-        .iter()
-        .filter(|(_c, topics, _d)| topic1_is(&env, topics, "al_tog"))
+        .events().iter()
+        .filter(|event| xdr_event_topics(&env, event).map(|topics| topic1_is(&env, &topics, "al_tog")).unwrap_or(false)))
         .count();
     assert_eq!(
         toggled_on_count, 1,
@@ -7079,8 +7092,8 @@ fn test_contributor_allowlist_toggle_events() {
     let toggled_off_count = env
         .events()
         .all()
-        .iter()
-        .filter(|(_c, topics, _d)| topic1_is(&env, topics, "al_tog"))
+        .events().iter()
+        .filter(|event| xdr_event_topics(&env, event).map(|topics| topic1_is(&env, &topics, "al_tog")).unwrap_or(false)))
         .count();
     assert_eq!(
         toggled_off_count, 1,
@@ -7382,8 +7395,8 @@ fn test_remove_allowlist_opens_invoice_and_emits_event() {
     let has_allowlist_removed_event = env
         .events()
         .all()
-        .iter()
-        .any(|(_c, topics, _d)| topic1_is(&env, &topics, "al_open"));
+        .events().iter()
+        .any(|event| xdr_event_topics(&env, event).map(|topics| topic1_is(&env, &topics, "al_open")).unwrap_or(false));
     assert!(
         has_allowlist_removed_event,
         "expected an allowlist_removed event"
@@ -7900,7 +7913,7 @@ fn test_creator_fee_deducted_on_release() {
 
     // Check creator_fee_paid event before any further call clears the buffer.
     // Topic structure: ("crtr_fee", invoice_id) → topics[0] is the symbol.
-    let has_creator_fee_event = env.events().all().events().iter().any(|(_c, topics, _d)| topic0_is(&env, &topics, "crtr_fee"));
+    let has_creator_fee_event = env.events().all().events().iter().any(|event| xdr_event_topics(&env, event).map(|topics| topic0_is(&env, &topics, "crtr_fee")).unwrap_or(false));
     assert!(has_creator_fee_event, "creator_fee_paid event should be emitted");
 
     // Recipient should receive 950 (1000 - 5% fee), creator should receive 50
@@ -7977,7 +7990,7 @@ fn test_nominate_new_creator_emits_event() {
     c.nominate_new_creator(&creator, &id, &successor);
 
     // Check creator_nominated event was emitted (topics: ["crtr_nom", invoice_id])
-    let has_nom_event = env.events().all().events().iter().any(|(_c, topics, _d)| topic0_is(&env, &topics, "crtr_nom"));
+    let has_nom_event = env.events().all().events().iter().any(|event| xdr_event_topics(&env, event).map(|topics| topic0_is(&env, &topics, "crtr_nom")).unwrap_or(false));
     assert!(has_nom_event, "creator_nominated event should be emitted");
 }
 
@@ -8010,7 +8023,7 @@ fn test_accept_creator_role_migrates_creator() {
     c.accept_creator_role(&successor, &id);
 
     // Check creator_migrated event was emitted (topics: ["crtr_mig", invoice_id])
-    let has_mig_event = env.events().all().events().iter().any(|(_c, topics, _d)| topic0_is(&env, &topics, "crtr_mig"));
+    let has_mig_event = env.events().all().events().iter().any(|event| xdr_event_topics(&env, event).map(|topics| topic0_is(&env, &topics, "crtr_mig")).unwrap_or(false));
     assert!(has_mig_event, "creator_migrated event should be emitted");
 
     // Invoice should now have the successor as creator
@@ -8089,7 +8102,7 @@ fn test_payout_ordering_canonical_sort() {
     // Check payout_initiated events before any further contract call clears the buffer.
     // Topic structure: ("pyt_init", invoice_id, recipient_index) → topics[0] is the symbol.
     let payout_event_count = env.events().all().events().iter()
-        .filter(|(_c, topics, _d)| topic0_is(&env, topics, "pyt_init"))
+        .filter(|event| xdr_event_topics(&env, event).map(|topics| topic0_is(&env, &topics, "pyt_init")).unwrap_or(false)))
         .count();
 
     assert_eq!(payout_event_count, 2, "Two payout_initiated events expected");

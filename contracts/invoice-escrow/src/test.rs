@@ -13,6 +13,20 @@ use soroban_sdk::{symbol_short, token, Address, Env, IntoVal, Val};
 // Test helpers
 // ---------------------------------------------------------------------------
 
+fn xdr_event_topics(env: &Env, event: &soroban_sdk::xdr::ContractEvent) -> Option<soroban_sdk::Vec<Val>> {
+    if let soroban_sdk::xdr::ContractEventBody::V0(body) = &event.body {
+        let topics: soroban_sdk::Vec<Val> = body.topics.as_ref().iter()
+            .filter_map(|v| {
+                use soroban_sdk::TryIntoVal;
+                Val::try_from_val(env, &v).ok()
+            })
+            .collect();
+        Some(topics)
+    } else {
+        None
+    }
+}
+
 /// Deploy the invoice-escrow contract and return (env, contract_id).
 fn setup() -> (Env, Address) {
     let env = Env::default();
@@ -115,13 +129,15 @@ fn test_transfer_admin_emits_event() {
 
     let events = env.events().all();
     // Find adm_prop event
-    let found = events.iter().any(|(_, topics, _)| {
-        topics
-            == (
+    let found = events.events().iter().any(|event| {
+        if let Some(topics) = xdr_event_topics(&env, event) {
+            topics == (
                 symbol_short!("escrow"),
                 symbol_short!("adm_prop"),
-            )
-                .into_val(&env)
+            ).into_val(&env)
+        } else {
+            false
+        }
     });
     assert!(found, "adm_prop event not emitted");
 }
@@ -168,7 +184,7 @@ fn test_accept_admin_emits_event() {
     client.accept_admin();
 
     let events = env.events().all();
-    let found = events.iter().any(|(_, topics, _)| {
+    let found = events.events().iter().any(|event| xdr_event_topics(&env, event).map(|topics| 
         topics
             == (
                 symbol_short!("escrow"),
@@ -222,7 +238,7 @@ fn test_cancel_transfer_emits_event() {
     client.cancel_transfer();
 
     let events = env.events().all();
-    let found = events.iter().any(|(_, topics, _)| {
+    let found = events.events().iter().any(|event| xdr_event_topics(&env, event).map(|topics| 
         topics
             == (
                 symbol_short!("escrow"),
@@ -653,7 +669,7 @@ fn test_blacklist_entry_emits_event() {
     client.blacklist_payer(&admin, &payer, &reason);
 
     let events = env.events().all();
-    let found = events.iter().any(|(_, topics, _)| {
+    let found = events.events().iter().any(|event| xdr_event_topics(&env, event).map(|topics| 
         topics
             == (
                 symbol_short!("blacklist"),
@@ -678,7 +694,7 @@ fn test_finalise_blacklist_emits_event() {
     client.finalise_blacklist(&admin, &payer, &true);
 
     let events = env.events().all();
-    let found = events.iter().any(|(_, topics, _)| {
+    let found = events.events().iter().any(|event| xdr_event_topics(&env, event).map(|topics| 
         topics
             == (
                 symbol_short!("blacklist"),
