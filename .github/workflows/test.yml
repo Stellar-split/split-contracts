@@ -21,7 +21,7 @@ jobs:
       - name: Install system dependencies for stellar-cli
         run: |
           sudo apt-get update
-          sudo apt-get install -y libdbus-1-dev pkg-config
+          sudo apt-get install -y build-essential pkg-config libssl-dev libudev-dev libdbus-1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
 
       - name: Install stellar-cli
         run: cargo install stellar-cli --version 25.2.0
