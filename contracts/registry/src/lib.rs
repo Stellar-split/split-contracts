@@ -240,13 +240,14 @@ mod test {
         let mut found = false;
         for event in events.events().iter() {
             if let soroban_sdk::xdr::ContractEventBody::V0(body) = &event.body {
-                let topics_slice: &[soroban_sdk::xdr::ScVal] = body.topics.as_ref();
-                let topics: Vec<Val> = topics_slice.iter()
-                    .filter_map(|v| {
-                        use soroban_sdk::TryIntoVal;
-                        Val::try_from_val(&env, v).ok()
-                    })
-                    .collect();
+                let mut topics = Vec::new(&env);
+                let topics_ref: &[soroban_sdk::xdr::ScVal] = body.topics.as_ref();
+                for v in topics_ref.iter() {
+                    use soroban_sdk::TryIntoVal;
+                    if let Ok(val) = Val::try_from_val(&env, v) {
+                        topics.push_back(val);
+                    }
+                }
                 if topics.len() >= 3 {
                     if let Ok(t0) = <Symbol as TryFromVal<Env, Val>>::try_from_val(&env, &topics.get_unchecked(0)) {
                         if t0 == symbol_short!("registry") {

@@ -5066,28 +5066,25 @@ fn test_clone_invoice_emits_ledger_sequence_in_event_data() {
     };
     let _clone_id = c.clone_invoice(&creator, &source_id, &overrides);
 
-    let cloned_event = env
+    let cloned_event_data = env
         .events()
         .all()
         .events().iter()
-        .find(|event| {
+        .find_map(|event| {
             if let soroban_sdk::xdr::ContractEventBody::V0(body) = &event.body {
                 if let Some(topics) = xdr_event_topics(&env, event) {
-                    topic0_is(&env, &topics, "cloned")
-                } else {
-                    false
+                    if topic0_is(&env, &topics, "cloned") {
+                        return Some(body.data.clone());
+                    }
                 }
-            } else {
-                false
             }
+            None
         })
         .expect("expected an invoice_cloned event");
 
-    if let soroban_sdk::xdr::ContractEventBody::V0(body) = &cloned_event.body {
-        if let Ok(data_val) = Val::try_from_val(&env, &body.data) {
-            let (ledger_seq,): (u32,) = data_val.try_into_val(&env).unwrap();
-            assert_eq!(ledger_seq, 42);
-        }
+    if let Ok(data_val) = <soroban_sdk::Val as soroban_sdk::TryFromVal<Env, soroban_sdk::xdr::ScVal>>::try_from_val(&env, &cloned_event_data) {
+        let (ledger_seq,): (u32,) = data_val.try_into_val(&env).unwrap();
+        assert_eq!(ledger_seq, 42);
     }
 }
 
@@ -5445,12 +5442,14 @@ fn test_all_or_nothing_group_still_requires_all_funded() {
 
 fn xdr_event_topics(env: &Env, event: &soroban_sdk::xdr::ContractEvent) -> Option<soroban_sdk::Vec<Val>> {
     if let soroban_sdk::xdr::ContractEventBody::V0(body) = &event.body {
-        let topics: soroban_sdk::Vec<Val> = body.topics.as_ref().iter()
-            .filter_map(|v| {
-                use soroban_sdk::TryIntoVal;
-                Val::try_from_val(env, &v).ok()
-            })
-            .collect();
+        let mut topics = soroban_sdk::Vec::new(env);
+        let topics_ref: &[soroban_sdk::xdr::ScVal] = body.topics.as_ref();
+        for v in topics_ref.iter() {
+            use soroban_sdk::TryFromVal;
+            if let Ok(val) = <Val as TryFromVal<Env, soroban_sdk::xdr::ScVal>>::try_from_val(env, v) {
+                topics.push_back(val);
+            }
+        }
         Some(topics)
     } else {
         None
@@ -5889,7 +5888,7 @@ fn state_changed_count(env: &Env) -> usize {
     env.events()
         .all()
         .events().iter()
-        .filter(|event| xdr_event_topics(env, event).map(|topics| topic1_is(env, &topics, "st_chg")).unwrap_or(false)))
+        .filter(|event| xdr_event_topics(env, event).map(|topics| topic1_is(env, &topics, "st_chg")).unwrap_or(false))
         .count()
 }
 
@@ -7076,7 +7075,7 @@ fn test_contributor_allowlist_toggle_events() {
         .events()
         .all()
         .events().iter()
-        .filter(|event| xdr_event_topics(&env, event).map(|topics| topic1_is(&env, &topics, "al_tog")).unwrap_or(false)))
+        .filter(|event| xdr_event_topics(&env, event).map(|topics| topic1_is(&env, &topics, "al_tog")).unwrap_or(false))
         .count();
     assert_eq!(
         toggled_on_count, 1,
@@ -7093,7 +7092,7 @@ fn test_contributor_allowlist_toggle_events() {
         .events()
         .all()
         .events().iter()
-        .filter(|event| xdr_event_topics(&env, event).map(|topics| topic1_is(&env, &topics, "al_tog")).unwrap_or(false)))
+        .filter(|event| xdr_event_topics(&env, event).map(|topics| topic1_is(&env, &topics, "al_tog")).unwrap_or(false))
         .count();
     assert_eq!(
         toggled_off_count, 1,
@@ -7120,10 +7119,16 @@ fn test_payment_received_event_includes_token() {
 
     use soroban_sdk::TryIntoVal;
     let mut found_token: Option<Address> = None;
-    for (_contract, topics, data) in env.events().all().events().iter() {
-        if topic1_is(&env, &topics, "paid") {
-            let decoded: (Address, i128, Address, u64) = data.try_into_val(&env).unwrap();
-            found_token = Some(decoded.2);
+    for event in env.events().all().events().iter() {
+        if let soroban_sdk::xdr::ContractEventBody::V0(body) = &event.body {
+            if let Some(topics) = xdr_event_topics(&env, event) {
+                if topic1_is(&env, &topics, "paid") {
+                    if let Ok(data_val) = <soroban_sdk::Val as soroban_sdk::TryFromVal<Env, soroban_sdk::xdr::ScVal>>::try_from_val(&env, &body.data) {
+                        let decoded: (Address, i128, Address, u64) = data_val.try_into_val(&env).unwrap();
+                        found_token = Some(decoded.2);
+                    }
+                }
+            }
         }
     }
     assert_eq!(
@@ -8102,7 +8107,7 @@ fn test_payout_ordering_canonical_sort() {
     // Check payout_initiated events before any further contract call clears the buffer.
     // Topic structure: ("pyt_init", invoice_id, recipient_index) → topics[0] is the symbol.
     let payout_event_count = env.events().all().events().iter()
-        .filter(|event| xdr_event_topics(&env, event).map(|topics| topic0_is(&env, &topics, "pyt_init")).unwrap_or(false)))
+        .filter(|event| xdr_event_topics(&env, event).map(|topics| topic0_is(&env, &topics, "pyt_init")).unwrap_or(false))
         .count();
 
     assert_eq!(payout_event_count, 2, "Two payout_initiated events expected");

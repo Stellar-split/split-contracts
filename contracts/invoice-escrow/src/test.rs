@@ -14,17 +14,16 @@ use soroban_sdk::{symbol_short, token, Address, Env, IntoVal, Val};
 // ---------------------------------------------------------------------------
 
 fn xdr_event_topics(env: &Env, event: &soroban_sdk::xdr::ContractEvent) -> Option<soroban_sdk::Vec<Val>> {
-    if let soroban_sdk::xdr::ContractEventBody::V0(body) = &event.body {
-        let topics: soroban_sdk::Vec<Val> = body.topics.as_ref().iter()
-            .filter_map(|v| {
-                use soroban_sdk::TryIntoVal;
-                Val::try_from_val(env, &v).ok()
-            })
-            .collect();
-        Some(topics)
-    } else {
-        None
+    let soroban_sdk::xdr::ContractEventBody::V0(body) = &event.body;
+    let mut topics = soroban_sdk::Vec::new(env);
+    let topics_ref: &[soroban_sdk::xdr::ScVal] = body.topics.as_ref();
+    for v in topics_ref.iter() {
+        use soroban_sdk::TryFromVal;
+        if let Ok(val) = <Val as TryFromVal<Env, soroban_sdk::xdr::ScVal>>::try_from_val(env, v) {
+            topics.push_back(val);
+        }
     }
+    Some(topics)
 }
 
 /// Deploy the invoice-escrow contract and return (env, contract_id).
@@ -821,21 +820,22 @@ fn test_release_emits_escrow_released_event() {
     // Verify EscrowReleased event was emitted.
     let all_events = env.events().all();
     let mut found = false;
-    for event in all_events.iter() {
+    for event in all_events.events().iter() {
         // Topics for the structured release event are (escrow, released).
-        let topics = event.1;
-        if topics.len() >= 2 {
-            if let Ok(t0) = <soroban_sdk::Symbol as soroban_sdk::TryFromVal<Env, soroban_sdk::Val>>::try_from_val(
-                &env,
-                &topics.get_unchecked(0),
-            ) {
-                if let Ok(t1) = <soroban_sdk::Symbol as soroban_sdk::TryFromVal<Env, soroban_sdk::Val>>::try_from_val(
+        if let Some(topics) = xdr_event_topics(&env, event) {
+            if topics.len() >= 2 {
+                if let Ok(t0) = <soroban_sdk::Symbol as soroban_sdk::TryFromVal<Env, soroban_sdk::Val>>::try_from_val(
                     &env,
-                    &topics.get_unchecked(1),
+                    &topics.get_unchecked(0),
                 ) {
-                    if t0 == symbol_short!("escrow") && t1 == symbol_short!("released") {
-                        found = true;
-                        break;
+                    if let Ok(t1) = <soroban_sdk::Symbol as soroban_sdk::TryFromVal<Env, soroban_sdk::Val>>::try_from_val(
+                        &env,
+                        &topics.get_unchecked(1),
+                    ) {
+                        if t0 == symbol_short!("escrow") && t1 == symbol_short!("released") {
+                            found = true;
+                            break;
+                        }
                     }
                 }
             }
