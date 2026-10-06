@@ -5882,7 +5882,7 @@ fn test_get_applicable_fee_with_tiers() {
 // ---------------------------------------------------------------------------
 
 fn has_state_changed_event(env: &Env) -> bool {
-    env.events().all().events().iter().any(|event| xdr_event_topics(env, event).map(|topics| topic1_is(env, &topics, "st_chg")).unwrap_or(false)))
+    env.events().all().events().iter().any(|event| xdr_event_topics(env, event).map(|topics| topic1_is(env, &topics, "st_chg")).unwrap_or(false))
 }
 
 fn state_changed_count(env: &Env) -> usize {

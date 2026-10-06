@@ -348,7 +348,8 @@ mod test {
         let mut found = false;
         for event in events.events().iter() {
             if let soroban_sdk::xdr::ContractEventBody::V0(body) = &event.body {
-                let topics: soroban_sdk::Vec<Val> = body.topics.as_ref().iter()
+                let topics_slice: &[soroban_sdk::xdr::ScVal] = body.topics.as_ref();
+                let topics: Vec<Val> = topics_slice.iter()
                     .filter_map(|v| {
                         use soroban_sdk::TryIntoVal;
                         Val::try_from_val(&env, v).ok()

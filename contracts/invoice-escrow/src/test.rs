@@ -184,13 +184,15 @@ fn test_accept_admin_emits_event() {
     client.accept_admin();
 
     let events = env.events().all();
-    let found = events.events().iter().any(|event| xdr_event_topics(&env, event).map(|topics| 
-        topics
-            == (
+    let found = events.events().iter().any(|event| {
+        if let Some(topics) = xdr_event_topics(&env, event) {
+            topics == (
                 symbol_short!("escrow"),
                 symbol_short!("adm_acpt"),
-            )
-                .into_val(&env)
+            ).into_val(&env)
+        } else {
+            false
+        }
     });
     assert!(found, "adm_acpt event not emitted");
 }
@@ -238,13 +240,15 @@ fn test_cancel_transfer_emits_event() {
     client.cancel_transfer();
 
     let events = env.events().all();
-    let found = events.events().iter().any(|event| xdr_event_topics(&env, event).map(|topics| 
-        topics
-            == (
+    let found = events.events().iter().any(|event| {
+        if let Some(topics) = xdr_event_topics(&env, event) {
+            topics == (
                 symbol_short!("escrow"),
                 symbol_short!("adm_cncl"),
-            )
-                .into_val(&env)
+            ).into_val(&env)
+        } else {
+            false
+        }
     });
     assert!(found, "adm_cncl event not emitted");
 }
@@ -669,13 +673,15 @@ fn test_blacklist_entry_emits_event() {
     client.blacklist_payer(&admin, &payer, &reason);
 
     let events = env.events().all();
-    let found = events.events().iter().any(|event| xdr_event_topics(&env, event).map(|topics| 
-        topics
-            == (
+    let found = events.events().iter().any(|event| {
+        if let Some(topics) = xdr_event_topics(&env, event) {
+            topics == (
                 symbol_short!("blacklist"),
                 symbol_short!("bl_add"),
-            )
-                .into_val(&env)
+            ).into_val(&env)
+        } else {
+            false
+        }
     });
     assert!(found, "bl_add event not emitted");
 }
@@ -694,13 +700,15 @@ fn test_finalise_blacklist_emits_event() {
     client.finalise_blacklist(&admin, &payer, &true);
 
     let events = env.events().all();
-    let found = events.events().iter().any(|event| xdr_event_topics(&env, event).map(|topics| 
-        topics
-            == (
+    let found = events.events().iter().any(|event| {
+        if let Some(topics) = xdr_event_topics(&env, event) {
+            topics == (
                 symbol_short!("blacklist"),
                 symbol_short!("bl_fin"),
-            )
-                .into_val(&env)
+            ).into_val(&env)
+        } else {
+            false
+        }
     });
     assert!(found, "bl_fin event not emitted");
 }
