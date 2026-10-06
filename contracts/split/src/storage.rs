@@ -4,7 +4,7 @@
 //! that TTL bump calls are consistent and cannot be accidentally forgotten.
 
 use crate::constants::{MAX_INVOICE_TTL_LEDGERS, MIN_INVOICE_TTL_LEDGERS};
-use soroban_sdk::{Env, IntoVal, TryFromVal, Val};
+use soroban_sdk::{Env, IntoVal, Val};
 
 /// Save an invoice entry and automatically bump its TTL.
 ///
@@ -55,7 +55,7 @@ where
 mod tests {
     use super::*;
     use soroban_sdk::testutils::Address as _;
-    use soroban_sdk::{symbol_short, Address, String, Symbol};
+    use soroban_sdk::{symbol_short, Address, String};
 
     fn contract_id(env: &Env) -> Address {
         env.register(crate::SplitContract, ())

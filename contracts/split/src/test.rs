@@ -5071,11 +5071,10 @@ fn test_clone_invoice_emits_ledger_sequence_in_event_data() {
         .all()
         .events().iter()
         .find_map(|event| {
-            if let soroban_sdk::xdr::ContractEventBody::V0(body) = &event.body {
-                if let Some(topics) = xdr_event_topics(&env, event) {
-                    if topic0_is(&env, &topics, "cloned") {
-                        return Some(body.data.clone());
-                    }
+            let soroban_sdk::xdr::ContractEventBody::V0(body) = &event.body;
+            if let Some(topics) = xdr_event_topics(&env, event) {
+                if topic0_is(&env, &topics, "cloned") {
+                    return Some(body.data.clone());
                 }
             }
             None
@@ -5441,19 +5440,16 @@ fn test_all_or_nothing_group_still_requires_all_funded() {
 // ---------------------------------------------------------------------------
 
 fn xdr_event_topics(env: &Env, event: &soroban_sdk::xdr::ContractEvent) -> Option<soroban_sdk::Vec<Val>> {
-    if let soroban_sdk::xdr::ContractEventBody::V0(body) = &event.body {
-        let mut topics = soroban_sdk::Vec::new(env);
-        let topics_ref: &[soroban_sdk::xdr::ScVal] = body.topics.as_ref();
-        for v in topics_ref.iter() {
-            use soroban_sdk::TryFromVal;
-            if let Ok(val) = <Val as TryFromVal<Env, soroban_sdk::xdr::ScVal>>::try_from_val(env, v) {
-                topics.push_back(val);
-            }
+    let soroban_sdk::xdr::ContractEventBody::V0(body) = &event.body;
+    let mut topics = soroban_sdk::Vec::new(env);
+    let topics_ref: &[soroban_sdk::xdr::ScVal] = body.topics.as_ref();
+    for v in topics_ref.iter() {
+        use soroban_sdk::TryFromVal;
+        if let Ok(val) = <Val as TryFromVal<Env, soroban_sdk::xdr::ScVal>>::try_from_val(env, v) {
+            topics.push_back(val);
         }
-        Some(topics)
-    } else {
-        None
     }
+    Some(topics)
 }
 
 fn topic1_is(env: &Env, topics: &soroban_sdk::Vec<soroban_sdk::Val>, name: &str) -> bool {
@@ -7120,13 +7116,12 @@ fn test_payment_received_event_includes_token() {
     use soroban_sdk::TryIntoVal;
     let mut found_token: Option<Address> = None;
     for event in env.events().all().events().iter() {
-        if let soroban_sdk::xdr::ContractEventBody::V0(body) = &event.body {
-            if let Some(topics) = xdr_event_topics(&env, event) {
-                if topic1_is(&env, &topics, "paid") {
-                    if let Ok(data_val) = <soroban_sdk::Val as soroban_sdk::TryFromVal<Env, soroban_sdk::xdr::ScVal>>::try_from_val(&env, &body.data) {
-                        let decoded: (Address, i128, Address, u64) = data_val.try_into_val(&env).unwrap();
-                        found_token = Some(decoded.2);
-                    }
+        let soroban_sdk::xdr::ContractEventBody::V0(body) = &event.body;
+        if let Some(topics) = xdr_event_topics(&env, event) {
+            if topic1_is(&env, &topics, "paid") {
+                if let Ok(data_val) = <soroban_sdk::Val as soroban_sdk::TryFromVal<Env, soroban_sdk::xdr::ScVal>>::try_from_val(&env, &body.data) {
+                    let decoded: (Address, i128, Address, u64) = data_val.try_into_val(&env).unwrap();
+                    found_token = Some(decoded.2);
                 }
             }
         }
@@ -8341,7 +8336,7 @@ fn test_get_invoice_deadline_not_found() {
 fn test_get_invoice_funded() {
     let (env, contract_id, token_id) = setup_initialized();
     let c = client(&env, &contract_id);
-    let tk = token_client(&env, &token_id);
+    let _tk = token_client(&env, &token_id);
 
     let creator = Address::generate(&env);
     let payer = Address::generate(&env);
@@ -8374,7 +8369,7 @@ fn test_get_invoice_funded_not_found() {
 fn test_get_invoice_status() {
     let (env, contract_id, token_id) = setup_initialized();
     let c = client(&env, &contract_id);
-    let tk = token_client(&env, &token_id);
+    let _tk = token_client(&env, &token_id);
 
     let creator = Address::generate(&env);
     let payer = Address::generate(&env);
