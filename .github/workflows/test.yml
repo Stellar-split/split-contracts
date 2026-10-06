@@ -29,6 +29,11 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
+      - name: Install stellar-cli
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://soroban.stellar.org/install | sh
+          echo "$HOME/.stellar/bin" >> $GITHUB_PATH
+
       - name: Run tests
         run: cargo test --workspace
 
@@ -66,6 +71,11 @@ jobs:
             ~/.cargo/git
             fuzz/target
           key: ${{ runner.os }}-cargo-fuzz-${{ hashFiles('fuzz/Cargo.toml') }}
+
+      - name: Install stellar-cli
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://soroban.stellar.org/install | sh
+          echo "$HOME/.stellar/bin" >> $GITHUB_PATH
 
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz
