@@ -18,6 +18,11 @@ jobs:
       - name: Install stable Rust (for stellar-cli)
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Install system dependencies for stellar-cli
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libdbus-1-dev pkg-config
+
       - name: Install stellar-cli
         run: cargo install stellar-cli --version 25.2.0
 
@@ -61,13 +66,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install stable Rust (for stellar-cli)
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install stellar-cli
-        run: cargo install stellar-cli --version 25.2.0
-
-      - name: Install nightly Rust toolchain (for soroban-sdk v28)
+      - name: Install nightly Rust toolchain
         uses: dtolnay/rust-toolchain@nightly
 
       - name: Cache cargo registry
