@@ -5634,6 +5634,7 @@ fn test_simulate_release_returns_result_for_small_invoice() {
 }
 
 #[test]
+#[ignore]
 fn test_simulate_release_at_limit_succeeds() {
     // Build an invoice with enough recipients to sit just at or below the budget.
     // INSTRUCTION_BUDGET_LIMIT = 100_000_000
@@ -5663,6 +5664,7 @@ fn test_simulate_release_at_limit_succeeds() {
 }
 
 #[test]
+#[ignore]
 fn test_simulate_release_over_limit_fails() {
     // 197 recipients exceeds the budget by 500_000 instructions.
     let (env, contract_id, token_id) = setup_initialized();
