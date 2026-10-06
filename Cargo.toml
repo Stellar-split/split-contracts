@@ -3,7 +3,7 @@ members = ["contracts/split", "contracts/dashboard", "contracts/invoice-escrow",
 resolver = "2"
 
 [workspace.dependencies]
-soroban-sdk = { version = "22.0.0" }
+soroban-sdk = "28"
 
 [profile.release]
 opt-level = "z"

@@ -1,7 +1,7 @@
 use soroban_sdk::contracterror;
 
 /// Unified error taxonomy (issue #273). Discriminants are stable — never reorder, only append.
-#[contracterror(export = false)]
+#[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 #[repr(u32)]
 pub enum ContractError {
