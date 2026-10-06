@@ -404,7 +404,7 @@ fn test_deposit_after_deadline_fails() {
 
     env.ledger().set(LedgerInfo {
         timestamp: 1,
-        protocol_version: 20,
+        protocol_version: env.ledger().protocol_version(),
         sequence_number: 1,
         network_id: Default::default(),
         base_reserve: 10,
@@ -443,7 +443,7 @@ fn test_refund_after_deadline() {
     // Advance ledger time past deadline
     env.ledger().set(LedgerInfo {
         timestamp: 1_000_000,
-        protocol_version: 20,
+        protocol_version: env.ledger().protocol_version(),
         sequence_number: 100,
         network_id: Default::default(),
         base_reserve: 10,
