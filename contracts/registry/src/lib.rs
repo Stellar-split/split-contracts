@@ -238,13 +238,20 @@ mod test {
 
         let events = env.events().all();
         let mut found = false;
-        for event in events.iter() {
-            let topics = event.1;
-            if topics.len() >= 3 {
-                if let Ok(t0) = <Symbol as TryFromVal<Env, Val>>::try_from_val(&env, &topics.get_unchecked(0)) {
-                    if t0 == symbol_short!("registry") {
-                        found = true;
-                        break;
+        for event in events.events().iter() {
+            if let soroban_sdk::xdr::ContractEventBody::V0(body) = &event.body {
+                let topics: soroban_sdk::Vec<Val> = body.topics.as_ref().iter()
+                    .filter_map(|v| {
+                        use soroban_sdk::TryIntoVal;
+                        Val::try_from_val(&env, v).ok()
+                    })
+                    .collect();
+                if topics.len() >= 3 {
+                    if let Ok(t0) = <Symbol as TryFromVal<Env, Val>>::try_from_val(&env, &topics.get_unchecked(0)) {
+                        if t0 == symbol_short!("registry") {
+                            found = true;
+                            break;
+                        }
                     }
                 }
             }

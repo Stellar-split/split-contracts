@@ -7,7 +7,7 @@ use crate::types::EscrowStatus;
 use crate::InvoiceEscrowContract;
 use crate::InvoiceEscrowContractClient;
 use soroban_sdk::testutils::{Address as _, Events, Ledger, LedgerInfo};
-use soroban_sdk::{symbol_short, token, Address, Env, IntoVal};
+use soroban_sdk::{symbol_short, token, Address, Env, IntoVal, Val};
 
 // ---------------------------------------------------------------------------
 // Test helpers

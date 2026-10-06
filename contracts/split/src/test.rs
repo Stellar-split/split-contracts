@@ -3636,7 +3636,7 @@ fn test_events_emitted_on_create_and_pay() {
     c.pay(&payer, &id, &100_i128, &0_u64, &false, &false, &None);
 
     // Events were emitted (create + pay + release = at least 3).
-    assert!(env.events().all().len() >= 3);
+    assert!(env.events().all().events().len() >= 3);
 }
 
 // ---------------------------------------------------------------------------
@@ -5430,6 +5430,20 @@ fn test_all_or_nothing_group_still_requires_all_funded() {
 // Issue #276: Platform & creator volume milestone events
 // ---------------------------------------------------------------------------
 
+fn xdr_event_topics(env: &Env, event: &soroban_sdk::xdr::ContractEvent) -> Option<soroban_sdk::Vec<Val>> {
+    if let soroban_sdk::xdr::ContractEventBody::V0(body) = &event.body {
+        let topics: soroban_sdk::Vec<Val> = body.topics.as_ref().iter()
+            .filter_map(|v| {
+                use soroban_sdk::TryIntoVal;
+                Val::try_from_val(env, &v).ok()
+            })
+            .collect();
+        Some(topics)
+    } else {
+        None
+    }
+}
+
 fn topic1_is(env: &Env, topics: &soroban_sdk::Vec<soroban_sdk::Val>, name: &str) -> bool {
     use soroban_sdk::TryIntoVal;
     topics.len() >= 2 && topics
@@ -5449,11 +5463,19 @@ fn topic0_is(env: &Env, topics: &soroban_sdk::Vec<soroban_sdk::Val>, name: &str)
 }
 
 fn has_platform_milestone_event(env: &Env) -> bool {
-    env.events().all().iter().any(|(_c, topics, _d)| topic1_is(env, &topics, "plt_v_ms"))
+    env.events().all().events().iter().any(|event| {
+        xdr_event_topics(env, event)
+            .map(|topics| topic1_is(env, &topics, "plt_v_ms"))
+            .unwrap_or(false)
+    })
 }
 
 fn has_creator_milestone_event(env: &Env) -> bool {
-    env.events().all().iter().any(|(_c, topics, _d)| topic1_is(env, &topics, "cr_v_ms"))
+    env.events().all().events().iter().any(|event| {
+        xdr_event_topics(env, event)
+            .map(|topics| topic1_is(env, &topics, "cr_v_ms"))
+            .unwrap_or(false)
+    })
 }
 
 #[test]
@@ -5660,7 +5682,7 @@ fn test_simulate_release_over_limit_fails() {
 // ---------------------------------------------------------------------------
 
 fn has_circuit_breaker_event(env: &Env, topic_name: &str) -> bool {
-    env.events().all().iter().any(|(_c, topics, _d)| topic1_is(env, &topics, topic_name))
+    env.events().all().events().iter().any(|(_c, topics, _d)| topic1_is(env, &topics, topic_name))
 }
 
 #[test]
@@ -5847,7 +5869,7 @@ fn test_get_applicable_fee_with_tiers() {
 // ---------------------------------------------------------------------------
 
 fn has_state_changed_event(env: &Env) -> bool {
-    env.events().all().iter().any(|(_c, topics, _d)| topic1_is(env, &topics, "st_chg"))
+    env.events().all().events().iter().any(|(_c, topics, _d)| topic1_is(env, &topics, "st_chg"))
 }
 
 fn state_changed_count(env: &Env) -> usize {
@@ -6055,7 +6077,7 @@ fn test_fee_waiver_grants_event_emitted() {
     c.initialize(&admin, &0_i128, &treasury, &token_id, &0_u32, &None, &0_u32, &0_u32, &0_u64);
 
     c.add_fee_waiver(&admin, &creator);
-    let granted = env.events().all().iter().any(|(_c, topics, _d)| topic1_is(&env, &topics, "fw_grant"));
+    let granted = env.events().all().events().iter().any(|(_c, topics, _d)| topic1_is(&env, &topics, "fw_grant"));
     assert!(granted, "fw_grant event should be emitted");
 }
 
@@ -6071,7 +6093,7 @@ fn test_fee_waiver_revoke_event_emitted() {
 
     c.add_fee_waiver(&admin, &creator);
     c.remove_fee_waiver(&admin, &creator);
-    let revoked = env.events().all().iter().any(|(_c, topics, _d)| topic1_is(&env, &topics, "fw_rev"));
+    let revoked = env.events().all().events().iter().any(|(_c, topics, _d)| topic1_is(&env, &topics, "fw_rev"));
     assert!(revoked, "fw_rev event should be emitted");
 }
 
@@ -7085,7 +7107,7 @@ fn test_payment_received_event_includes_token() {
 
     use soroban_sdk::TryIntoVal;
     let mut found_token: Option<Address> = None;
-    for (_contract, topics, data) in env.events().all().iter() {
+    for (_contract, topics, data) in env.events().all().events().iter() {
         if topic1_is(&env, &topics, "paid") {
             let decoded: (Address, i128, Address, u64) = data.try_into_val(&env).unwrap();
             found_token = Some(decoded.2);
@@ -7878,7 +7900,7 @@ fn test_creator_fee_deducted_on_release() {
 
     // Check creator_fee_paid event before any further call clears the buffer.
     // Topic structure: ("crtr_fee", invoice_id) → topics[0] is the symbol.
-    let has_creator_fee_event = env.events().all().iter().any(|(_c, topics, _d)| topic0_is(&env, &topics, "crtr_fee"));
+    let has_creator_fee_event = env.events().all().events().iter().any(|(_c, topics, _d)| topic0_is(&env, &topics, "crtr_fee"));
     assert!(has_creator_fee_event, "creator_fee_paid event should be emitted");
 
     // Recipient should receive 950 (1000 - 5% fee), creator should receive 50
@@ -7955,7 +7977,7 @@ fn test_nominate_new_creator_emits_event() {
     c.nominate_new_creator(&creator, &id, &successor);
 
     // Check creator_nominated event was emitted (topics: ["crtr_nom", invoice_id])
-    let has_nom_event = env.events().all().iter().any(|(_c, topics, _d)| topic0_is(&env, &topics, "crtr_nom"));
+    let has_nom_event = env.events().all().events().iter().any(|(_c, topics, _d)| topic0_is(&env, &topics, "crtr_nom"));
     assert!(has_nom_event, "creator_nominated event should be emitted");
 }
 
@@ -7988,7 +8010,7 @@ fn test_accept_creator_role_migrates_creator() {
     c.accept_creator_role(&successor, &id);
 
     // Check creator_migrated event was emitted (topics: ["crtr_mig", invoice_id])
-    let has_mig_event = env.events().all().iter().any(|(_c, topics, _d)| topic0_is(&env, &topics, "crtr_mig"));
+    let has_mig_event = env.events().all().events().iter().any(|(_c, topics, _d)| topic0_is(&env, &topics, "crtr_mig"));
     assert!(has_mig_event, "creator_migrated event should be emitted");
 
     // Invoice should now have the successor as creator
@@ -8066,7 +8088,7 @@ fn test_payout_ordering_canonical_sort() {
 
     // Check payout_initiated events before any further contract call clears the buffer.
     // Topic structure: ("pyt_init", invoice_id, recipient_index) → topics[0] is the symbol.
-    let payout_event_count = env.events().all().iter()
+    let payout_event_count = env.events().all().events().iter()
         .filter(|(_c, topics, _d)| topic0_is(&env, topics, "pyt_init"))
         .count();
 
