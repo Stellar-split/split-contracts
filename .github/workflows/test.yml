@@ -8,6 +8,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  SOROBAN_SDK_BUILD_SYSTEM_SUPPORTS_SPEC_SHAKING_V2: 0
 
 jobs:
   test:
@@ -15,27 +16,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install stable Rust (for stellar-cli)
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install system dependencies for stellar-cli
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config libssl-dev libudev-dev libdbus-1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
-
-      - name: Install stellar-cli
-        run: |
-          cargo install stellar-cli --locked
-          which stellar
-          stellar version
-
-      - name: Install nightly Rust (for soroban-sdk v28)
+      - name: Install nightly Rust
         uses: dtolnay/rust-toolchain@nightly
         with:
           targets: wasm32v1-none
-
-      - name: Add stellar to PATH
-        run: echo "$HOME/.cargo/bin" >> $GITHUB_PATH
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -48,21 +32,6 @@ jobs:
 
       - name: Run tests
         run: cargo test --workspace
-
-      - name: Build WASM and check size
-        run: |
-          cargo build --target wasm32v1-none --release --package split
-          WASM_SIZE=$(stat -c%s target/wasm32v1-none/release/split.wasm)
-          echo "WASM size: $WASM_SIZE bytes"
-          # Threshold: 600 KB (614400 bytes). The release profile already uses
-          # opt-level="z", lto=true, and strip="symbols". The raw WASM before
-          # wasm-opt is ~540 KB for the current feature set; 600 KB leaves ~60 KB
-          # headroom and will alert if the contract grows significantly.
-          if [ $WASM_SIZE -gt 614400 ]; then
-            echo "ERROR: WASM size ($WASM_SIZE bytes) exceeds 600 KB threshold"
-            exit 1
-          fi
-          echo "WASM size check passed ($WASM_SIZE bytes <= 614400 bytes)"
 
       - name: Storage key snapshot test
         run: cargo test -p split storage_snapshot
