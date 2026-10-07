@@ -25,7 +25,7 @@ jobs:
 
       - name: Install stellar-cli
         run: |
-          cargo install stellar-cli --version 25.2.0 --locked
+          cargo install stellar-cli --locked
           which stellar
           stellar version
 
