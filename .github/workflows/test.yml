@@ -24,12 +24,18 @@ jobs:
           sudo apt-get install -y build-essential pkg-config libssl-dev libudev-dev libdbus-1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
 
       - name: Install stellar-cli
-        run: cargo install stellar-cli --version 25.2.0
+        run: |
+          cargo install stellar-cli --version 25.2.0 --locked
+          which stellar
+          stellar version
 
       - name: Install nightly Rust (for soroban-sdk v28)
         uses: dtolnay/rust-toolchain@nightly
         with:
           targets: wasm32v1-none
+
+      - name: Add stellar to PATH
+        run: echo "$HOME/.cargo/bin" >> $GITHUB_PATH
 
       - name: Cache cargo registry
         uses: actions/cache@v4
