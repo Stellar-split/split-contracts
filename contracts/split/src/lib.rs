@@ -121,6 +121,15 @@ mod sustainability;
 mod cooperative;
 mod education_lockup;
 
+// Issue #1011: Enhanced emergency pause mechanism.
+pub mod emergency_pause;
+// Issue #1010: Enhanced contract upgrade mechanism with version management.
+pub mod contract_upgrade;
+// Issue #1009: Comprehensive audit logging for compliance.
+pub mod audit_logging;
+// Issue #1008: Enhanced per-user rate limiting and throttling.
+pub mod rate_limiting;
+
 use error::ContractError;
 use validation::assert_valid_bps;
 use calc::{calc_platform_fee, funding_bps};

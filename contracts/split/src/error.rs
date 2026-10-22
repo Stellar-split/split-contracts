@@ -171,6 +171,8 @@ pub enum ContractError {
     MissingStorageEntry = 75,
     /// Issue #951: The requested operation is not supported by this contract version.
     UnsupportedOperation = 76,
+    /// Issue #1011: Emergency pause recovery plan is not yet complete; unpause is blocked.
+    RecoveryIncomplete = 77,
 }
 
 /// Issue #952: Human-readable, actionable recovery suggestions for every
@@ -384,6 +386,9 @@ pub mod recovery {
             }
             ContractError::TooFewRecipients => {
                 "Add more recipients to meet the configured minimum recipient count."
+            }
+            ContractError::RecoveryIncomplete => {
+                "Complete all recovery plan steps before unpausing the contract."
             }
         }
     }
