@@ -103,6 +103,15 @@ mod sustainability;
 mod cooperative;
 mod education_lockup;
 
+// Issue #1011: Enhanced emergency pause mechanism.
+pub mod emergency_pause;
+// Issue #1010: Enhanced contract upgrade mechanism with version management.
+pub mod contract_upgrade;
+// Issue #1009: Comprehensive audit logging for compliance.
+pub mod audit_logging;
+// Issue #1008: Enhanced per-user rate limiting and throttling.
+pub mod rate_limiting;
+
 use error::ContractError;
 use validation::assert_valid_bps;
 use calc::{calc_platform_fee, funding_bps};
@@ -18948,5 +18957,362 @@ impl SplitContract {
             .persistent()
             .get(&invoice_ops_key(invoice_id))
             .unwrap_or_else(|| Vec::new(&env))
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #1011: Enhanced emergency pause mechanism
+    // -----------------------------------------------------------------------
+
+    /// Register a named pause condition. Requires SuperAdmin.
+    pub fn register_pause_condition(
+        env: Env,
+        admin: Address,
+        id: Symbol,
+        description: String,
+        severity: emergency_pause::PauseSeverity,
+        auto_pause: bool,
+        trigger_authority: Option<Address>,
+    ) {
+        require_admin_role(&env, &admin, AdminRole::SuperAdmin);
+        emergency_pause::register_condition(
+            &env,
+            &admin,
+            id,
+            description,
+            severity,
+            auto_pause,
+            trigger_authority,
+        );
+    }
+
+    /// Unregister a named pause condition. Requires SuperAdmin.
+    pub fn unregister_pause_condition(env: Env, admin: Address, id: Symbol) {
+        require_admin_role(&env, &admin, AdminRole::SuperAdmin);
+        emergency_pause::unregister_condition(&env, &admin, &id);
+    }
+
+    /// Retrieve all registered pause conditions.
+    pub fn get_pause_conditions(env: Env) -> Vec<emergency_pause::PauseCondition> {
+        emergency_pause::get_conditions(&env)
+    }
+
+    /// Trigger a named condition. If `auto_pause` is set and severity is Critical,
+    /// the contract is immediately paused.
+    pub fn trigger_pause_condition(env: Env, caller: Address, condition_id: Symbol) {
+        caller.require_auth();
+        let currently_paused = is_paused(&env);
+        let mut set_paused_fn = |e: &Env, flag: bool| {
+            e.storage().instance().set(&paused_key(), &flag);
+            if flag {
+                events::contract_paused(e, &caller);
+                emergency_pause::record_pause_analytics(e);
+                emergency_pause::record_critical_trigger(e);
+            }
+        };
+        emergency_pause::trigger_condition(
+            &env,
+            &caller,
+            &condition_id,
+            currently_paused,
+            &mut set_paused_fn,
+        );
+    }
+
+    /// Clear a named condition (mark it resolved). Requires Operator.
+    pub fn clear_pause_condition(env: Env, admin: Address, condition_id: Symbol) {
+        require_admin_role(&env, &admin, AdminRole::Operator);
+        emergency_pause::clear_condition(&env, &admin, &condition_id);
+    }
+
+    /// Retrieve currently active (triggered) condition IDs.
+    pub fn get_active_pause_conditions(env: Env) -> Vec<Symbol> {
+        emergency_pause::get_active_condition_ids(&env)
+    }
+
+    /// Initiate a recovery plan. Required before unpausing when Critical conditions are active.
+    /// Requires SuperAdmin.
+    pub fn initiate_pause_recovery(env: Env, admin: Address, steps: Vec<String>) {
+        require_admin_role(&env, &admin, AdminRole::SuperAdmin);
+        emergency_pause::initiate_recovery(&env, &admin, steps);
+    }
+
+    /// Mark a recovery step as complete. Requires Operator.
+    pub fn complete_pause_recovery_step(env: Env, admin: Address, step_index: u32) {
+        require_admin_role(&env, &admin, AdminRole::Operator);
+        emergency_pause::complete_recovery_step(&env, &admin, step_index);
+    }
+
+    /// Cancel the active recovery plan. Requires SuperAdmin.
+    pub fn cancel_pause_recovery(env: Env, admin: Address) {
+        require_admin_role(&env, &admin, AdminRole::SuperAdmin);
+        emergency_pause::cancel_recovery(&env, &admin);
+    }
+
+    /// Return the active recovery plan (if any).
+    pub fn get_pause_recovery_plan(env: Env) -> Option<emergency_pause::RecoveryPlan> {
+        emergency_pause::get_recovery_plan(&env)
+    }
+
+    /// Subscribe an external contract to pause/unpause notifications. Requires Operator.
+    pub fn add_pause_subscriber(env: Env, admin: Address, subscriber: Address) {
+        require_admin_role(&env, &admin, AdminRole::Operator);
+        emergency_pause::add_subscriber(&env, &admin, subscriber);
+    }
+
+    /// Remove a notification subscriber. Requires Operator.
+    pub fn remove_pause_subscriber(env: Env, admin: Address, subscriber: Address) {
+        require_admin_role(&env, &admin, AdminRole::Operator);
+        emergency_pause::remove_subscriber(&env, &admin, &subscriber);
+    }
+
+    /// Return emergency pause analytics.
+    pub fn get_pause_analytics(env: Env) -> emergency_pause::PauseAnalytics {
+        emergency_pause::get_analytics(&env)
+    }
+
+    /// Average pause duration in seconds.
+    pub fn get_avg_pause_duration_secs(env: Env) -> u64 {
+        emergency_pause::average_pause_duration_secs(&env)
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #1010: Enhanced contract upgrade mechanism
+    // -----------------------------------------------------------------------
+
+    /// Return the current semantic version.
+    pub fn get_contract_version(env: Env) -> contract_upgrade::ContractVersion {
+        contract_upgrade::get_version(&env)
+    }
+
+    /// Return the previous semantic version (before the last upgrade).
+    pub fn get_previous_contract_version(env: Env) -> Option<contract_upgrade::ContractVersion> {
+        contract_upgrade::get_previous_version(&env)
+    }
+
+    /// Store an upgrade manifest alongside the pending upgrade proposal.
+    /// Must be called by SuperAdmin before `execute_upgrade`.
+    pub fn propose_upgrade_manifest(
+        env: Env,
+        admin: Address,
+        new_wasm_hash: BytesN<32>,
+        new_version_major: u32,
+        new_version_minor: u32,
+        new_version_patch: u32,
+        breaking_changes: String,
+        new_features: String,
+        requires_migration: bool,
+    ) {
+        require_admin_role(&env, &admin, AdminRole::SuperAdmin);
+        let manifest = contract_upgrade::UpgradeManifest {
+            new_wasm_hash: new_wasm_hash.clone(),
+            new_version: contract_upgrade::ContractVersion {
+                major: new_version_major,
+                minor: new_version_minor,
+                patch: new_version_patch,
+            },
+            breaking_changes,
+            new_features,
+            requires_migration,
+            proposed_by_note: String::from_str(&env, "admin"),
+            proposed_at_ledger: env.ledger().sequence(),
+            proposed_at_ts: env.ledger().timestamp(),
+        };
+        contract_upgrade::propose_manifest(&env, &manifest);
+    }
+
+    /// Return the pending upgrade manifest.
+    pub fn get_upgrade_manifest(env: Env) -> Option<contract_upgrade::UpgradeManifest> {
+        contract_upgrade::get_manifest(&env)
+    }
+
+    /// Run pre-upgrade validation checks and return the result (does not execute).
+    pub fn validate_upgrade_proposal(
+        env: Env,
+        proposed_wasm_hash: BytesN<32>,
+    ) -> contract_upgrade::UpgradeValidationResult {
+        contract_upgrade::validate_upgrade(&env, &proposed_wasm_hash)
+    }
+
+    /// Return the upgrade history log.
+    pub fn get_upgrade_history(env: Env) -> Vec<contract_upgrade::UpgradeHistoryEntry> {
+        contract_upgrade::get_upgrade_history(&env)
+    }
+
+    /// Return the previous WASM hash (for rollback verification).
+    pub fn get_rollback_wasm_hash(env: Env) -> Option<BytesN<32>> {
+        contract_upgrade::get_previous_wasm_hash(&env)
+    }
+
+    /// Reset the rollback counter after a stable upgrade. Requires SuperAdmin.
+    pub fn reset_upgrade_rollback_counter(env: Env, admin: Address) {
+        require_admin_role(&env, &admin, AdminRole::SuperAdmin);
+        contract_upgrade::reset_rollback_counter(&env);
+    }
+
+    /// Return the current rollback counter.
+    pub fn get_upgrade_rollback_count(env: Env) -> u32 {
+        contract_upgrade::get_rollback_count(&env)
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #1009: Comprehensive audit logging for compliance
+    // -----------------------------------------------------------------------
+
+    /// Configure the data retention window in seconds. Requires Operator.
+    pub fn set_audit_retention(env: Env, admin: Address, retention_secs: u64) {
+        require_admin_role(&env, &admin, AdminRole::Operator);
+        audit_logging::set_retention_secs(&env, retention_secs);
+    }
+
+    /// Return the current retention window in seconds.
+    pub fn get_audit_retention(env: Env) -> u64 {
+        audit_logging::get_retention_secs(&env)
+    }
+
+    /// Add an authorised audit log reader. Requires SuperAdmin.
+    pub fn add_audit_reader(env: Env, admin: Address, reader: Address) {
+        require_admin_role(&env, &admin, AdminRole::SuperAdmin);
+        audit_logging::add_reader(&env, &admin, reader);
+    }
+
+    /// Remove an audit log reader. Requires SuperAdmin.
+    pub fn remove_audit_reader(env: Env, admin: Address, reader: Address) {
+        require_admin_role(&env, &admin, AdminRole::SuperAdmin);
+        audit_logging::remove_reader(&env, &admin, &reader);
+    }
+
+    /// Return authorised audit readers.
+    pub fn get_audit_readers(env: Env) -> Vec<Address> {
+        audit_logging::get_readers(&env)
+    }
+
+    /// Append a compliance log entry manually (e.g. for off-chain events
+    /// acknowledged on-chain). Requires Operator.
+    pub fn append_compliance_log(
+        env: Env,
+        admin: Address,
+        kind: audit_logging::LogEventKind,
+        action: Symbol,
+        invoice_id: u64,
+        data_hash: Option<BytesN<32>>,
+        note: String,
+    ) -> u64 {
+        require_admin_role(&env, &admin, AdminRole::Operator);
+        audit_logging::append(
+            &env,
+            kind,
+            action,
+            &admin,
+            invoice_id,
+            data_hash,
+            note,
+        )
+    }
+
+    /// Read a single compliance log entry by sequence number.
+    pub fn get_compliance_log_entry(env: Env, seq: u64) -> Option<audit_logging::ComplianceLogEntry> {
+        audit_logging::get_entry(&env, seq)
+    }
+
+    /// Retrieve up to `limit` entries starting from `from_seq`.
+    pub fn get_compliance_logs(
+        env: Env,
+        from_seq: u64,
+        limit: u32,
+    ) -> Vec<audit_logging::ComplianceLogEntry> {
+        audit_logging::get_entries_from(&env, from_seq, limit)
+    }
+
+    /// Return the (head, tail) sequence range of live (non-evicted) entries.
+    pub fn get_compliance_log_range(env: Env) -> (u64, u64) {
+        audit_logging::get_live_range(&env)
+    }
+
+    /// Return aggregate audit statistics.
+    pub fn get_audit_stats(env: Env) -> audit_logging::AuditStats {
+        audit_logging::get_stats(&env)
+    }
+
+    /// Purge log entries older than the retention window. Requires Operator.
+    /// Returns the number of entries purged.
+    pub fn purge_audit_logs(env: Env, admin: Address) -> u64 {
+        require_admin_role(&env, &admin, AdminRole::Operator);
+        audit_logging::purge_expired(&env, &admin)
+    }
+
+    /// Return entries whose timestamp falls in `[from_ts, to_ts]`.
+    pub fn query_compliance_logs_by_time(
+        env: Env,
+        from_ts: u64,
+        to_ts: u64,
+        max_results: u32,
+    ) -> Vec<audit_logging::ComplianceLogEntry> {
+        audit_logging::entries_in_range(&env, from_ts, to_ts, max_results)
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #1008: Enhanced per-user rate limiting and throttling
+    // -----------------------------------------------------------------------
+
+    /// Configure the rate limit for a named operation. Requires Operator.
+    pub fn configure_rate_limit(
+        env: Env,
+        admin: Address,
+        op: Symbol,
+        max_calls: u32,
+        window_secs: u64,
+        backoff_enabled: bool,
+        max_backoff_steps: u32,
+    ) {
+        require_admin_role(&env, &admin, AdminRole::Operator);
+        let config = rate_limiting::RateLimitConfig {
+            max_calls,
+            window_secs,
+            backoff_enabled,
+            max_backoff_steps,
+        };
+        rate_limiting::configure(&env, &op, &config);
+    }
+
+    /// Remove the rate-limit configuration for an operation. Requires Operator.
+    pub fn remove_rate_limit_config(env: Env, admin: Address, op: Symbol) {
+        require_admin_role(&env, &admin, AdminRole::Operator);
+        rate_limiting::remove_config(&env, &op);
+    }
+
+    /// Return the rate-limit config for an operation.
+    pub fn get_rate_limit_config(env: Env, op: Symbol) -> rate_limiting::RateLimitConfig {
+        rate_limiting::get_config(&env, &op)
+    }
+
+    /// Return all registered rate-limited operations.
+    pub fn get_rate_limited_ops(env: Env) -> Vec<Symbol> {
+        rate_limiting::get_operations(&env)
+    }
+
+    /// Return the rate-limit state for a specific (operation, user) pair.
+    pub fn get_user_rate_limit_state(
+        env: Env,
+        op: Symbol,
+        user: Address,
+    ) -> rate_limiting::RateLimitState {
+        rate_limiting::get_state(&env, &op, &user)
+    }
+
+    /// Admin override: reset the rate-limit state for a user on an operation.
+    /// Requires Operator.
+    pub fn reset_user_rate_limit(env: Env, admin: Address, op: Symbol, user: Address) {
+        require_admin_role(&env, &admin, AdminRole::Operator);
+        rate_limiting::reset_user_state(&env, &op, &user);
+    }
+
+    /// Return aggregate rate-limiting analytics.
+    pub fn get_rate_limit_analytics(env: Env) -> rate_limiting::RateLimitAnalytics {
+        rate_limiting::get_analytics(&env)
+    }
+
+    /// Return the current denial rate in basis points (0–10000).
+    pub fn get_rate_limit_denial_bps(env: Env) -> u32 {
+        rate_limiting::denial_rate_bps(&env)
     }
 }
