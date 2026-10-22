@@ -6,7 +6,6 @@ use soroban_sdk::{
     token::{Client as TokenClient, StellarAssetClient},
     Address, Bytes, BytesN, Env, String, Symbol, Val, Vec,
 };
-use types::InvoiceOptions;
 
 // ---------------------------------------------------------------------------
 // Test helpers
