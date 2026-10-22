@@ -25,6 +25,7 @@
 //! symbol exceeds the short-macro length limit or must be constructed
 //! dynamically.
 
+use crate::analytics::{self, UsageKind};
 use crate::storage_keys::ev_seq_key;
 use crate::types::{DisputeOutcome, FeeSplit, InvoicePhase, InvoiceStatus, OverfundingPolicy, RepScore, TimelockAction};
 use soroban_sdk::{contracttype, symbol_short, Address, BytesN, Env, String, Symbol, Vec};
@@ -115,6 +116,7 @@ pub fn invoice_created(
         (symbol_short!("split"), symbol_short!("created"), invoice_id),
         (creator.clone(), total, cross_chain_ref.clone(), event_seq),
     );
+    analytics::record(env, UsageKind::InvoiceCreated, Some(creator), total);
 }
 
 /// Emitted at invoice creation when `forward_to` is configured, making
@@ -137,6 +139,7 @@ pub fn payment_received(env: &Env, invoice_id: u64, payer: &Address, amount: i12
         (symbol_short!("split"), symbol_short!("paid"), invoice_id),
         (payer.clone(), amount, token.clone(), event_seq),
     );
+    analytics::record(env, UsageKind::PaymentReceived, Some(payer), amount);
 }
 
 /// Issue #954: Emitted when a payment is received, carrying the full
@@ -219,6 +222,7 @@ pub fn invoice_released(env: &Env, invoice_id: u64, recipients: &Vec<Address>) {
         ),
         (recipients.clone(), event_seq),
     );
+    analytics::record(env, UsageKind::InvoiceReleased, None, 0);
 }
 
 /// Emitted when an invoice is refunded.
@@ -234,6 +238,7 @@ pub fn invoice_refunded(env: &Env, invoice_id: u64, amount: i128) {
         ),
         (invoice_id, amount, event_seq),
     );
+    analytics::record(env, UsageKind::InvoiceRefunded, None, amount);
 }
 
 /// Issue #956: Emitted when an invoice is refunded, carrying the reason.
@@ -254,6 +259,7 @@ pub fn invoice_refunded_with_reason(
         ),
         (invoice_id, amount, *reason, event_seq),
     );
+    analytics::record(env, UsageKind::InvoiceRefunded, None, amount);
 }
 
 /// Emitted when a release-condition preimage is verified.
