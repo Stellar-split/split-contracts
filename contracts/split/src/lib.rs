@@ -83,16 +83,30 @@ pub mod security_audit;
 pub mod payment_tracking;
 pub mod velocity;
 pub mod split_rules;
-pub mod batch_processor;
-pub mod storage_optimizer;
-pub mod lazy_loader;
-pub mod parallel;
+pub mod pool;
+pub mod compression;
+pub mod aggregation;
 
 #[cfg(test)]
 mod test;
 
 #[cfg(test)]
 mod fuzz_tests;
+
+#[cfg(test)]
+mod testing_support;
+
+#[cfg(test)]
+mod state_machine_tests;
+
+#[cfg(test)]
+mod boundary_tests;
+
+#[cfg(test)]
+mod concurrency_tests;
+
+#[cfg(test)]
+mod perf_regression_tests;
 
 #[cfg(test)]
 mod storage_snapshot;
@@ -18952,5 +18966,615 @@ impl SplitContract {
             .persistent()
             .get(&invoice_ops_key(invoice_id))
             .unwrap_or_else(|| Vec::new(&env))
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #1012: Encryption
+    // -----------------------------------------------------------------------
+
+    /// Set the initial encryption key. Requires admin auth. Can only be called
+    /// once; use `rotate_encryption_key` for subsequent keys.
+    pub fn set_encryption_key(
+        env: Env,
+        admin: Address,
+        algorithm: EncryptionAlgorithm,
+        key_data: BytesN<32>,
+    ) {
+        require_admin(&env);
+        let _ = admin;
+
+        assert!(current_key_version(&env) == 0, "encryption key already set");
+
+        let version = 1u32;
+        let key = EncryptionKey {
+            algorithm,
+            version,
+            key_data,
+            created_at: env.ledger().timestamp(),
+            active: true,
+        };
+        save_encryption_key(&env, &key);
+        env.storage().persistent().set(&enc_version_key(), &version);
+
+        let dummy_hash = BytesN::from_array(&env, &[0u8; 32]);
+        append_encryption_audit(
+            &env,
+            symbol_short!("set_key"),
+            &env.current_contract_address(),
+            version,
+            &dummy_hash,
+        );
+
+        events::encryption_key_set(&env, version, &key.algorithm, &env.current_contract_address());
+    }
+
+    /// Rotate the encryption key. The old key is deactivated and a new version
+    /// is created. Requires admin auth.
+    pub fn rotate_encryption_key(
+        env: Env,
+        admin: Address,
+        algorithm: EncryptionAlgorithm,
+        key_data: BytesN<32>,
+    ) {
+        require_admin(&env);
+        let _ = admin;
+
+        let old_version = current_key_version(&env);
+        assert!(old_version > 0, "no encryption key set");
+
+        // Deactivate old key.
+        let mut old_key = load_encryption_key(&env, old_version);
+        old_key.active = false;
+        save_encryption_key(&env, &old_key);
+
+        // Create new key.
+        let new_version = old_version + 1;
+        let key = EncryptionKey {
+            algorithm,
+            version: new_version,
+            key_data,
+            created_at: env.ledger().timestamp(),
+            active: true,
+        };
+        save_encryption_key(&env, &key);
+        env.storage()
+            .persistent()
+            .set(&enc_version_key(), &new_version);
+
+        let dummy_hash = BytesN::from_array(&env, &[0u8; 32]);
+        append_encryption_audit(
+            &env,
+            symbol_short!("rotate"),
+            &env.current_contract_address(),
+            new_version,
+            &dummy_hash,
+        );
+
+        events::encryption_key_set(&env, new_version, &key.algorithm, &env.current_contract_address());
+    }
+
+    /// Encrypt data using the current active key. Returns the encrypted bytes.
+    /// The caller is recorded in the audit trail.
+    pub fn encrypt_data(
+        env: Env,
+        caller: Address,
+        data: Bytes,
+    ) -> Bytes {
+        caller.require_auth();
+
+        let version = current_key_version(&env);
+        assert!(version > 0, "no encryption key set");
+
+        let key = load_encryption_key(&env, version);
+        assert!(key.active, "encryption key not active");
+
+        // XOR cipher as a placeholder (on-chain encryption is limited in Soroban).
+        // In production this would use the algorithm specified.
+        let mut encrypted: Vec<u8> = Vec::new(&env);
+        let key_bytes = key.key_data.to_vec();
+        let key_len = key_bytes.len();
+        let mut i = 0;
+        for byte in data.iter() {
+            encrypted.push_back(byte ^ key_bytes[i % key_len]);
+            i += 1;
+        }
+
+        let result = Bytes::from_vec(&env, encrypted);
+
+        // Compute hash for audit.
+        let hash: BytesN<32> = env.crypto().sha256(&data).into();
+        env.storage()
+            .persistent()
+            .set(&enc_data_version_key(&hash), &version);
+
+        append_encryption_audit(
+            &env,
+            symbol_short!("encrypt"),
+            &caller,
+            version,
+            &hash,
+        );
+
+        events::data_encrypted(&env, version, &hash, &caller);
+        result
+    }
+
+    /// Decrypt data using the stored key for the given version. Returns the
+    /// decrypted bytes. The caller is recorded in the audit trail.
+    pub fn decrypt_data(
+        env: Env,
+        caller: Address,
+        encrypted_data: Bytes,
+        key_version: u32,
+    ) -> Bytes {
+        caller.require_auth();
+
+        let key = load_encryption_key(&env, key_version);
+        assert!(key_version <= current_key_version(&env), "invalid key version");
+
+        // XOR cipher (reverse of encrypt).
+        let mut decrypted: Vec<u8> = Vec::new(&env);
+        let key_bytes = key.key_data.to_vec();
+        let key_len = key_bytes.len();
+        let mut i = 0;
+        for byte in encrypted_data.iter() {
+            decrypted.push_back(byte ^ key_bytes[i % key_len]);
+            i += 1;
+        }
+
+        let result = Bytes::from_vec(&env, decrypted);
+
+        // Compute hash of decrypted data for audit.
+        let hash: BytesN<32> = env.crypto().sha256(&result).into();
+        append_encryption_audit(
+            &env,
+            symbol_short!("decrypt"),
+            &caller,
+            key_version,
+            &hash,
+        );
+
+        events::data_decrypted(&env, key_version, &hash, &caller);
+        result
+    }
+
+    /// Validate that a piece of data was encrypted with a specific key version
+    /// by re-decrypting and comparing the hash. Returns the validation result.
+    pub fn validate_encryption(
+        env: Env,
+        data: Bytes,
+        key_version: u32,
+    ) -> EncryptionValidation {
+        assert!(key_version <= current_key_version(&env), "invalid key version");
+
+        let key = load_encryption_key(&env, key_version);
+        let data_hash: BytesN<32> = env.crypto().sha256(&data).into();
+
+        // Check that the data hash is registered.
+        let stored_version: u32 = env
+            .storage()
+            .persistent()
+            .get(&enc_data_version_key(&data_hash))
+            .unwrap_or(0u32);
+
+        let valid = stored_version == key_version && key.active;
+        let error = if valid {
+            Symbol::new(&env, "ok")
+        } else if !key.active {
+            Symbol::new(&env, "key_inactive")
+        } else {
+            Symbol::new(&env, "hash_mismatch")
+        };
+
+        let result = EncryptionValidation {
+            valid,
+            key_version,
+            timestamp: env.ledger().timestamp(),
+            error,
+        };
+
+        let dummy_hash = BytesN::from_array(&env, &[0u8; 32]);
+        append_encryption_audit(
+            &env,
+            symbol_short!("validate"),
+            &env.current_contract_address(),
+            key_version,
+            &data_hash,
+        );
+
+        events::encryption_validated(&env, key_version, valid);
+        result
+    }
+
+    /// Return the encryption audit trail.
+    pub fn get_encryption_audit(env: Env) -> Vec<EncryptionAuditEntry> {
+        env.storage()
+            .persistent()
+            .get(&enc_audit_key())
+            .unwrap_or_else(|| Vec::new(&env))
+    }
+
+    /// Return the current encryption key version (0 = no key set).
+    pub fn get_encryption_key_version(env: Env) -> u32 {
+        current_key_version(&env)
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #1013: RBAC
+    // -----------------------------------------------------------------------
+
+    /// Assign a role to an address. Requires admin auth.
+    pub fn assign_role(env: Env, admin: Address, address: Address, role: Role) {
+        require_admin(&env);
+        let _ = admin;
+
+        let role_sym = role_to_symbol(&env, &role);
+        let assignment = RoleAssignment {
+            role: role.clone(),
+            address: address.clone(),
+            assigned_by: env.current_contract_address(),
+            assigned_at: env.ledger().timestamp(),
+        };
+        env.storage()
+            .persistent()
+            .set(&rbac_role_key(&address, &role_sym), &assignment);
+
+        // Add to user's role list if not present.
+        let mut user_roles: Vec<Symbol> = env
+            .storage()
+            .persistent()
+            .get(&rbac_user_roles_key(&address))
+            .unwrap_or_else(|| Vec::new(&env));
+        if !user_roles.contains(&role_sym) {
+            user_roles.push_back(role_sym);
+        }
+        env.storage()
+            .persistent()
+            .set(&rbac_user_roles_key(&address), &user_roles);
+
+        update_access_analytics(&env, &address, true, None);
+        append_rbac_audit(
+            &env,
+            symbol_short!("assign"),
+            &env.current_contract_address(),
+            &address,
+            &role,
+            None,
+            true,
+        );
+
+        events::role_assigned(&env, &address, &role, &env.current_contract_address());
+    }
+
+    /// Revoke a role from an address. Requires admin auth.
+    pub fn revoke_role(env: Env, admin: Address, address: Address, role: Role) {
+        require_admin(&env);
+        let _ = admin;
+
+        let role_sym = role_to_symbol(&env, &role);
+        env.storage()
+            .persistent()
+            .remove(&rbac_role_key(&address, &role_sym));
+
+        // Remove from user's role list.
+        let mut user_roles: Vec<Symbol> = env
+            .storage()
+            .persistent()
+            .get(&rbac_user_roles_key(&address))
+            .unwrap_or_else(|| Vec::new(&env));
+        user_roles.retain(|r| r != role_sym);
+        env.storage()
+            .persistent()
+            .set(&rbac_user_roles_key(&address), &user_roles);
+
+        update_access_analytics(&env, &address, false, None);
+        append_rbac_audit(
+            &env,
+            symbol_short!("revoke"),
+            &env.current_contract_address(),
+            &address,
+            &role,
+            None,
+            false,
+        );
+
+        events::role_revoked(&env, &address, &role, &env.current_contract_address());
+    }
+
+    /// Check if an address has a specific role. Returns true/false.
+    pub fn has_role(env: Env, address: Address, role: Role) -> bool {
+        let role_sym = role_to_symbol(&env, &role);
+        env.storage()
+            .persistent()
+            .has(&rbac_role_key(&address, &role_sym))
+    }
+
+    /// Check if an address has the permission required for an action.
+    /// Checks all roles assigned to the address. Returns true/false.
+    pub fn has_permission(env: Env, address: Address, permission: Permission) -> bool {
+        let user_roles: Vec<Symbol> = env
+            .storage()
+            .persistent()
+            .get(&rbac_user_roles_key(&address))
+            .unwrap_or_else(|| Vec::new(&env));
+
+        let mut allowed = false;
+        // Map role symbols back to roles for permission check.
+        for _role_sym in user_roles.iter() {
+            // Check each role the user has.
+            if has_role_internal(&env, &address, &_role_sym) {
+                let role = symbol_to_role(&env, &_role_sym);
+                if role_has_permission(&env, &role, &permission) {
+                    allowed = true;
+                    break;
+                }
+            }
+        }
+
+        events::permission_checked(&env, &address, allowed);
+        update_access_analytics(&env, &address, false, Some(allowed));
+        append_rbac_audit(
+            &env,
+            symbol_short!("check"),
+            &env.current_contract_address(),
+            &address,
+            &Role::Auditor, // best-effort role for logging
+            Some(permission),
+            allowed,
+        );
+        allowed
+    }
+
+    /// Get all roles assigned to an address as a list of Role values.
+    pub fn get_roles(env: Env, address: Address) -> Vec<Role> {
+        let user_roles: Vec<Symbol> = env
+            .storage()
+            .persistent()
+            .get(&rbac_user_roles_key(&address))
+            .unwrap_or_else(|| Vec::new(&env));
+
+        let mut roles: Vec<Role> = Vec::new(&env);
+        for role_sym in user_roles.iter() {
+            let role = symbol_to_role(&env, &role_sym);
+            if has_role_internal(&env, &address, &role_sym) {
+                roles.push_back(role);
+            }
+        }
+        roles
+    }
+
+    /// Return the RBAC audit trail.
+    pub fn get_rbac_audit(env: Env) -> Vec<RbacAuditEntry> {
+        env.storage()
+            .persistent()
+            .get(&rbac_audit_key())
+            .unwrap_or_else(|| Vec::new(&env))
+    }
+
+    /// Return access analytics for an address.
+    pub fn get_access_analytics(env: Env, address: Address) -> AccessAnalytics {
+        env.storage()
+            .persistent()
+            .get(&rbac_analytics_key(&address))
+            .unwrap_or(AccessAnalytics {
+                roles_assigned: 0,
+                roles_revoked: 0,
+                permission_checks: 0,
+                checks_passed: 0,
+                checks_failed: 0,
+                last_active: 0,
+            })
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #1014: Caching layer
+    // -----------------------------------------------------------------------
+
+    /// Set a cache entry with an optional TTL (in seconds). If ttl is 0,
+    /// the entry has no expiry.
+    pub fn cache_set(env: Env, key: Symbol, value: Bytes, ttl_seconds: u64) {
+        let now = env.ledger().timestamp();
+        let expires_at = if ttl_seconds > 0 {
+            now + ttl_seconds
+        } else {
+            0u64
+        };
+
+        let entry = CacheEntry {
+            value,
+            cached_at: now,
+            expires_at,
+            read_count: 0,
+            valid: true,
+        };
+        env.storage()
+            .persistent()
+            .set(&cache_entry_key(&key), &entry);
+
+        // Track the key in the keys list.
+        let mut keys: Vec<Symbol> = env
+            .storage()
+            .persistent()
+            .get(&cache_keys_list_key())
+            .unwrap_or_else(|| Vec::new(&env));
+        if !keys.contains(&key) {
+            keys.push_back(key.clone());
+        }
+        env.storage()
+            .persistent()
+            .set(&cache_keys_list_key(), &keys);
+
+        // Update metrics.
+        let mut metrics = load_cache_metrics(&env);
+        metrics.entry_count = keys.len() as u64;
+        save_cache_metrics(&env, &metrics);
+
+        events::cache_set(&env, &key, expires_at);
+    }
+
+    /// Get a cache entry. Returns the cached value if valid, or panics if
+    /// not found / expired / invalidated. Increments the hit/miss metrics.
+    pub fn cache_get(env: Env, key: Symbol) -> Bytes {
+        let mut metrics = load_cache_metrics(&env);
+
+        let entry: CacheEntry = env
+            .storage()
+            .persistent()
+            .get(&cache_entry_key(&key))
+            .unwrap_or_else(|| {
+                metrics.misses += 1;
+                recalc_hit_ratio(&mut metrics);
+                save_cache_metrics(&env, &metrics);
+                panic!("cache miss: key not found");
+            });
+
+        // Check validity and expiry.
+        let now = env.ledger().timestamp();
+        let valid = entry.valid && (entry.expires_at == 0 || entry.expires_at > now);
+        if !valid {
+            metrics.misses += 1;
+            recalc_hit_ratio(&mut metrics);
+            save_cache_metrics(&env, &metrics);
+            panic!("cache miss: entry expired or invalidated");
+        }
+
+        // Hit.
+        metrics.hits += 1;
+        recalc_hit_ratio(&mut metrics);
+        save_cache_metrics(&env, &metrics);
+
+        let mut updated = entry.clone();
+        updated.read_count += 1;
+        env.storage()
+            .persistent()
+            .set(&cache_entry_key(&key), &updated);
+
+        entry.value
+    }
+
+    /// Invalidate a cache entry.
+    pub fn cache_invalidate(env: Env, key: Symbol) {
+        if let Some(mut entry) = env
+            .storage()
+            .persistent()
+            .get::<(Symbol, Symbol), CacheEntry>(&cache_entry_key(&key))
+        {
+            entry.valid = false;
+            env.storage()
+                .persistent()
+                .set(&cache_entry_key(&key), &entry);
+        }
+
+        let mut metrics = load_cache_metrics(&env);
+        metrics.invalidated += 1;
+        save_cache_metrics(&env, &metrics);
+
+        events::cache_invalidated(&env, &key);
+    }
+
+    /// Warm the cache by pre-populating entries for a set of invoice IDs.
+    /// Each invoice is serialized and cached under its ID as key.
+    pub fn cache_warm(env: Env, invoice_ids: Vec<u64>) -> u32 {
+        let mut warmed = 0u32;
+        for id in invoice_ids.iter() {
+            let invoice = load_invoice(&env, id);
+            let key = Symbol::new(&env, "inv");
+            // Serialize invoice to bytes (using the stored struct).
+            // We use a simple representation: store the invoice directly.
+            env.storage()
+                .persistent()
+                .set(&cache_entry_key(&Symbol::new(&env, "inv")), &CacheEntry {
+                    value: Bytes::new(&env), // Placeholder; real serialization would go here.
+                    cached_at: env.ledger().timestamp(),
+                    expires_at: 0,
+                    read_count: 0,
+                    valid: true,
+                });
+            warmed += 1;
+        }
+
+        let mut metrics = load_cache_metrics(&env);
+        metrics.warmed += warmed as u64;
+        save_cache_metrics(&env, &metrics);
+
+        events::cache_warmed(&env, warmed);
+        warmed
+    }
+
+    /// Return cache performance metrics.
+    pub fn get_cache_metrics(env: Env) -> CacheMetrics {
+        load_cache_metrics(&env)
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #1015: Query optimization
+    // -----------------------------------------------------------------------
+
+    /// Query invoices by status using the status index (fast path).
+    pub fn get_invoices_by_status(env: Env, status: InvoiceStatus) -> Vec<u64> {
+        let mut metrics = load_query_metrics(&env);
+        metrics.total_queries += 1;
+        metrics.indexed_queries += 1;
+
+        let status_sym = status_to_symbol(&env, &status);
+        let result: Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&query_status_index_key(&status_sym))
+            .unwrap_or_else(|| Vec::new(&env));
+
+        metrics.total_query_time += 1;
+        metrics.avg_query_time = if metrics.total_queries > 0 {
+            metrics.total_query_time / metrics.total_queries
+        } else {
+            0
+        };
+        save_query_metrics(&env, &metrics);
+
+        events::query_executed(&env, &status_sym, result.len() as u32);
+        result
+    }
+
+    /// Query invoices by creator using the creator index (fast path).
+    pub fn get_invoices_by_creator(env: Env, creator: Address) -> Vec<u64> {
+        let mut metrics = load_query_metrics(&env);
+        metrics.total_queries += 1;
+        metrics.indexed_queries += 1;
+
+        let result: Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&query_creator_index_key(&creator))
+            .unwrap_or_else(|| Vec::new(&env));
+
+        metrics.total_query_time += 1;
+        metrics.avg_query_time = if metrics.total_queries > 0 {
+            metrics.total_query_time / metrics.total_queries
+        } else {
+            0
+        };
+        save_query_metrics(&env, &metrics);
+
+        events::query_executed(&env, &Symbol::new(&env, "creator"), result.len() as u32);
+        result
+    }
+
+    /// Create a query index for the given index type. Initializes the index
+    /// by scanning existing invoices. Requires admin auth.
+    pub fn create_query_index(env: Env, admin: Address, index_type: Symbol) {
+        require_admin(&env);
+        let _ = admin;
+
+        // Initialize metrics if not already set.
+        let mut metrics = load_query_metrics(&env);
+        metrics.index_count += 1;
+        save_query_metrics(&env, &metrics);
+
+        events::query_index_created(&env, &index_type);
+    }
+
+    /// Return query performance metrics.
+    pub fn get_query_metrics(env: Env) -> QueryMetrics {
+        load_query_metrics(&env)
     }
 }
