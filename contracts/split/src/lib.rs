@@ -83,6 +83,10 @@ pub mod security_audit;
 pub mod payment_tracking;
 pub mod velocity;
 pub mod split_rules;
+pub mod batch_processor;
+pub mod storage_optimizer;
+pub mod lazy_loader;
+pub mod parallel;
 
 #[cfg(test)]
 mod test;
