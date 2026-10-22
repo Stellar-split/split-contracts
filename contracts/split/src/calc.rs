@@ -37,7 +37,7 @@ use crate::types::BASIS_POINTS_TOTAL;
 use soroban_sdk::{Address, Env, Map, Symbol, Vec};
 
 use crate::error::ContractError;
-use crate::math::{bps_of, mul_div, BPS_DENOMINATOR};
+use crate::math::{bps_of, mul_div, mul_mod, BPS_DENOMINATOR};
 
 // ---------------------------------------------------------------------------
 // Issue #955: Fee event tracking

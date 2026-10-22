@@ -6,6 +6,161 @@
 use crate::constants::{MAX_INVOICE_TTL_LEDGERS, MIN_INVOICE_TTL_LEDGERS};
 use soroban_sdk::{Env, IntoVal, TryFromVal, Val};
 
+/// Maximum number of payment shards that may be stored for a single invoice.
+///
+/// Any shard index `>= MAX_PAYMENT_SHARDS` is rejected by
+/// [`validate_shard_index`] before any storage access occurs.
+pub const MAX_PAYMENT_SHARDS: u32 = 32;
+
+/// Error returned when a shard index exceeds the configured bounds.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ShardError {
+    /// The requested shard index is outside `0..MAX_PAYMENT_SHARDS`.
+    ShardIndexOutOfBounds,
+}
+
+/// Validate that `index` is a legal payment shard index.
+///
+/// Shard indices are zero-based and must be strictly less than
+/// [`MAX_PAYMENT_SHARDS`]. This check must run before any shard storage
+/// access so out-of-bounds reads/writes can never touch persistent storage.
+pub fn validate_shard_index(index: u32) -> Result<(), ShardError> {
+    if index >= MAX_PAYMENT_SHARDS {
+        return Err(ShardError::ShardIndexOutOfBounds);
+    }
+    Ok(())
+}
+
+/// Validate a shard count against the configured bounds.
+///
+/// A count of `0` is allowed (no shards), but any count greater than
+/// [`MAX_PAYMENT_SHARDS`] is rejected.
+pub fn validate_shard_count(count: u32) -> Result<(), ShardError> {
+    if count > MAX_PAYMENT_SHARDS {
+        return Err(ShardError::ShardIndexOutOfBounds);
+    }
+    Ok(())
+}
+
+/// Storage tier classification for keys managed by this module.
+///
+/// Issue #949: keys are grouped by access pattern so that hot, small entries
+/// live in instance storage, durable entries live in persistent storage, and
+/// short-lived scratch data lives in temporary storage.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StorageTier {
+    /// Small, frequently accessed contract-wide data (config, counters).
+    Instance,
+    /// Durable per-invoice data (invoices, recipients, contributors).
+    Persistent,
+    /// Short-lived scratch data that may be evicted without loss.
+    Temporary,
+}
+
+/// TTL bump helper for instance storage entries.
+pub fn bump_instance_ttl<K>(env: &Env, key: &K)
+where
+    K: IntoVal<Env, Val> + Clone,
+{
+    env.storage()
+        .instance()
+        .extend_ttl(MIN_INVOICE_TTL_LEDGERS, MAX_INVOICE_TTL_LEDGERS);
+    let _ = key;
+}
+
+/// TTL bump helper for persistent storage entries.
+pub fn bump_persistent_ttl<K>(env: &Env, key: &K)
+where
+    K: IntoVal<Env, Val> + Clone,
+{
+    env.storage()
+        .persistent()
+        .extend_ttl(key, MIN_INVOICE_TTL_LEDGERS, MAX_INVOICE_TTL_LEDGERS);
+}
+
+/// TTL bump helper for temporary storage entries.
+pub fn bump_temporary_ttl<K>(env: &Env, key: &K)
+where
+    K: IntoVal<Env, Val> + Clone,
+{
+    env.storage()
+        .temporary()
+        .extend_ttl(key, MIN_INVOICE_TTL_LEDGERS, MAX_INVOICE_TTL_LEDGERS);
+}
+
+/// Save an entry into the given tier and bump its TTL.
+pub fn save_in_tier<K, V>(env: &Env, tier: StorageTier, key: K, value: &V)
+where
+    K: IntoVal<Env, Val> + Clone,
+    V: IntoVal<Env, Val>,
+{
+    match tier {
+        StorageTier::Instance => {
+            env.storage().instance().set(&key, value);
+            bump_instance_ttl(env, &key);
+        }
+        StorageTier::Persistent => {
+            env.storage().persistent().set(&key, value);
+            bump_persistent_ttl(env, &key);
+        }
+        StorageTier::Temporary => {
+            env.storage().temporary().set(&key, value);
+            bump_temporary_ttl(env, &key);
+        }
+    }
+}
+
+/// Read-modify-write a single field of a stored entry incrementally.
+///
+/// Issue #948: instead of rewriting the whole entry, callers pass a mutator
+/// that receives the current value (if any) and returns the new value. Only
+/// the single key is written, reducing compute and storage churn.
+pub fn update_field<K, V, F>(env: &Env, tier: StorageTier, key: K, mutator: F)
+where
+    K: IntoVal<Env, Val> + Clone,
+    V: IntoVal<Env, Val> + soroban_sdk::TryFromVal<Env, Val>,
+    F: FnOnce(Option<V>) -> V,
+{
+    let current: Option<V> = match tier {
+        StorageTier::Instance => env.storage().instance().get(&key),
+        StorageTier::Persistent => env.storage().persistent().get(&key),
+        StorageTier::Temporary => env.storage().temporary().get(&key),
+    };
+    let updated = mutator(current);
+    save_in_tier(env, tier, key, &updated);
+}
+
+/// Incrementally update a single field of an invoice entry.
+pub fn update_invoice_field<K, V, F>(env: &Env, key: K, mutator: F)
+where
+    K: IntoVal<Env, Val> + Clone,
+    V: IntoVal<Env, Val> + soroban_sdk::TryFromVal<Env, Val>,
+    F: FnOnce(Option<V>) -> V,
+{
+    update_field(env, StorageTier::Persistent, key, mutator);
+}
+
+/// Incrementally update a single recipient amount without rewriting the list.
+pub fn update_recipient_amount<K, V, F>(env: &Env, key: K, mutator: F)
+where
+    K: IntoVal<Env, Val> + Clone,
+    V: IntoVal<Env, Val> + soroban_sdk::TryFromVal<Env, Val>,
+    F: FnOnce(Option<V>) -> V,
+{
+    update_field(env, StorageTier::Persistent, key, mutator);
+}
+
+/// Incrementally bump a counter stored in instance storage.
+pub fn bump_counter<K>(env: &Env, key: K, delta: i128)
+where
+    K: IntoVal<Env, Val> + Clone,
+{
+    update_field::<K, i128, _>(env, StorageTier::Instance, key, |current| {
+        current.unwrap_or(0).saturating_add(delta)
+    });
+}
+
+
 /// TTL (in ledgers) applied to cached invoice extension entries.
 ///
 /// Issue #942: extension data is loaded lazily and cached in temporary
@@ -37,8 +192,8 @@ where
     let ext_key = (soroban_sdk::symbol_short!("inv_ext"), invoice_id);
     let value: Option<V> = env.storage().persistent().get(&ext_key);
 
-    if value.is_some() {
-        env.storage().temporary().set(&cache_key, &value);
+    if let Some(ref v) = value {
+        env.storage().temporary().set(&cache_key, v);
         env.storage().temporary().extend_ttl(
             &cache_key,
             INVOICE_EXT_CACHE_TTL_LEDGERS,
@@ -79,10 +234,9 @@ impl IntoVal<Env, Val> for RecipientCacheKey {
 /// `load` is invoked only on a cache miss and is expected to read the
 /// authoritative recipient list from persistent storage. The returned value is
 /// written to the cache (with a TTL bump) so subsequent reads hit the cache.
-pub fn get_cached_recipients<K, V, F>(env: &Env, invoice_id: u64, load: F) -> V
+pub fn get_cached_recipients<V, F>(env: &Env, invoice_id: u64, load: F) -> V
 where
-    K: IntoVal<Env, Val> + Clone,
-    V: IntoVal<Env, Val> + Clone,
+    V: IntoVal<Env, Val> + TryFromVal<Env, Val> + Clone,
     F: FnOnce() -> V,
 {
     let cache_key = RecipientCacheKey { invoice_id };
@@ -199,7 +353,7 @@ pub fn save_payment_shards<K, V>(
 ) -> Result<(), ShardError>
 where
     K: IntoVal<Env, Val> + Clone,
-    V: IntoVal<Env, Val>,
+    V: IntoVal<Env, Val> + TryFromVal<Env, Val>,
 {
     let count = shards.len();
     validate_shard_count(count)?;

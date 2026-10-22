@@ -5845,7 +5845,7 @@ fn test_storage_tier_invoice_core_readable_after_payment() {
 
     // Core invoice data must remain in the hot tier and be readable.
     let invoice = c.get_invoice(&id);
-    assert_eq!(invoice.id, id);
+    assert_eq!(invoice.recipients.len(), 1);
     assert_eq!(invoice.status, InvoiceStatus::Released);
 }
 
@@ -5863,7 +5863,7 @@ fn test_storage_tier_ext_data_isolated_from_core() {
     // Core and extended records are stored separately and both retrievable.
     let core = c.get_invoice(&id);
     let ext = c.get_invoice_ext(&id);
-    assert_eq!(core.id, id);
+    assert_eq!(core.creator, creator);
     assert!(ext.allowed_payers.is_none());
 }
 

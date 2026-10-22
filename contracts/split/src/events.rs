@@ -26,7 +26,7 @@
 //! dynamically.
 
 use crate::storage_keys::ev_seq_key;
-use crate::types::{DisputeOutcome, FeeSplit, InvoicePhase, InvoiceStatus, OverfundingPolicy, RepScore, TimelockAction};
+use crate::types::{CircuitBreakerState, DisputeOutcome, FeeSplit, InvoicePhase, InvoiceStatus, OverfundingPolicy, RepScore, TimelockAction};
 use soroban_sdk::{contracttype, symbol_short, Address, BytesN, Env, String, Symbol, Vec};
 
 // ---------------------------------------------------------------------------
@@ -2523,6 +2523,7 @@ pub fn confidential_total_verified(env: &Env, invoice_id: u64, verified_by: &Add
 mod tests {
     use super::*;
     use soroban_sdk::{Address, Env};
+    use soroban_sdk::testutils::Address as _;
 
     fn contract_id(env: &Env) -> Address {
         env.register(crate::SplitContract, ())
@@ -2616,4 +2617,57 @@ mod tests {
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Issues #957 / #937 / #938 / #953: guard, approval and transition events
+// ---------------------------------------------------------------------------
+
+/// Issue #957: Emitted when a release-path guard blocks an operation.
+/// Topics: (split, guard_ko, invoice_id)
+/// Data: (guard, detail)
+pub fn guard_failure(env: &Env, invoice_id: u64, guard: &Symbol, detail: i128) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("guard_ko"), invoice_id),
+        (guard.clone(), detail),
+    );
+}
+
+/// Issue #953: Emitted on an invoice state transition with its trigger and
+/// the amount involved.
+/// Topics: (split, inv_trans, invoice_id)
+/// Data: (trigger, from, to, actor, amount)
+pub fn invoice_transition(
+    env: &Env,
+    invoice_id: u64,
+    trigger: Symbol,
+    from: &InvoiceStatus,
+    to: &InvoiceStatus,
+    actor: &Address,
+    amount: i128,
+) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("inv_trans"), invoice_id),
+        (trigger, from.clone(), to.clone(), actor.clone(), amount),
+    );
+}
+
+/// Issue #937: Emitted when a co-signer approves an invoice with a signature.
+/// Topics: (split, inv_aprv, invoice_id)
+/// Data: signer
+pub fn invoice_approved(env: &Env, invoice_id: u64, signer: &Address) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("inv_aprv"), invoice_id),
+        signer.clone(),
+    );
+}
+
+/// Issue #938: Emitted when a validated condition oracle is attached.
+/// Topics: (split, cond_orc, invoice_id)
+/// Data: (oracle, condition)
+pub fn condition_oracle_set(env: &Env, invoice_id: u64, oracle: &Address, condition: &String) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("cond_orc"), invoice_id),
+        (oracle.clone(), condition.clone()),
+    );
 }

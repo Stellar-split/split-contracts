@@ -221,7 +221,7 @@ pub enum StorageKey {
 /// Most variants carry a single `invoice_id: u64`; `PaymentShard` carries
 /// two `u64` values.
 #[contracttype]
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum InvoiceKey {
     Invoice(u64),
     InvoiceExt(u64),
@@ -267,6 +267,17 @@ pub enum InvoiceKey {
     /// read paths avoid re-decoding the full invoice record. Invalidated
     /// whenever the recipient list changes (see `RecipientsList`).
     RecipientsCache(u64),
+    /// Issue #944: Pagination cursor for invoice listings.
+    InvoiceListCursor(u64),
+    /// Issue #948: Incremental per-invoice counters, written without
+    /// rewriting the whole invoice entry.
+    FundedAmount(u64),
+    ReleasedAmount(u64),
+    RefundedAmount(u64),
+    StatusField(u64),
+    RecipientCount(u64),
+    PaidCount(u64),
+    LastModifiedLedger(u64),
 }
 
 // ---------------------------------------------------------------------------
@@ -275,7 +286,7 @@ pub enum InvoiceKey {
 
 /// Per-`Address` keys stored in **persistent** storage.
 #[contracttype]
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AddressKey {
     Reputation(Address),
     Credit(Address),
@@ -314,7 +325,7 @@ pub enum AddressKey {
 
 /// Compound (multi-field) persistent-storage keys.
 #[contracttype]
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CompoundKey {
     PendingPayout(u64, Address),
     Channel(u64, Address),
@@ -336,6 +347,44 @@ pub enum CompoundKey {
     /// invoice and per signer. Presence of this key means the nonce has
     /// already been used and the signature must be rejected.
     UsedSignatureNonce(u64, Address),
+    /// Issue #948: Per-(invoice, recipient) paid flag.
+    RecipientPaid(u64, Address),
+}
+
+// ---------------------------------------------------------------------------
+// Issue #943: Hot-path key constructors
+// ---------------------------------------------------------------------------
+
+/// Build a per-invoice key with no intermediate allocation.
+#[inline(always)]
+pub fn invoice_key(variant: fn(u64) -> InvoiceKey, invoice_id: u64) -> InvoiceKey {
+    variant(invoice_id)
+}
+
+/// Build a per-address key with no intermediate allocation.
+#[inline(always)]
+pub fn address_key(variant: fn(Address) -> AddressKey, address: Address) -> AddressKey {
+    variant(address)
+}
+
+/// Build a compound `(u64, Address)` key with no intermediate allocation.
+#[inline(always)]
+pub fn compound_key_u64_addr(
+    variant: fn(u64, Address) -> CompoundKey,
+    invoice_id: u64,
+    address: Address,
+) -> CompoundKey {
+    variant(invoice_id, address)
+}
+
+/// Build a compound `(Address, Address)` key with no intermediate allocation.
+#[inline(always)]
+pub fn compound_key_addr_addr(
+    variant: fn(Address, Address) -> CompoundKey,
+    first: Address,
+    second: Address,
+) -> CompoundKey {
+    variant(first, second)
 }
 
 // ---------------------------------------------------------------------------

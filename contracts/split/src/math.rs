@@ -163,6 +163,77 @@ impl TryFrom<i128> for FixedPoint {
     }
 }
 
+/// Basis-point denominator (100% = 10 000 bps).
+pub const BPS_DENOMINATOR: i128 = 10_000;
+
+/// Overflow-safe `floor(a * b / d)` for non-negative `a`, `b` and positive `d`.
+///
+/// Tries the direct product first; if that overflows, decomposes
+/// `a = q * d + r` so `a * b / d = q * b + (r * b) / d`, which only overflows
+/// when the true result does not fit.
+///
+/// # Errors
+/// [`ContractError::ArithmeticOverflow`] when `d <= 0`, an input is negative
+/// and the direct product overflows, or the result does not fit in `i128`.
+pub fn mul_div(a: i128, b: i128, d: i128) -> Result<i128, ContractError> {
+    if d <= 0 {
+        return Err(ContractError::ArithmeticOverflow);
+    }
+    if let Some(product) = a.checked_mul(b) {
+        return Ok(product.div_euclid(d));
+    }
+    if a < 0 || b < 0 {
+        return Err(ContractError::ArithmeticOverflow);
+    }
+    let q = a / d;
+    let r = a % d;
+    let whole = q.checked_mul(b).ok_or(ContractError::ArithmeticOverflow)?;
+    let frac = r.checked_mul(b).ok_or(ContractError::ArithmeticOverflow)? / d;
+    whole
+        .checked_add(frac)
+        .ok_or(ContractError::ArithmeticOverflow)
+}
+
+/// Overflow-safe `(a * b) mod d` for non-negative `a`, `b` and positive `d`.
+///
+/// This is the remainder left over by [`mul_div`], used by the
+/// largest-remainder distribution step.
+///
+/// # Errors
+/// [`ContractError::ArithmeticOverflow`] when `d <= 0`, an input is negative
+/// and the direct product overflows, or `d` is too large for the reduced
+/// product to fit.
+pub fn mul_mod(a: i128, b: i128, d: i128) -> Result<i128, ContractError> {
+    if d <= 0 {
+        return Err(ContractError::ArithmeticOverflow);
+    }
+    if let Some(product) = a.checked_mul(b) {
+        return Ok(product.rem_euclid(d));
+    }
+    if a < 0 || b < 0 {
+        return Err(ContractError::ArithmeticOverflow);
+    }
+    let reduced = (a % d)
+        .checked_mul(b % d)
+        .ok_or(ContractError::ArithmeticOverflow)?;
+    Ok(reduced % d)
+}
+
+/// `part * 10 000 / whole`, saturating instead of failing.
+///
+/// Returns `0` when `whole <= 0`. Callers clamp the result to the bps range.
+pub fn bps_of(part: i128, whole: i128) -> i128 {
+    if whole <= 0 {
+        return 0;
+    }
+    match mul_div(part, BPS_DENOMINATOR, whole) {
+        Ok(bps) => bps,
+        // Only reachable for `part` near `i128::MAX`; fall back to dividing
+        // the denominator first, which loses at most one bps of precision.
+        Err(_) => part / (whole / BPS_DENOMINATOR).max(1),
+    }
+}
+
 /// Scale a raw token amount to the canonical 7-decimal internal representation.
 ///
 /// * `raw`     — the amount in the token's native (smallest) unit.

@@ -171,6 +171,16 @@ pub enum ContractError {
     MissingStorageEntry = 75,
     /// Issue #951: The requested operation is not supported by this contract version.
     UnsupportedOperation = 76,
+    /// Issue #931: Deadline is further in the future than the allowed horizon.
+    InvalidDeadline = 77,
+    /// Issue #932: A recipient address is malformed or not a valid account/contract.
+    InvalidRecipientAddress = 78,
+    /// Issue #938: An oracle condition (threshold/comparison) is malformed.
+    InvalidOracleCondition = 79,
+    /// A shard index is outside the configured shard range.
+    InvalidShardIndex = 80,
+    /// A shard has reached its maximum entry capacity.
+    ShardCapacityExceeded = 81,
 }
 
 /// Issue #952: Human-readable, actionable recovery suggestions for every
@@ -384,6 +394,51 @@ pub mod recovery {
             }
             ContractError::TooFewRecipients => {
                 "Add more recipients to meet the configured minimum recipient count."
+            }
+            ContractError::InvalidSignature => {
+                "Re-sign the payload with the expected co-signer key and retry."
+            }
+            ContractError::MissingSignature => {
+                "Supply every required co-signer signature, then retry."
+            }
+            ContractError::SignatureReplayed => {
+                "This signature was already used; sign a fresh payload with a new nonce."
+            }
+            ContractError::SignatureExpired => {
+                "The signature's validity window has passed; sign again with a current ledger bound."
+            }
+            ContractError::InvalidOracleAddress => {
+                "Configure a valid oracle contract address for this network."
+            }
+            ContractError::OracleConditionNotMet => {
+                "The oracle condition is not yet satisfied; wait for it to hold, then retry."
+            }
+            ContractError::OracleFeedNotFound => {
+                "Ask the admin to configure an oracle feed for this asset pair."
+            }
+            ContractError::InvalidArgument => {
+                "Check the argument ranges and formats, then retry."
+            }
+            ContractError::MissingStorageEntry => {
+                "Create the required record first (e.g. initialize or configure), then retry."
+            }
+            ContractError::UnsupportedOperation => {
+                "This operation is not supported by the deployed contract version."
+            }
+            ContractError::InvalidDeadline => {
+                "Choose a deadline within the allowed horizon (about 10 years) from now."
+            }
+            ContractError::InvalidRecipientAddress => {
+                "Use a valid Stellar account (G...) or contract (C...) address for every recipient."
+            }
+            ContractError::InvalidOracleCondition => {
+                "Use a positive threshold and a supported comparison operator."
+            }
+            ContractError::InvalidShardIndex => {
+                "Use a shard index within the configured shard count."
+            }
+            ContractError::ShardCapacityExceeded => {
+                "The shard is full; write to a different shard or archive old entries."
             }
         }
     }
