@@ -313,3 +313,15 @@ Run tests with:
 ```sh
 cargo test --lib storage_keys
 ```
+
+## Usage Analytics Storage (Issue #1034)
+
+Defined privately in `contracts/split/src/analytics.rs` as `symbol_short!` keys. The `an_` prefix is used by no other module.
+
+| Key | Tier | Value | Purpose |
+|-----|------|-------|---------|
+| `an_on` | instance | `bool` | Recording on/off (absent = on) |
+| `an_tot` | instance | `UsageTotals` | Lifetime usage counters |
+| `(an_day, u64)` | persistent | `DailyUsage` | Usage for one UTC day (`timestamp / 86_400`) |
+| `(an_crt, Address)` | persistent | `bool` | Address has created an invoice (unique-creator count) |
+| `(an_pyr, Address)` | persistent | `bool` | Address has paid an invoice (unique-payer count) |

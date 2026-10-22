@@ -83,6 +83,7 @@ pub mod security_audit;
 pub mod payment_tracking;
 pub mod velocity;
 pub mod split_rules;
+pub mod analytics;
 
 #[cfg(test)]
 mod test;
@@ -18950,3 +18951,47 @@ impl SplitContract {
             .unwrap_or_else(|| Vec::new(&env))
     }
 }
+
+// ---------------------------------------------------------------------------
+// Issue #1034: Contract usage analytics
+// ---------------------------------------------------------------------------
+#[contractimpl]
+impl SplitContract {
+    /// Turn usage recording on or off. Admin only. Reads keep working on the
+    /// data already collected while recording is off.
+    pub fn set_analytics_enabled(env: Env, enabled: bool) {
+        require_admin(&env);
+        analytics::set_enabled(&env, enabled);
+    }
+
+    /// Whether usage recording is on (default `true`).
+    pub fn is_analytics_enabled(env: Env) -> bool {
+        analytics::is_enabled(&env)
+    }
+
+    /// Lifetime usage counters.
+    pub fn get_usage_totals(env: Env) -> analytics::UsageTotals {
+        analytics::get_totals(&env)
+    }
+
+    /// Usage for one UTC day (`day = timestamp / 86_400`).
+    pub fn get_usage_day(env: Env, day: u64) -> analytics::DailyUsage {
+        analytics::get_day(&env, day)
+    }
+
+    /// Daily usage for `from_day..=to_day` (at most 90 days), empty days included.
+    pub fn get_usage_report(env: Env, from_day: u64, to_day: u64) -> Vec<analytics::DailyUsage> {
+        analytics::report(&env, from_day, to_day).unwrap_or_else(|e| panic_with_error!(&env, e))
+    }
+
+    /// Averages, conversion rates and the week-over-week payment trend.
+    pub fn get_usage_insights(env: Env) -> analytics::UsageInsights {
+        analytics::insights(&env)
+    }
+
+    /// Totals, today's bucket and insights in one read.
+    pub fn get_usage_dashboard(env: Env) -> analytics::UsageDashboard {
+        analytics::dashboard(&env)
+    }
+}
+

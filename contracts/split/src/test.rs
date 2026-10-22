@@ -9701,3 +9701,144 @@ fn test_913_non_creator_cannot_set_rules() {
     rules.push_back(rule_913(0, 0, RuleCriteria::Always, RuleAmount::Fixed(1)));
     c.set_invoice_split_rules(&Address::generate(&env), &id, &rules);
 }
+
+// ---------------------------------------------------------------------------
+// Issue #1034: Contract usage analytics
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_1034_tracks_create_pay_and_release() {
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+    let creator = Address::generate(&env);
+    let payer = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    StellarAssetClient::new(&env, &token_id).mint(&payer, &500);
+    env.ledger().set_timestamp(1_000);
+
+    let id = make_invoice(&env, &c, &creator, &recipient, 200, &token_id, 9_999);
+    c.pay(&payer, &id, &100_i128, &0_u64, &false, &false, &None);
+    c.pay(&payer, &id, &100_i128, &0_u64, &false, &false, &None);
+    assert_eq!(c.get_invoice(&id).status, InvoiceStatus::Released);
+
+    let totals = c.get_usage_totals();
+    assert_eq!(totals.invoices_created, 1);
+    assert_eq!(totals.created_volume, 200);
+    assert_eq!(totals.payments, 2);
+    assert_eq!(totals.payment_volume, 200);
+    assert_eq!(totals.releases, 1);
+    assert_eq!(totals.unique_creators, 1);
+    assert_eq!(totals.unique_payers, 1);
+    assert_eq!(totals.first_activity_at, 1_000);
+    assert_eq!(totals.last_activity_at, 1_000);
+
+    let today = c.get_usage_day(&0);
+    assert_eq!(today.invoices_created, 1);
+    assert_eq!(today.payments, 2);
+    assert_eq!(today.releases, 1);
+
+    let insights = c.get_usage_insights();
+    assert_eq!(insights.avg_payment, 100);
+    assert_eq!(insights.avg_invoice_total, 200);
+    assert_eq!(insights.payments_per_invoice_x100, 200);
+    assert_eq!(insights.release_rate_bps, 10_000);
+    assert_eq!(insights.refund_rate_bps, 0);
+
+    let dash = c.get_usage_dashboard();
+    assert!(dash.enabled);
+    assert_eq!(dash.totals, totals);
+    assert_eq!(dash.today, today);
+}
+
+#[test]
+fn test_1034_tracks_refunds() {
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+    let payer = Address::generate(&env);
+    StellarAssetClient::new(&env, &token_id).mint(&payer, &100);
+    env.ledger().set_timestamp(1_000);
+
+    let id = make_invoice(&env, &c, &Address::generate(&env), &Address::generate(&env), 500, &token_id, 2_000);
+    c.pay(&payer, &id, &100_i128, &0_u64, &false, &false, &None);
+    env.ledger().set_timestamp(3_000);
+    c.refund(&id);
+
+    let totals = c.get_usage_totals();
+    assert_eq!(totals.refunds, 1);
+    assert_eq!(totals.refund_volume, 100);
+    assert_eq!(c.get_usage_insights().refund_rate_bps, 10_000);
+}
+
+#[test]
+fn test_1034_disabling_stops_recording() {
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+    env.ledger().set_timestamp(1_000);
+    make_invoice(&env, &c, &Address::generate(&env), &Address::generate(&env), 100, &token_id, 9_999);
+    assert_eq!(c.get_usage_totals().invoices_created, 1);
+
+    c.set_analytics_enabled(&false);
+    assert!(!c.is_analytics_enabled());
+    make_invoice(&env, &c, &Address::generate(&env), &Address::generate(&env), 100, &token_id, 9_999);
+    assert_eq!(c.get_usage_totals().invoices_created, 1);
+
+    c.set_analytics_enabled(&true);
+    make_invoice(&env, &c, &Address::generate(&env), &Address::generate(&env), 100, &token_id, 9_999);
+    assert_eq!(c.get_usage_totals().invoices_created, 2);
+}
+
+#[test]
+fn test_1034_report_and_weekly_trend() {
+    use analytics::{UsageKind, SECONDS_PER_DAY};
+    let (env, contract_id, _token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+    let payer = Address::generate(&env);
+
+    env.as_contract(&contract_id, || {
+        env.ledger().set_timestamp(10 * SECONDS_PER_DAY);
+        analytics::record(&env, UsageKind::PaymentReceived, Some(&payer), 10);
+        analytics::record(&env, UsageKind::PaymentReceived, Some(&payer), 30);
+        env.ledger().set_timestamp(17 * SECONDS_PER_DAY + 5);
+        for _ in 0..3 {
+            analytics::record(&env, UsageKind::PaymentReceived, Some(&payer), 20);
+        }
+    });
+
+    let report = c.get_usage_report(&10, &17);
+    assert_eq!(report.len(), 8);
+    assert_eq!(report.get(0).unwrap().day, 10);
+    assert_eq!(report.get(0).unwrap().payments, 2);
+    assert_eq!(report.get(0).unwrap().payment_volume, 40);
+    assert_eq!(report.get(1).unwrap().payments, 0);
+    assert_eq!(report.get(7).unwrap().payments, 3);
+
+    let insights = c.get_usage_insights();
+    assert_eq!(insights.payments_this_week, 3);
+    assert_eq!(insights.payments_last_week, 2);
+    assert_eq!(insights.payment_growth_bps, Some(5_000));
+    assert_eq!(insights.busiest_day, 17);
+    assert_eq!(insights.busiest_day_payments, 3);
+    assert_eq!(c.get_usage_totals().unique_payers, 1);
+}
+
+#[test]
+fn test_1034_growth_is_none_without_previous_week() {
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+    let payer = Address::generate(&env);
+    StellarAssetClient::new(&env, &token_id).mint(&payer, &100);
+    env.ledger().set_timestamp(1_000);
+    let id = make_invoice(&env, &c, &Address::generate(&env), &Address::generate(&env), 500, &token_id, 9_999);
+    c.pay(&payer, &id, &100_i128, &0_u64, &false, &false, &None);
+    assert_eq!(c.get_usage_insights().payment_growth_bps, None);
+}
+
+#[test]
+fn test_1034_report_rejects_bad_ranges() {
+    let (env, contract_id, _token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+    assert!(c.try_get_usage_report(&5, &4).is_err());
+    assert!(c.try_get_usage_report(&0, &90).is_err());
+    assert_eq!(c.get_usage_report(&0, &89).len(), 90);
+}
+
