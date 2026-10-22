@@ -9842,3 +9842,106 @@ fn test_1034_report_rejects_bad_ranges() {
     assert_eq!(c.get_usage_report(&0, &89).len(), 90);
 }
 
+// ---------------------------------------------------------------------------
+// Issue #1033: Contract monitoring and alerting
+// ---------------------------------------------------------------------------
+
+fn alert_rule_1033(
+    metric: monitoring::MetricKind,
+    comparator: monitoring::Comparator,
+    threshold: i128,
+    severity: monitoring::AlertSeverity,
+) -> monitoring::AlertRule {
+    monitoring::AlertRule {
+        id: 0,
+        metric,
+        comparator,
+        threshold,
+        severity,
+        cooldown_secs: 0,
+        enabled: true,
+        last_triggered_at: 0,
+        trigger_count: 0,
+    }
+}
+
+#[test]
+fn test_1033_large_payment_raises_alert() {
+    use monitoring::{AlertSeverity, Comparator, MetricKind};
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+    let payer = Address::generate(&env);
+    StellarAssetClient::new(&env, &token_id).mint(&payer, &1_000);
+    env.ledger().set_timestamp(1_000);
+
+    let rule_id = c.add_alert_rule(&alert_rule_1033(
+        MetricKind::PaymentAmount,
+        Comparator::Above,
+        300,
+        AlertSeverity::Critical,
+    ));
+    assert_eq!(rule_id, 1);
+
+    let id = make_invoice(&env, &c, &Address::generate(&env), &Address::generate(&env), 1_000, &token_id, 9_999);
+    c.pay(&payer, &id, &100_i128, &0_u64, &false, &false, &None);
+    assert_eq!(c.get_monitoring_stats().total_alerts, 0);
+    c.pay(&payer, &id, &400_i128, &0_u64, &false, &false, &None);
+
+    let stats = c.get_monitoring_stats();
+    assert_eq!(stats.total_alerts, 1);
+    assert_eq!(stats.critical_alerts, 1);
+    assert_eq!(stats.unacknowledged, 1);
+
+    let alert = c.get_alert(&1).unwrap();
+    assert_eq!(alert.rule_id, rule_id);
+    assert_eq!(alert.value, 400);
+    assert_eq!(alert.delivered, None);
+
+    c.acknowledge_alert(&1);
+    assert!(c.get_alert(&1).unwrap().acknowledged);
+    assert_eq!(c.get_monitoring_stats().unacknowledged, 0);
+}
+
+#[test]
+fn test_1033_check_alerts_and_dashboard() {
+    use monitoring::{AlertSeverity, Comparator, MetricKind};
+    let (env, contract_id, _token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+    env.ledger().set_timestamp(1_000);
+
+    // "No payments today" can only be caught by an explicit check.
+    c.add_alert_rule(&alert_rule_1033(
+        MetricKind::DailyPayments,
+        Comparator::Below,
+        1,
+        AlertSeverity::Warning,
+    ));
+    assert_eq!(c.check_alerts(), 1);
+
+    let dash = c.get_monitoring_dashboard();
+    assert_eq!(dash.rules.len(), 1);
+    assert_eq!(dash.recent_alerts.len(), 1);
+    assert_eq!(dash.metrics.len(), 6);
+    assert_eq!(dash.stats.warning_alerts, 1);
+    assert_eq!(c.get_recent_alerts(&5).len(), 1);
+}
+
+#[test]
+fn test_1033_rule_management() {
+    use monitoring::{AlertSeverity, Comparator, MetricKind};
+    let (env, contract_id, _token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+    let rule = alert_rule_1033(MetricKind::DailyPayments, Comparator::Below, 1, AlertSeverity::Info);
+
+    let id = c.add_alert_rule(&rule);
+    c.set_alert_rule_enabled(&id, &false);
+    assert!(!c.get_alert_rules().get(0).unwrap().enabled);
+    assert_eq!(c.check_alerts(), 0);
+
+    c.remove_alert_rule(&id);
+    assert_eq!(c.get_alert_rules().len(), 0);
+    assert!(c.try_remove_alert_rule(&id).is_err());
+
+    let bad = alert_rule_1033(MetricKind::RefundRateBps, Comparator::Above, 20_000, AlertSeverity::Info);
+    assert!(c.try_add_alert_rule(&bad).is_err());
+}

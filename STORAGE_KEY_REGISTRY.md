@@ -325,3 +325,16 @@ Defined privately in `contracts/split/src/analytics.rs` as `symbol_short!` keys.
 | `(an_day, u64)` | persistent | `DailyUsage` | Usage for one UTC day (`timestamp / 86_400`) |
 | `(an_crt, Address)` | persistent | `bool` | Address has created an invoice (unique-creator count) |
 | `(an_pyr, Address)` | persistent | `bool` | Address has paid an invoice (unique-payer count) |
+
+## Monitoring Storage (Issue #1033)
+
+Defined privately in `contracts/split/src/monitoring.rs` as `symbol_short!` keys. The `mon_` prefix is used by no other module.
+
+| Key | Tier | Value | Purpose |
+|-----|------|-------|---------|
+| `mon_rul` | instance | `Vec<AlertRule>` | Registered alert rules (≤ `MAX_ALERT_RULES` = 20) |
+| `mon_rid` | instance | `u32` | Next rule id |
+| `mon_aid` | instance | `u64` | Next alert id |
+| `mon_st` | instance | `MonitoringStats` | Monitor counters |
+| `mon_rcv` | instance | `Address` | Optional alert receiver contract |
+| `(mon_al, u64)` | persistent | `Alert` | Alert record; only the newest `MAX_ALERT_HISTORY` (50) are kept |

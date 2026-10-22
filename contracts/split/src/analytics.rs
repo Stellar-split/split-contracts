@@ -240,6 +240,9 @@ pub fn record(env: &Env, kind: UsageKind, actor: Option<&Address>, amount: i128)
 
     env.storage().instance().set(&totals_key(), &totals);
     env.storage().persistent().set(&day_key(day), &bucket);
+
+    // Issue #1033: evaluate alert rules against the updated aggregates.
+    crate::monitoring::on_usage(env, kind, amount);
 }
 
 /// Mark an address as seen. Returns `true` the first time.

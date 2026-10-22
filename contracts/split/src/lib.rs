@@ -84,6 +84,7 @@ pub mod payment_tracking;
 pub mod velocity;
 pub mod split_rules;
 pub mod analytics;
+pub mod monitoring;
 
 #[cfg(test)]
 mod test;
@@ -18995,3 +18996,76 @@ impl SplitContract {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Issue #1033: Contract monitoring and alerting
+// ---------------------------------------------------------------------------
+#[contractimpl]
+impl SplitContract {
+    /// Register an alert rule and return its id. Admin only.
+    pub fn add_alert_rule(env: Env, rule: monitoring::AlertRule) -> u32 {
+        require_admin(&env);
+        monitoring::add_rule(&env, rule).unwrap_or_else(|e| panic_with_error!(&env, e))
+    }
+
+    /// Remove an alert rule. Admin only.
+    pub fn remove_alert_rule(env: Env, rule_id: u32) {
+        require_admin(&env);
+        monitoring::remove_rule(&env, rule_id).unwrap_or_else(|e| panic_with_error!(&env, e))
+    }
+
+    /// Enable or disable an alert rule. Admin only.
+    pub fn set_alert_rule_enabled(env: Env, rule_id: u32, enabled: bool) {
+        require_admin(&env);
+        monitoring::set_rule_enabled(&env, rule_id, enabled)
+            .unwrap_or_else(|e| panic_with_error!(&env, e))
+    }
+
+    /// All registered alert rules.
+    pub fn get_alert_rules(env: Env) -> Vec<monitoring::AlertRule> {
+        monitoring::get_rules(&env)
+    }
+
+    /// Set (`Some`) or clear (`None`) the contract that receives
+    /// `on_alert(alert)` calls. Admin only.
+    pub fn set_alert_receiver(env: Env, receiver: Option<Address>) {
+        require_admin(&env);
+        monitoring::set_receiver(&env, &receiver);
+    }
+
+    /// Evaluate every alert rule now and return the number of alerts raised.
+    /// Open to anyone so a keeper can catch conditions no event triggers.
+    pub fn check_alerts(env: Env) -> u32 {
+        monitoring::check_all(&env)
+    }
+
+    /// Mark an alert as handled. Admin only.
+    pub fn acknowledge_alert(env: Env, alert_id: u64) {
+        require_admin(&env);
+        monitoring::acknowledge(&env, alert_id).unwrap_or_else(|e| panic_with_error!(&env, e))
+    }
+
+    /// One alert by id (`None` if unknown or pruned from history).
+    pub fn get_alert(env: Env, alert_id: u64) -> Option<monitoring::Alert> {
+        monitoring::get_alert(&env, alert_id)
+    }
+
+    /// Up to `limit` most recent alerts, newest first.
+    pub fn get_recent_alerts(env: Env, limit: u64) -> Vec<monitoring::Alert> {
+        monitoring::recent_alerts(&env, limit)
+    }
+
+    /// Current value of every collectable metric.
+    pub fn get_metrics(env: Env) -> Vec<monitoring::MetricValue> {
+        monitoring::snapshot(&env)
+    }
+
+    /// Counters about the monitor itself.
+    pub fn get_monitoring_stats(env: Env) -> monitoring::MonitoringStats {
+        monitoring::get_stats(&env)
+    }
+
+    /// Stats, rules, metric values and recent alerts in one read.
+    pub fn get_monitoring_dashboard(env: Env) -> monitoring::MonitoringDashboard {
+        monitoring::dashboard(&env)
+    }
+}
