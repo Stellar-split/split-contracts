@@ -83,6 +83,9 @@ pub mod security_audit;
 pub mod payment_tracking;
 pub mod velocity;
 pub mod split_rules;
+pub mod pool;
+pub mod compression;
+pub mod aggregation;
 
 #[cfg(test)]
 mod test;
