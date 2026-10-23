@@ -11,6 +11,8 @@
 #![allow(clippy::too_many_arguments)]
 
 const SHARD_COUNT: u64 = 8;
+/// Issue #936: maximum number of payments a single shard may hold.
+const MAX_PAYMENTS_PER_SHARD: u32 = 1_000;
 const ARCHIVE_AFTER_LEDGERS: u64 = 100_000;
 
 /// Maximum number of co-creators allowed per invoice (bounded to prevent
@@ -78,6 +80,7 @@ mod events;
 pub mod types;
 mod validation;
 mod calc;
+mod math;
 mod stats;
 pub mod security_audit;
 pub mod payment_tracking;
@@ -115,6 +118,7 @@ mod storage;
 mod storage_keys;
 
 mod migrations;
+mod webhooks;
 
 mod insurance_pool;
 mod sustainability;
@@ -145,7 +149,9 @@ const MAX_PARENT_DEPTH: u32 = 10;
 
 use types::{
     AdminAction, AdminRole, AdminSet, ArchivalPolicy, ArchivalRecord, ArchivalStats,
-    ArchivalStatus, AuditEntry, Bid, CircuitBreakerStatus,
+    ArchivalStatus, AuditEntry, BatchExecutionReport, BatchingStats, Bid, CircuitBreakerConfig,
+    CircuitBreakerState, CircuitBreakerStatus, CircuitBreakerTransition, CostEstimate,
+    OperationCostModel, OperationCostReport, OperationProfile, PaymentBatch, PaymentBatchStatus,
     CloneOverrides, CloneRecord, CompactInvoice, CompactMigrateResult, CompletionProof, ComputeEstimate,
     ConfidentialPayment, ContributionResult, CreateInvoiceParams, CreatorStats, DelayedPayout,
     DisputeOutcome, DisputeRecord, DisputeStatus, FeeBracket, FeeSplit, FeeTier, FeeWaiver,
@@ -464,7 +470,7 @@ fn cosigner_signing_payload(
 /// replay protection.
 ///
 /// Returns `Err(ContractError::InvalidSignature)` when the signature does not
-/// verify, and `Err(ContractError::SignatureReplay)` when the nonce has already
+/// verify, and `Err(ContractError::SignatureReplayed)` when the nonce has already
 /// been consumed for this invoice.
 fn verify_cosigner_signature(
     env: &Env,
@@ -475,17 +481,19 @@ fn verify_cosigner_signature(
 ) -> Result<(), ContractError> {
     let nonce_key = used_cosigner_nonce_key(invoice_id, nonce);
     if env.storage().persistent().has(&nonce_key) {
-        return Err(ContractError::SignatureReplay);
+        return Err(ContractError::SignatureReplayed);
     }
 
     let payload = cosigner_signing_payload(env, invoice_id, signer, nonce);
     let payload_hash: BytesN<32> = env.crypto().sha256(&payload).into();
-    if !env
-        .crypto()
-        .ed25519_verify(signature, &payload_hash.into(), &signer.clone().into())
-    {
-        return Err(ContractError::InvalidSignature);
-    }
+    // Only account (G...) addresses carry an Ed25519 public key.
+    let public_key = match signer.to_payload() {
+        Some(soroban_sdk::address_payload::AddressPayload::AccountIdPublicKeyEd25519(pk)) => pk,
+        _ => return Err(ContractError::InvalidSignature),
+    };
+    // `ed25519_verify` traps the invocation when the signature is invalid.
+    env.crypto()
+        .ed25519_verify(&public_key, &Bytes::from(payload_hash), signature);
 
     // Consume the nonce so the same signature cannot be replayed.
     env.storage().persistent().set(&nonce_key, &true);
@@ -650,7 +658,7 @@ fn load_invoice_ext_lazy(env: &Env, id: u64) -> InvoiceExt {
         .storage()
         .persistent()
         .get(&invoice_ext_key(id))
-        .unwrap_or_else(|| InvoiceExt::default_for(env));
+        .unwrap_or_else(|| InvoiceExt::default(env));
     cache.set(id, ext.clone());
     env.storage().temporary().set(&invoice_ext_cache_key(), &cache);
     ext
@@ -17977,9 +17985,7 @@ impl SplitContract {
 
         invoice.approved = true;
         invoice.approver = Some(signer.clone());
-        env.storage()
-            .persistent()
-            .set(&invoice_key(invoice_id), &invoice);
+        save_invoice(&env, invoice_id, &invoice);
         events::invoice_approved(&env, invoice_id, &signer);
     }
 
@@ -18811,7 +18817,7 @@ impl SplitContract {
     }
 
     /// Helper for clients: the response `recipient` must submit for `challenge`.
-    pub fn compute_recipient_challenge_response(
+    pub fn compute_challenge_response(
         env: Env,
         challenge: BytesN<32>,
         recipient: Address,

@@ -2128,15 +2128,17 @@ pub struct InvoiceCursor {
 
 /// Issue #944: A single page of invoices plus the cursor for the next page.
 ///
-/// `next_cursor` is `None` when the returned page is the last one, so callers
+/// `next_cursor` is empty when the returned page is the last one, so callers
 /// can stop paging without an extra empty request.
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct PaginatedInvoices {
     /// Invoice ids in this page, already ordered by the requested sort.
     pub items: Vec<u64>,
-    /// Cursor to pass to the next call, or `None` if this is the last page.
-    pub next_cursor: Option<InvoiceCursor>,
+    /// Cursor to pass to the next call: one element, or empty on the last
+    /// page. A `Vec` rather than `Option` because the SDK cannot encode
+    /// `Option<custom struct>` fields in test builds.
+    pub next_cursor: Vec<InvoiceCursor>,
 }
 
 

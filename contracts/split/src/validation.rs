@@ -5,6 +5,8 @@
 //! rejected atomically.
 
 use crate::error::ContractError;
+use soroban_sdk::address_payload::AddressPayload;
+use soroban_sdk::xdr::ToXdr;
 use soroban_sdk::{symbol_short, Address, Bytes, BytesN, Env, IntoVal, Map, Val, Vec};
 
 /// Issue #931: Maximum number of recipients on a single invoice. Bounds the
@@ -429,9 +431,14 @@ pub fn verify_cosigner_signature(
     signature: &BytesN<64>,
 ) -> Result<(), ContractError> {
     let digest = cosigner_digest(env, contract, invoice_id, nonce, payload)?;
-    if !env.crypto().ed25519_verify(signer, &digest, signature) {
-        return Err(ContractError::InvalidSignature);
-    }
+    // Only account (G...) addresses carry an Ed25519 public key.
+    let public_key = match signer.to_payload() {
+        Some(AddressPayload::AccountIdPublicKeyEd25519(pk)) => pk,
+        _ => return Err(ContractError::InvalidSignature),
+    };
+    // `ed25519_verify` traps the invocation when the signature is invalid.
+    env.crypto()
+        .ed25519_verify(&public_key, &Bytes::from(digest), signature);
     consume_nonce(env, invoice_id, nonce)
 }
 
@@ -484,8 +491,9 @@ pub fn assert_valid_oracle_address(env: &Env, oracle: &Address) -> Result<(), Co
     if s.len() != ORACLE_ADDRESS_LEN {
         return Err(ContractError::InvalidOracleAddress);
     }
-    let bytes = s.as_bytes();
-    let first = bytes.get(0).copied().unwrap_or(0);
+    let mut bytes = [0u8; ORACLE_ADDRESS_LEN as usize];
+    s.copy_into_slice(&mut bytes);
+    let first = bytes[0];
     if first != b'G' && first != b'C' {
         return Err(ContractError::InvalidOracleAddress);
     }
@@ -533,6 +541,97 @@ pub fn evaluate_oracle_condition(
         _ => observed <= threshold,
     };
     Ok(met)
+}
+
+// ---------------------------------------------------------------------------
+// Issues #935 / #939 / #940: fee, split-rule and token validation
+// ---------------------------------------------------------------------------
+
+/// Issue #935: Validate a platform (or early-bird) fee rate against
+/// [`crate::constants::MAX_PLATFORM_FEE_BPS`].
+///
+/// # Errors
+/// Returns [ContractError::FeeSumExceedsCap] when `rate` is above the cap.
+pub fn validate_fee_rate(rate: u32) -> Result<(), ContractError> {
+    if rate > crate::constants::MAX_PLATFORM_FEE_BPS {
+        return Err(ContractError::FeeSumExceedsCap);
+    }
+    Ok(())
+}
+
+/// Issue #939: Validate an invoice's split rules.
+///
+/// * there must be exactly one rule per recipient
+/// * `Fixed` amounts must be positive and `Tiered` thresholds non-negative
+/// * every bps value must be within `0..=10_000`
+/// * the bps of all `Percentage` rules together may not exceed 100%
+///
+/// # Errors
+/// - [ContractError::InvalidRecipients] when the rule count differs from `recipient_count`.
+/// - [ContractError::InvalidAmount] for a non-positive fixed amount or negative threshold.
+/// - [ContractError::InvalidRatio] for a bps value above 10 000.
+/// - [ContractError::InvalidRatioSum] when the percentage rules exceed 10 000 bps.
+pub fn validate_split_rules(
+    rules: &Vec<crate::types::SplitRule>,
+    recipient_count: u32,
+) -> Result<(), ContractError> {
+    use crate::types::SplitRule;
+    if rules.len() != recipient_count {
+        return Err(ContractError::InvalidRecipients);
+    }
+    let mut percentage_total: u32 = 0;
+    for rule in rules.iter() {
+        match rule {
+            SplitRule::Fixed(amount) => {
+                if amount <= 0 {
+                    return Err(ContractError::InvalidAmount);
+                }
+            }
+            SplitRule::Percentage(bps) => {
+                assert_valid_bps(bps).map_err(|_| ContractError::InvalidRatio)?;
+                percentage_total = percentage_total
+                    .checked_add(bps)
+                    .ok_or(ContractError::InvalidRatioSum)?;
+            }
+            SplitRule::Tiered(threshold, bps) => {
+                if threshold < 0 {
+                    return Err(ContractError::InvalidAmount);
+                }
+                assert_valid_bps(bps).map_err(|_| ContractError::InvalidRatio)?;
+            }
+        }
+    }
+    if percentage_total > 10_000 {
+        return Err(ContractError::InvalidRatioSum);
+    }
+    Ok(())
+}
+
+/// Issue #940: Verify that `token` answers the read-only SEP-41 calls
+/// (`decimals` and `balance`).
+///
+/// Only side-effect-free methods are probed so validation never moves funds
+/// or needs extra authorisation.
+///
+/// # Errors
+/// Returns [ContractError::UnauthorisedToken] when either probe fails.
+pub fn validate_token_contract(env: &Env, token: &Address) -> Result<(), ContractError> {
+    let decimals = env.try_invoke_contract::<u32, soroban_sdk::Error>(
+        token,
+        &symbol_short!("decimals"),
+        Vec::new(env),
+    );
+    if !matches!(decimals, Ok(Ok(_))) {
+        return Err(ContractError::UnauthorisedToken);
+    }
+    let mut args: Vec<Val> = Vec::new(env);
+    args.push_back(env.current_contract_address().into_val(env));
+    let balance =
+        env.try_invoke_contract::<i128, soroban_sdk::Error>(token, &symbol_short!("balance"), args);
+    if !matches!(balance, Ok(Ok(_))) {
+        return Err(ContractError::UnauthorisedToken);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1005,64 +1104,110 @@ mod tests {
         assert_ne!(d1, d4);
     }
 
+    /// Deterministic Ed25519 key pair whose public key is a `G...` address.
+    fn signer_keypair(env: &Env, seed: u8) -> (ed25519_dalek::SigningKey, Address) {
+        let sk = ed25519_dalek::SigningKey::from_bytes(&[seed; 32]);
+        let pk = BytesN::from_array(env, &sk.verifying_key().to_bytes());
+        (sk, AddressPayload::AccountIdPublicKeyEd25519(pk).to_address(env))
+    }
+
+    fn sign_digest(env: &Env, sk: &ed25519_dalek::SigningKey, digest: &BytesN<32>) -> BytesN<64> {
+        use ed25519_dalek::Signer;
+        BytesN::from_array(env, &sk.sign(&digest.to_array()).to_bytes())
+    }
+
+    /// Storage-touching helpers need a contract context.
+    fn in_contract<T>(env: &Env, f: impl FnOnce() -> T) -> T {
+        let id = env.register(crate::SplitContract, ());
+        env.as_contract(&id, f)
+    }
+
     #[test]
     fn valid_signature_accepted() {
         let env = Env::default();
         let contract = Address::generate(&env);
-        let signer = Address::generate(&env);
+        let (sk, signer) = signer_keypair(&env, 3);
         let n = nonce(&env, 3);
         let payload = Bytes::from_array(&env, &[9, 9]);
         let digest = cosigner_digest(&env, &contract, 1, &n, &payload).unwrap();
-        let sig = env.crypto().ed25519_sign(&signer, &digest);
-        assert!(verify_cosigner_signature(&env, &contract, 1, &signer, &n, &payload, &sig).is_ok());
+        let sig = sign_digest(&env, &sk, &digest);
+        in_contract(&env, || {
+            assert!(
+                verify_cosigner_signature(&env, &contract, 1, &signer, &n, &payload, &sig).is_ok()
+            );
+        });
     }
 
     #[test]
+    #[should_panic]
     fn invalid_signature_rejected() {
         let env = Env::default();
         let contract = Address::generate(&env);
-        let signer = Address::generate(&env);
+        let (sk, signer) = signer_keypair(&env, 4);
         let n = nonce(&env, 4);
         let payload = Bytes::from_array(&env, &[1]);
         let digest = cosigner_digest(&env, &contract, 1, &n, &payload).unwrap();
-        let sig = env.crypto().ed25519_sign(&signer, &digest);
-        // Tamper with the payload: digest changes, signature no longer matches.
+        let sig = sign_digest(&env, &sk, &digest);
+        // Tamper with the payload: the digest changes, so the host traps.
         let bad_payload = Bytes::from_array(&env, &[2]);
-        assert_eq!(
-            verify_cosigner_signature(&env, &contract, 1, &signer, &n, &bad_payload, &sig),
-            Err(ContractError::InvalidSignature)
-        );
+        in_contract(&env, || {
+            let _ = verify_cosigner_signature(&env, &contract, 1, &signer, &n, &bad_payload, &sig);
+        });
+    }
+
+    #[test]
+    fn contract_signer_rejected() {
+        let env = Env::default();
+        let contract = Address::generate(&env);
+        // `Address::generate` yields a contract (C...) address, which has no
+        // Ed25519 key and can never produce a valid co-signer signature.
+        let signer = Address::generate(&env);
+        let n = nonce(&env, 8);
+        let payload = Bytes::from_array(&env, &[1]);
+        let sig = BytesN::from_array(&env, &[0u8; 64]);
+        in_contract(&env, || {
+            assert_eq!(
+                verify_cosigner_signature(&env, &contract, 1, &signer, &n, &payload, &sig),
+                Err(ContractError::InvalidSignature)
+            );
+        });
     }
 
     #[test]
     fn replayed_signature_rejected() {
         let env = Env::default();
         let contract = Address::generate(&env);
-        let signer = Address::generate(&env);
+        let (sk, signer) = signer_keypair(&env, 5);
         let n = nonce(&env, 5);
         let payload = Bytes::from_array(&env, &[7]);
         let digest = cosigner_digest(&env, &contract, 1, &n, &payload).unwrap();
-        let sig = env.crypto().ed25519_sign(&signer, &digest);
-        assert!(verify_cosigner_signature(&env, &contract, 1, &signer, &n, &payload, &sig).is_ok());
-        assert!(is_nonce_used(&env, 1, &n));
-        assert_eq!(
-            verify_cosigner_signature(&env, &contract, 1, &signer, &n, &payload, &sig),
-            Err(ContractError::SignatureReplayed)
-        );
+        let sig = sign_digest(&env, &sk, &digest);
+        in_contract(&env, || {
+            assert!(
+                verify_cosigner_signature(&env, &contract, 1, &signer, &n, &payload, &sig).is_ok()
+            );
+            assert!(is_nonce_used(&env, 1, &n));
+            assert_eq!(
+                verify_cosigner_signature(&env, &contract, 1, &signer, &n, &payload, &sig),
+                Err(ContractError::SignatureReplayed)
+            );
+        });
     }
 
     #[test]
     fn nonce_scoped_per_invoice() {
         let env = Env::default();
         let n = nonce(&env, 6);
-        assert!(consume_nonce(&env, 1, &n).is_ok());
-        // Same nonce, different invoice -> allowed.
-        assert!(consume_nonce(&env, 2, &n).is_ok());
-        // Same nonce, same invoice -> replayed.
-        assert_eq!(
-            consume_nonce(&env, 1, &n),
-            Err(ContractError::SignatureReplayed)
-        );
+        in_contract(&env, || {
+            assert!(consume_nonce(&env, 1, &n).is_ok());
+            // Same nonce, different invoice -> allowed.
+            assert!(consume_nonce(&env, 2, &n).is_ok());
+            // Same nonce, same invoice -> replayed.
+            assert_eq!(
+                consume_nonce(&env, 1, &n),
+                Err(ContractError::SignatureReplayed)
+            );
+        });
     }
 
     // --- oracle validation (issue #938) ---
@@ -1077,12 +1222,7 @@ mod tests {
     #[test]
     fn invalid_oracle_address_rejected() {
         let env = Env::default();
-        // A contract address is valid strkey but the helper accepts both G/C,
-        // so build a deliberately malformed string instead.
-        let bad = Address::from_string(&"G".repeat(ORACLE_ADDRESS_LEN as usize));
-        // from_string would panic for invalid strkey; instead assert the
-        // length guard directly via a valid address round-trip.
-        let _ = bad;
+        // Every generated address round-trips through its strkey form.
         let oracle = Address::generate(&env);
         assert!(assert_valid_oracle_address(&env, &oracle).is_ok());
     }
