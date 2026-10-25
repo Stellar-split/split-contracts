@@ -235,10 +235,17 @@ fn compute_breakdown(
         }
     };
     let net = taxable - reserved;
-    let effective_rate_bps = (reserved
-        .checked_mul(BPS_DENOMINATOR)
-        .ok_or(Error::Overflow)?
-        / gross) as u32;
+    let effective_rate_bps = {
+        let numerator = reserved
+            .checked_mul(BPS_DENOMINATOR)
+            .ok_or(Error::Overflow)?;
+        let rate = if gross > 0 {
+            ((numerator as f64) / (gross as f64)).round() as i128
+        } else {
+            0
+        };
+        (rate.min(BPS_DENOMINATOR as i128)) as u32
+    };
     Ok(IncomeBreakdown {
         gross,
         deducted,

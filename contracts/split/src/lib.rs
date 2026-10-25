@@ -4032,6 +4032,7 @@ impl SplitContract {
     pub fn set_global_payer_limit(env: Env, admin: Address, limit: i128, window_secs: u64) {
         require_admin_role(&env, &admin, AdminRole::Operator);
         assert!(limit >= 0, "limit must be non-negative");
+        assert!(window_secs > 0 && window_secs <= u32::MAX as u64, "window_secs must be between 1 and 2^32-1");
         env.storage()
             .persistent()
             .set(&global_payer_limit_key(), &limit);
@@ -4154,6 +4155,7 @@ impl SplitContract {
     /// Set to 0 to disable the cooldown.
     pub fn set_cancellation_cooldown(env: Env, admin: Address, cooldown_ledgers: u64) {
         require_admin_role(&env, &admin, AdminRole::Operator);
+        assert!(cooldown_ledgers <= u32::MAX as u64, "cooldown_ledgers must not exceed 2^32-1");
         env.storage()
             .instance()
             .set(&cancellation_cooldown_ledgers_key(), &cooldown_ledgers);
@@ -4194,6 +4196,7 @@ impl SplitContract {
     pub fn set_archive_after_ledgers(env: Env, admin: Address, ledgers: u64) {
         require_admin_role(&env, &admin, AdminRole::Operator);
         assert!(ledgers > 0, "archive_after_ledgers must be positive");
+        assert!(ledgers <= u32::MAX as u64, "archive_after_ledgers must not exceed 2^32-1");
         env.storage()
             .instance()
             .set(&archive_after_ledgers_key(), &ledgers);
