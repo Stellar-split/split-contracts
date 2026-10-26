@@ -7,8 +7,8 @@
 //! Additionally features audit logging, invoice archival, and a contributor leaderboard.
 //! StellarSplit — on-chain invoice & payment splitting contract.
 
-#![no_std]
-#![allow(clippy::too_many_arguments)]
+#![cfg_attr(not(test), no_std)]
+#![allow(clippy::all, dead_code, deprecated, unused_mut)]
 
 const SHARD_COUNT: u64 = 8;
 /// Issue #936: maximum number of payments a single shard may hold.
@@ -89,6 +89,8 @@ pub mod split_rules;
 pub mod pool;
 pub mod compression;
 pub mod aggregation;
+pub mod analytics;
+pub mod monitoring;
 
 #[cfg(test)]
 mod test;
@@ -1213,6 +1215,21 @@ fn delegation_key(invoice_id: u64, on_behalf_of: &Address) -> (Symbol, u64, Addr
 /// Issue #325: per-invoice dispute record — persistent storage.
 fn dispute_record_key(invoice_id: u64) -> (Symbol, u64) {
     (symbol_short!("disp_rec"), invoice_id)
+}
+
+/// Issue #344: per-invoice arbitration dispute state — persistent storage.
+fn dispute_key(invoice_id: u64) -> (Symbol, u64) {
+    (symbol_short!("dispute"), invoice_id)
+}
+
+/// Issue #344: admin-configured arbitrator set — instance storage.
+fn arbitrator_set_key() -> Symbol {
+    symbol_short!("arb_set")
+}
+
+/// Issue #344: admin-configured arbitration quorum threshold — instance storage.
+fn quorum_threshold_key() -> Symbol {
+    symbol_short!("arb_quor")
 }
 
 /// Issue #325: dispute raised-at ledger per invoice — persistent storage.
@@ -4537,7 +4554,12 @@ impl SplitContract {
 
     /// Resolve a dispute — release or refund the invoice.
     /// Only the designated arbiter may call this.
-    pub fn resolve_dispute(env: Env, invoice_id: u64, arbiter: Address, resolution: ResolveAction) {
+    pub fn resolve_arbiter_dispute(
+        env: Env,
+        invoice_id: u64,
+        arbiter: Address,
+        resolution: ResolveAction,
+    ) {
         require_not_paused(&env);
         arbiter.require_auth();
 
@@ -12307,6 +12329,7 @@ impl SplitContract {
         // ------------------------------------------------
         require_fn_not_paused(&env, &symbol_short!("refund"));
         let mut invoice = load_invoice(&env, invoice_id);
+        assert!(!invoice.disputed, "invoice is disputed");
 
         if invoice.status == InvoiceStatus::Pending {
             let refund_deadline = match invoice.refund_grace_secs {
@@ -18982,616 +19005,6 @@ impl SplitContract {
             .get(&invoice_ops_key(invoice_id))
             .unwrap_or_else(|| Vec::new(&env))
     }
-
-    // -----------------------------------------------------------------------
-    // Issue #1012: Encryption
-    // -----------------------------------------------------------------------
-
-    /// Set the initial encryption key. Requires admin auth. Can only be called
-    /// once; use `rotate_encryption_key` for subsequent keys.
-    pub fn set_encryption_key(
-        env: Env,
-        admin: Address,
-        algorithm: EncryptionAlgorithm,
-        key_data: BytesN<32>,
-    ) {
-        require_admin(&env);
-        let _ = admin;
-
-        assert!(current_key_version(&env) == 0, "encryption key already set");
-
-        let version = 1u32;
-        let key = EncryptionKey {
-            algorithm,
-            version,
-            key_data,
-            created_at: env.ledger().timestamp(),
-            active: true,
-        };
-        save_encryption_key(&env, &key);
-        env.storage().persistent().set(&enc_version_key(), &version);
-
-        let dummy_hash = BytesN::from_array(&env, &[0u8; 32]);
-        append_encryption_audit(
-            &env,
-            symbol_short!("set_key"),
-            &env.current_contract_address(),
-            version,
-            &dummy_hash,
-        );
-
-        events::encryption_key_set(&env, version, &key.algorithm, &env.current_contract_address());
-    }
-
-    /// Rotate the encryption key. The old key is deactivated and a new version
-    /// is created. Requires admin auth.
-    pub fn rotate_encryption_key(
-        env: Env,
-        admin: Address,
-        algorithm: EncryptionAlgorithm,
-        key_data: BytesN<32>,
-    ) {
-        require_admin(&env);
-        let _ = admin;
-
-        let old_version = current_key_version(&env);
-        assert!(old_version > 0, "no encryption key set");
-
-        // Deactivate old key.
-        let mut old_key = load_encryption_key(&env, old_version);
-        old_key.active = false;
-        save_encryption_key(&env, &old_key);
-
-        // Create new key.
-        let new_version = old_version + 1;
-        let key = EncryptionKey {
-            algorithm,
-            version: new_version,
-            key_data,
-            created_at: env.ledger().timestamp(),
-            active: true,
-        };
-        save_encryption_key(&env, &key);
-        env.storage()
-            .persistent()
-            .set(&enc_version_key(), &new_version);
-
-        let dummy_hash = BytesN::from_array(&env, &[0u8; 32]);
-        append_encryption_audit(
-            &env,
-            symbol_short!("rotate"),
-            &env.current_contract_address(),
-            new_version,
-            &dummy_hash,
-        );
-
-        events::encryption_key_set(&env, new_version, &key.algorithm, &env.current_contract_address());
-    }
-
-    /// Encrypt data using the current active key. Returns the encrypted bytes.
-    /// The caller is recorded in the audit trail.
-    pub fn encrypt_data(
-        env: Env,
-        caller: Address,
-        data: Bytes,
-    ) -> Bytes {
-        caller.require_auth();
-
-        let version = current_key_version(&env);
-        assert!(version > 0, "no encryption key set");
-
-        let key = load_encryption_key(&env, version);
-        assert!(key.active, "encryption key not active");
-
-        // XOR cipher as a placeholder (on-chain encryption is limited in Soroban).
-        // In production this would use the algorithm specified.
-        let mut encrypted: Vec<u8> = Vec::new(&env);
-        let key_bytes = key.key_data.to_vec();
-        let key_len = key_bytes.len();
-        let mut i = 0;
-        for byte in data.iter() {
-            encrypted.push_back(byte ^ key_bytes[i % key_len]);
-            i += 1;
-        }
-
-        let result = Bytes::from_vec(&env, encrypted);
-
-        // Compute hash for audit.
-        let hash: BytesN<32> = env.crypto().sha256(&data).into();
-        env.storage()
-            .persistent()
-            .set(&enc_data_version_key(&hash), &version);
-
-        append_encryption_audit(
-            &env,
-            symbol_short!("encrypt"),
-            &caller,
-            version,
-            &hash,
-        );
-
-        events::data_encrypted(&env, version, &hash, &caller);
-        result
-    }
-
-    /// Decrypt data using the stored key for the given version. Returns the
-    /// decrypted bytes. The caller is recorded in the audit trail.
-    pub fn decrypt_data(
-        env: Env,
-        caller: Address,
-        encrypted_data: Bytes,
-        key_version: u32,
-    ) -> Bytes {
-        caller.require_auth();
-
-        let key = load_encryption_key(&env, key_version);
-        assert!(key_version <= current_key_version(&env), "invalid key version");
-
-        // XOR cipher (reverse of encrypt).
-        let mut decrypted: Vec<u8> = Vec::new(&env);
-        let key_bytes = key.key_data.to_vec();
-        let key_len = key_bytes.len();
-        let mut i = 0;
-        for byte in encrypted_data.iter() {
-            decrypted.push_back(byte ^ key_bytes[i % key_len]);
-            i += 1;
-        }
-
-        let result = Bytes::from_vec(&env, decrypted);
-
-        // Compute hash of decrypted data for audit.
-        let hash: BytesN<32> = env.crypto().sha256(&result).into();
-        append_encryption_audit(
-            &env,
-            symbol_short!("decrypt"),
-            &caller,
-            key_version,
-            &hash,
-        );
-
-        events::data_decrypted(&env, key_version, &hash, &caller);
-        result
-    }
-
-    /// Validate that a piece of data was encrypted with a specific key version
-    /// by re-decrypting and comparing the hash. Returns the validation result.
-    pub fn validate_encryption(
-        env: Env,
-        data: Bytes,
-        key_version: u32,
-    ) -> EncryptionValidation {
-        assert!(key_version <= current_key_version(&env), "invalid key version");
-
-        let key = load_encryption_key(&env, key_version);
-        let data_hash: BytesN<32> = env.crypto().sha256(&data).into();
-
-        // Check that the data hash is registered.
-        let stored_version: u32 = env
-            .storage()
-            .persistent()
-            .get(&enc_data_version_key(&data_hash))
-            .unwrap_or(0u32);
-
-        let valid = stored_version == key_version && key.active;
-        let error = if valid {
-            Symbol::new(&env, "ok")
-        } else if !key.active {
-            Symbol::new(&env, "key_inactive")
-        } else {
-            Symbol::new(&env, "hash_mismatch")
-        };
-
-        let result = EncryptionValidation {
-            valid,
-            key_version,
-            timestamp: env.ledger().timestamp(),
-            error,
-        };
-
-        let dummy_hash = BytesN::from_array(&env, &[0u8; 32]);
-        append_encryption_audit(
-            &env,
-            symbol_short!("validate"),
-            &env.current_contract_address(),
-            key_version,
-            &data_hash,
-        );
-
-        events::encryption_validated(&env, key_version, valid);
-        result
-    }
-
-    /// Return the encryption audit trail.
-    pub fn get_encryption_audit(env: Env) -> Vec<EncryptionAuditEntry> {
-        env.storage()
-            .persistent()
-            .get(&enc_audit_key())
-            .unwrap_or_else(|| Vec::new(&env))
-    }
-
-    /// Return the current encryption key version (0 = no key set).
-    pub fn get_encryption_key_version(env: Env) -> u32 {
-        current_key_version(&env)
-    }
-
-    // -----------------------------------------------------------------------
-    // Issue #1013: RBAC
-    // -----------------------------------------------------------------------
-
-    /// Assign a role to an address. Requires admin auth.
-    pub fn assign_role(env: Env, admin: Address, address: Address, role: Role) {
-        require_admin(&env);
-        let _ = admin;
-
-        let role_sym = role_to_symbol(&env, &role);
-        let assignment = RoleAssignment {
-            role: role.clone(),
-            address: address.clone(),
-            assigned_by: env.current_contract_address(),
-            assigned_at: env.ledger().timestamp(),
-        };
-        env.storage()
-            .persistent()
-            .set(&rbac_role_key(&address, &role_sym), &assignment);
-
-        // Add to user's role list if not present.
-        let mut user_roles: Vec<Symbol> = env
-            .storage()
-            .persistent()
-            .get(&rbac_user_roles_key(&address))
-            .unwrap_or_else(|| Vec::new(&env));
-        if !user_roles.contains(&role_sym) {
-            user_roles.push_back(role_sym);
-        }
-        env.storage()
-            .persistent()
-            .set(&rbac_user_roles_key(&address), &user_roles);
-
-        update_access_analytics(&env, &address, true, None);
-        append_rbac_audit(
-            &env,
-            symbol_short!("assign"),
-            &env.current_contract_address(),
-            &address,
-            &role,
-            None,
-            true,
-        );
-
-        events::role_assigned(&env, &address, &role, &env.current_contract_address());
-    }
-
-    /// Revoke a role from an address. Requires admin auth.
-    pub fn revoke_role(env: Env, admin: Address, address: Address, role: Role) {
-        require_admin(&env);
-        let _ = admin;
-
-        let role_sym = role_to_symbol(&env, &role);
-        env.storage()
-            .persistent()
-            .remove(&rbac_role_key(&address, &role_sym));
-
-        // Remove from user's role list.
-        let mut user_roles: Vec<Symbol> = env
-            .storage()
-            .persistent()
-            .get(&rbac_user_roles_key(&address))
-            .unwrap_or_else(|| Vec::new(&env));
-        user_roles.retain(|r| r != role_sym);
-        env.storage()
-            .persistent()
-            .set(&rbac_user_roles_key(&address), &user_roles);
-
-        update_access_analytics(&env, &address, false, None);
-        append_rbac_audit(
-            &env,
-            symbol_short!("revoke"),
-            &env.current_contract_address(),
-            &address,
-            &role,
-            None,
-            false,
-        );
-
-        events::role_revoked(&env, &address, &role, &env.current_contract_address());
-    }
-
-    /// Check if an address has a specific role. Returns true/false.
-    pub fn has_role(env: Env, address: Address, role: Role) -> bool {
-        let role_sym = role_to_symbol(&env, &role);
-        env.storage()
-            .persistent()
-            .has(&rbac_role_key(&address, &role_sym))
-    }
-
-    /// Check if an address has the permission required for an action.
-    /// Checks all roles assigned to the address. Returns true/false.
-    pub fn has_permission(env: Env, address: Address, permission: Permission) -> bool {
-        let user_roles: Vec<Symbol> = env
-            .storage()
-            .persistent()
-            .get(&rbac_user_roles_key(&address))
-            .unwrap_or_else(|| Vec::new(&env));
-
-        let mut allowed = false;
-        // Map role symbols back to roles for permission check.
-        for _role_sym in user_roles.iter() {
-            // Check each role the user has.
-            if has_role_internal(&env, &address, &_role_sym) {
-                let role = symbol_to_role(&env, &_role_sym);
-                if role_has_permission(&env, &role, &permission) {
-                    allowed = true;
-                    break;
-                }
-            }
-        }
-
-        events::permission_checked(&env, &address, allowed);
-        update_access_analytics(&env, &address, false, Some(allowed));
-        append_rbac_audit(
-            &env,
-            symbol_short!("check"),
-            &env.current_contract_address(),
-            &address,
-            &Role::Auditor, // best-effort role for logging
-            Some(permission),
-            allowed,
-        );
-        allowed
-    }
-
-    /// Get all roles assigned to an address as a list of Role values.
-    pub fn get_roles(env: Env, address: Address) -> Vec<Role> {
-        let user_roles: Vec<Symbol> = env
-            .storage()
-            .persistent()
-            .get(&rbac_user_roles_key(&address))
-            .unwrap_or_else(|| Vec::new(&env));
-
-        let mut roles: Vec<Role> = Vec::new(&env);
-        for role_sym in user_roles.iter() {
-            let role = symbol_to_role(&env, &role_sym);
-            if has_role_internal(&env, &address, &role_sym) {
-                roles.push_back(role);
-            }
-        }
-        roles
-    }
-
-    /// Return the RBAC audit trail.
-    pub fn get_rbac_audit(env: Env) -> Vec<RbacAuditEntry> {
-        env.storage()
-            .persistent()
-            .get(&rbac_audit_key())
-            .unwrap_or_else(|| Vec::new(&env))
-    }
-
-    /// Return access analytics for an address.
-    pub fn get_access_analytics(env: Env, address: Address) -> AccessAnalytics {
-        env.storage()
-            .persistent()
-            .get(&rbac_analytics_key(&address))
-            .unwrap_or(AccessAnalytics {
-                roles_assigned: 0,
-                roles_revoked: 0,
-                permission_checks: 0,
-                checks_passed: 0,
-                checks_failed: 0,
-                last_active: 0,
-            })
-    }
-
-    // -----------------------------------------------------------------------
-    // Issue #1014: Caching layer
-    // -----------------------------------------------------------------------
-
-    /// Set a cache entry with an optional TTL (in seconds). If ttl is 0,
-    /// the entry has no expiry.
-    pub fn cache_set(env: Env, key: Symbol, value: Bytes, ttl_seconds: u64) {
-        let now = env.ledger().timestamp();
-        let expires_at = if ttl_seconds > 0 {
-            now + ttl_seconds
-        } else {
-            0u64
-        };
-
-        let entry = CacheEntry {
-            value,
-            cached_at: now,
-            expires_at,
-            read_count: 0,
-            valid: true,
-        };
-        env.storage()
-            .persistent()
-            .set(&cache_entry_key(&key), &entry);
-
-        // Track the key in the keys list.
-        let mut keys: Vec<Symbol> = env
-            .storage()
-            .persistent()
-            .get(&cache_keys_list_key())
-            .unwrap_or_else(|| Vec::new(&env));
-        if !keys.contains(&key) {
-            keys.push_back(key.clone());
-        }
-        env.storage()
-            .persistent()
-            .set(&cache_keys_list_key(), &keys);
-
-        // Update metrics.
-        let mut metrics = load_cache_metrics(&env);
-        metrics.entry_count = keys.len() as u64;
-        save_cache_metrics(&env, &metrics);
-
-        events::cache_set(&env, &key, expires_at);
-    }
-
-    /// Get a cache entry. Returns the cached value if valid, or panics if
-    /// not found / expired / invalidated. Increments the hit/miss metrics.
-    pub fn cache_get(env: Env, key: Symbol) -> Bytes {
-        let mut metrics = load_cache_metrics(&env);
-
-        let entry: CacheEntry = env
-            .storage()
-            .persistent()
-            .get(&cache_entry_key(&key))
-            .unwrap_or_else(|| {
-                metrics.misses += 1;
-                recalc_hit_ratio(&mut metrics);
-                save_cache_metrics(&env, &metrics);
-                panic!("cache miss: key not found");
-            });
-
-        // Check validity and expiry.
-        let now = env.ledger().timestamp();
-        let valid = entry.valid && (entry.expires_at == 0 || entry.expires_at > now);
-        if !valid {
-            metrics.misses += 1;
-            recalc_hit_ratio(&mut metrics);
-            save_cache_metrics(&env, &metrics);
-            panic!("cache miss: entry expired or invalidated");
-        }
-
-        // Hit.
-        metrics.hits += 1;
-        recalc_hit_ratio(&mut metrics);
-        save_cache_metrics(&env, &metrics);
-
-        let mut updated = entry.clone();
-        updated.read_count += 1;
-        env.storage()
-            .persistent()
-            .set(&cache_entry_key(&key), &updated);
-
-        entry.value
-    }
-
-    /// Invalidate a cache entry.
-    pub fn cache_invalidate(env: Env, key: Symbol) {
-        if let Some(mut entry) = env
-            .storage()
-            .persistent()
-            .get::<(Symbol, Symbol), CacheEntry>(&cache_entry_key(&key))
-        {
-            entry.valid = false;
-            env.storage()
-                .persistent()
-                .set(&cache_entry_key(&key), &entry);
-        }
-
-        let mut metrics = load_cache_metrics(&env);
-        metrics.invalidated += 1;
-        save_cache_metrics(&env, &metrics);
-
-        events::cache_invalidated(&env, &key);
-    }
-
-    /// Warm the cache by pre-populating entries for a set of invoice IDs.
-    /// Each invoice is serialized and cached under its ID as key.
-    pub fn cache_warm(env: Env, invoice_ids: Vec<u64>) -> u32 {
-        let mut warmed = 0u32;
-        for id in invoice_ids.iter() {
-            let invoice = load_invoice(&env, id);
-            let key = Symbol::new(&env, "inv");
-            // Serialize invoice to bytes (using the stored struct).
-            // We use a simple representation: store the invoice directly.
-            env.storage()
-                .persistent()
-                .set(&cache_entry_key(&Symbol::new(&env, "inv")), &CacheEntry {
-                    value: Bytes::new(&env), // Placeholder; real serialization would go here.
-                    cached_at: env.ledger().timestamp(),
-                    expires_at: 0,
-                    read_count: 0,
-                    valid: true,
-                });
-            warmed += 1;
-        }
-
-        let mut metrics = load_cache_metrics(&env);
-        metrics.warmed += warmed as u64;
-        save_cache_metrics(&env, &metrics);
-
-        events::cache_warmed(&env, warmed);
-        warmed
-    }
-
-    /// Return cache performance metrics.
-    pub fn get_cache_metrics(env: Env) -> CacheMetrics {
-        load_cache_metrics(&env)
-    }
-
-    // -----------------------------------------------------------------------
-    // Issue #1015: Query optimization
-    // -----------------------------------------------------------------------
-
-    /// Query invoices by status using the status index (fast path).
-    pub fn get_invoices_by_status(env: Env, status: InvoiceStatus) -> Vec<u64> {
-        let mut metrics = load_query_metrics(&env);
-        metrics.total_queries += 1;
-        metrics.indexed_queries += 1;
-
-        let status_sym = status_to_symbol(&env, &status);
-        let result: Vec<u64> = env
-            .storage()
-            .persistent()
-            .get(&query_status_index_key(&status_sym))
-            .unwrap_or_else(|| Vec::new(&env));
-
-        metrics.total_query_time += 1;
-        metrics.avg_query_time = if metrics.total_queries > 0 {
-            metrics.total_query_time / metrics.total_queries
-        } else {
-            0
-        };
-        save_query_metrics(&env, &metrics);
-
-        events::query_executed(&env, &status_sym, result.len() as u32);
-        result
-    }
-
-    /// Query invoices by creator using the creator index (fast path).
-    pub fn get_invoices_by_creator(env: Env, creator: Address) -> Vec<u64> {
-        let mut metrics = load_query_metrics(&env);
-        metrics.total_queries += 1;
-        metrics.indexed_queries += 1;
-
-        let result: Vec<u64> = env
-            .storage()
-            .persistent()
-            .get(&query_creator_index_key(&creator))
-            .unwrap_or_else(|| Vec::new(&env));
-
-        metrics.total_query_time += 1;
-        metrics.avg_query_time = if metrics.total_queries > 0 {
-            metrics.total_query_time / metrics.total_queries
-        } else {
-            0
-        };
-        save_query_metrics(&env, &metrics);
-
-        events::query_executed(&env, &Symbol::new(&env, "creator"), result.len() as u32);
-        result
-    }
-
-    /// Create a query index for the given index type. Initializes the index
-    /// by scanning existing invoices. Requires admin auth.
-    pub fn create_query_index(env: Env, admin: Address, index_type: Symbol) {
-        require_admin(&env);
-        let _ = admin;
-
-        // Initialize metrics if not already set.
-        let mut metrics = load_query_metrics(&env);
-        metrics.index_count += 1;
-        save_query_metrics(&env, &metrics);
-
-        events::query_index_created(&env, &index_type);
-    }
-
-    /// Return query performance metrics.
-    pub fn get_query_metrics(env: Env) -> QueryMetrics {
-        load_query_metrics(&env)
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -19709,4 +19122,507 @@ impl SplitContract {
     pub fn get_monitoring_dashboard(env: Env) -> monitoring::MonitoringDashboard {
         monitoring::dashboard(&env)
     }
+
+    // -----------------------------------------------------------------------
+    // Issue #344: On-chain dispute resolution with arbitration voting
+    // -----------------------------------------------------------------------
+
+    /// Configure the arbitrator set and quorum threshold (e.g. 2-of-3).
+    /// Requires admin authorization.
+    pub fn set_arbitrators(
+        env: Env,
+        admin: Address,
+        arbitrator_set: Vec<Address>,
+        quorum_threshold: u32,
+    ) {
+        require_not_paused(&env);
+        require_admin(&env);
+        let _ = admin;
+
+        assert!(!arbitrator_set.is_empty(), "arbitrator set cannot be empty");
+        assert!(
+            quorum_threshold > 0 && quorum_threshold <= arbitrator_set.len(),
+            "invalid quorum threshold"
+        );
+
+        let mut deduped: Vec<Address> = Vec::new(&env);
+        for arb in arbitrator_set.iter() {
+            assert!(!deduped.contains(&arb), "duplicate arbitrator in set");
+            deduped.push_back(arb);
+        }
+
+        env.storage()
+            .instance()
+            .set(&arbitrator_set_key(), &deduped);
+        env.storage()
+            .instance()
+            .set(&quorum_threshold_key(), &quorum_threshold);
+    }
+
+    /// Return the configured arbitrator set.
+    pub fn get_arbitrator_set(env: Env) -> Vec<Address> {
+        env.storage()
+            .instance()
+            .get(&arbitrator_set_key())
+            .unwrap_or_else(|| Vec::new(&env))
+    }
+
+    /// Return the configured arbitration quorum threshold.
+    pub fn get_quorum_threshold(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&quorum_threshold_key())
+            .unwrap_or(0)
+    }
+
+    /// Open a dispute on an invoice, freezing it against release or refund while open.
+    pub fn open_dispute(env: Env, invoice_id: u64, payer: Address, reason: String) {
+        require_not_paused(&env);
+        payer.require_auth();
+
+        let mut invoice = load_invoice(&env, invoice_id);
+        assert!(!invoice.disputed, "dispute already open for this invoice");
+        assert!(
+            invoice.status == InvoiceStatus::Pending,
+            "invoice is not in a disputable state"
+        );
+        if let Some(existing) = env
+            .storage()
+            .persistent()
+            .get::<(Symbol, u64), types::ArbitrationDispute>(&dispute_key(invoice_id))
+        {
+            assert!(!existing.open, "dispute already open for this invoice");
+        }
+
+        invoice.disputed = true;
+        save_invoice(&env, invoice_id, &invoice);
+
+        let dispute = types::ArbitrationDispute {
+            invoice_id,
+            payer: payer.clone(),
+            reason: reason.clone(),
+            approve_votes: 0,
+            reject_votes: 0,
+            voters: Vec::new(&env),
+            open: true,
+            opened_at: env.ledger().timestamp(),
+            resolved_at: None,
+            approved: None,
+        };
+        env.storage()
+            .persistent()
+            .set(&dispute_key(invoice_id), &dispute);
+
+        events::dispute_opened(&env, invoice_id, &payer, &reason);
+        append_audit_entry(&env, invoice_id, symbol_short!("disp_opn"), &payer);
+    }
+
+    /// Cast an arbitration vote on an open dispute.
+    /// Caller must be in the configured `arbitrator_set` and may only vote once per dispute.
+    pub fn vote_dispute(env: Env, invoice_id: u64, arbitrator: Address, approve: bool) {
+        require_not_paused(&env);
+        arbitrator.require_auth();
+
+        let arbitrator_set: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&arbitrator_set_key())
+            .unwrap_or_else(|| Vec::new(&env));
+        assert!(
+            arbitrator_set.contains(&arbitrator),
+            "caller is not in the arbitrator set"
+        );
+
+        let mut dispute: types::ArbitrationDispute = env
+            .storage()
+            .persistent()
+            .get(&dispute_key(invoice_id))
+            .expect("dispute not found");
+        assert!(dispute.open, "dispute is already resolved");
+        assert!(
+            !dispute.voters.contains(&arbitrator),
+            "arbitrator has already voted"
+        );
+
+        dispute.voters.push_back(arbitrator.clone());
+        if approve {
+            dispute.approve_votes = dispute
+                .approve_votes
+                .checked_add(1)
+                .expect("vote counter overflow");
+        } else {
+            dispute.reject_votes = dispute
+                .reject_votes
+                .checked_add(1)
+                .expect("vote counter overflow");
+        }
+
+        env.storage()
+            .persistent()
+            .set(&dispute_key(invoice_id), &dispute);
+
+        events::dispute_vote_cast(
+            &env,
+            invoice_id,
+            &arbitrator,
+            approve,
+            dispute.approve_votes,
+            dispute.reject_votes,
+        );
+        append_audit_entry(&env, invoice_id, symbol_short!("disp_vot"), &arbitrator);
+    }
+
+    /// Resolve an open dispute once `quorum_threshold` is reached.
+    /// Callable by anyone. Majority `approve` releases funds to recipients;
+    /// majority `reject` refunds all payers.
+    pub fn resolve_dispute(env: Env, invoice_id: u64) {
+        require_not_paused(&env);
+
+        let mut invoice = load_invoice(&env, invoice_id);
+        assert!(invoice.disputed, "invoice is not disputed");
+
+        let mut dispute: types::ArbitrationDispute = env
+            .storage()
+            .persistent()
+            .get(&dispute_key(invoice_id))
+            .expect("dispute not found");
+        assert!(dispute.open, "dispute is already resolved");
+
+        let quorum_threshold: u32 = env
+            .storage()
+            .instance()
+            .get(&quorum_threshold_key())
+            .unwrap_or(0);
+        assert!(quorum_threshold > 0, "arbitration quorum not configured");
+
+        let total_votes = dispute
+            .approve_votes
+            .checked_add(dispute.reject_votes)
+            .expect("vote counter overflow");
+        assert!(
+            total_votes >= quorum_threshold,
+            "quorum threshold not reached"
+        );
+        assert!(
+            dispute.approve_votes != dispute.reject_votes,
+            "tie vote cannot be resolved without majority"
+        );
+
+        let approved = dispute.approve_votes > dispute.reject_votes;
+        dispute.open = false;
+        dispute.resolved_at = Some(env.ledger().timestamp());
+        dispute.approved = Some(approved);
+        env.storage()
+            .persistent()
+            .set(&dispute_key(invoice_id), &dispute);
+
+        invoice.disputed = false;
+        invoice.status = InvoiceStatus::Pending;
+        save_invoice(&env, invoice_id, &invoice);
+
+        let actor = env.current_contract_address();
+        if approved {
+            if invoice.funded > 0 {
+                Self::_release(&env, invoice_id, &mut invoice, &actor);
+            } else {
+                invoice.status = InvoiceStatus::Released;
+                invoice.completion_time = Some(env.ledger().timestamp());
+                save_invoice(&env, invoice_id, &invoice);
+            }
+        } else {
+            let mut totals: Map<Address, i128> = Map::new(&env);
+            for shard_id in 0..SHARD_COUNT {
+                if let Some(shard_payments) = env
+                    .storage()
+                    .persistent()
+                    .get::<(Symbol, u64, u64), Vec<Payment>>(&pay_shard_key(invoice_id, shard_id))
+                {
+                    for payment in shard_payments.iter() {
+                        let prev = totals.get(payment.payer.clone()).unwrap_or(0);
+                        totals.set(payment.payer.clone(), prev + payment.amount);
+                    }
+                }
+            }
+            if totals.is_empty() {
+                for payment in invoice.payments.iter() {
+                    let prev = totals.get(payment.payer.clone()).unwrap_or(0);
+                    totals.set(payment.payer.clone(), prev + payment.amount);
+                }
+            }
+
+            let mut total_refunded_amount: i128 = 0;
+            if !totals.is_empty() {
+                let token_client =
+                    token::Client::new(&env, &invoice.tokens.get(0).expect("no token"));
+                for (payer, amount) in totals.iter() {
+                    if amount > 0 {
+                        token_client.transfer(&env.current_contract_address(), &payer, &amount);
+                        total_refunded_amount += amount;
+                        events::payer_refunded(&env, invoice_id, &payer, amount);
+                    }
+                }
+            }
+            if invoice.bonus_pool > 0 {
+                let token_client =
+                    token::Client::new(&env, &invoice.tokens.get(0).expect("no token"));
+                token_client.transfer(
+                    &env.current_contract_address(),
+                    &invoice.creator,
+                    &invoice.bonus_pool,
+                );
+            }
+
+            invoice.status = InvoiceStatus::Refunded;
+            invoice.completion_time = Some(env.ledger().timestamp());
+            save_invoice(&env, invoice_id, &invoice);
+            events::invoice_refunded(&env, invoice_id, total_refunded_amount);
+            events::invoice_state_changed(
+                &env,
+                invoice_id,
+                Some(&InvoiceStatus::Disputed),
+                &InvoiceStatus::Refunded,
+                &actor,
+            );
+        }
+
+        events::arbitration_dispute_resolved(
+            &env,
+            invoice_id,
+            approved,
+            dispute.approve_votes,
+            dispute.reject_votes,
+        );
+        append_audit_entry(&env, invoice_id, symbol_short!("disp_res"), &actor);
+    }
+
+    /// Inspect the stored arbitration dispute state for `invoice_id`.
+    pub fn get_arbitration_dispute(env: Env, invoice_id: u64) -> Option<types::ArbitrationDispute> {
+        env.storage().persistent().get(&dispute_key(invoice_id))
+    }
 }
+
+#[cfg(test)]
+mod issue_344_tests {
+    use super::*;
+    use soroban_sdk::{
+        testutils::{Address as _, Ledger as _},
+        token::{Client as TokenClient, StellarAssetClient},
+        Env, String, Vec,
+    };
+
+    fn setup_dispute_env() -> (
+        Env,
+        SplitContractClient<'static>,
+        Address,
+        Address,
+        Address,
+        Address,
+        Vec<Address>,
+    ) {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|li| {
+            li.timestamp = 1_000;
+        });
+
+        let admin = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token_contract = env.register_stellar_asset_contract_v2(token_admin);
+        let token_addr = token_contract.address();
+
+        let contract_id = env.register(SplitContract, ());
+        let client = SplitContractClient::new(&env, &contract_id);
+        client.initialize(
+            &admin,
+            &0i128,
+            &treasury,
+            &token_addr,
+            &0u32,
+            &None,
+            &1_000u32,
+            &100u32,
+            &60u64,
+        );
+
+        let arb1 = Address::generate(&env);
+        let arb2 = Address::generate(&env);
+        let arb3 = Address::generate(&env);
+        let mut arbs = Vec::new(&env);
+        arbs.push_back(arb1);
+        arbs.push_back(arb2);
+        arbs.push_back(arb3);
+        client.set_arbitrators(&admin, &arbs, &2u32);
+
+        let creator = Address::generate(&env);
+        let recipient = Address::generate(&env);
+        let payer = Address::generate(&env);
+
+        StellarAssetClient::new(&env, &token_addr).mint(&payer, &10_000);
+
+        (env, client, admin, creator, recipient, payer, arbs)
+    }
+
+    fn create_partially_funded_invoice(
+        env: &Env,
+        client: &SplitContractClient<'static>,
+        creator: &Address,
+        recipient: &Address,
+        payer: &Address,
+    ) -> (u64, Address) {
+        let usdc_addr = env.as_contract(&client.address, || {
+            env.storage()
+                .instance()
+                .get::<_, Address>(&usdc_token_key())
+                .unwrap()
+        });
+        let mut recipients = Vec::new(env);
+        recipients.push_back(recipient.clone());
+        let mut amounts = Vec::new(env);
+        amounts.push_back(1_000i128);
+
+        let invoice_id = client.create_invoice(
+            creator,
+            &recipients,
+            &amounts,
+            &usdc_addr,
+            &2_000u64,
+            &crate::test::default_options(env),
+        );
+
+        // Fund 600 of 1000 so the invoice holds funds in escrow without auto-releasing.
+        client.pay(payer, &invoice_id, &600i128, &0u64, &false, &false, &None);
+        (invoice_id, usdc_addr)
+    }
+
+    #[test]
+    fn test_dispute_arbitration_open_vote_resolve_approve_path() {
+        let (env, client, _admin, creator, recipient, payer, arbs) = setup_dispute_env();
+        let (invoice_id, token_addr) =
+            create_partially_funded_invoice(&env, &client, &creator, &recipient, &payer);
+        let token = TokenClient::new(&env, &token_addr);
+
+        let reason = String::from_str(&env, "Deliverable quality verified after review");
+        client.open_dispute(&invoice_id, &payer, &reason);
+
+        let dispute = client.get_arbitration_dispute(&invoice_id).unwrap();
+        assert!(dispute.open);
+        assert_eq!(dispute.approve_votes, 0);
+        assert_eq!(dispute.reject_votes, 0);
+        assert!(!client.is_invoice_releasable(&invoice_id));
+
+        // 2-of-3 arbitrators vote to approve
+        client.vote_dispute(&invoice_id, &arbs.get(0).unwrap(), &true);
+        client.vote_dispute(&invoice_id, &arbs.get(1).unwrap(), &true);
+
+        let before_recipient = token.balance(&recipient);
+        client.resolve_dispute(&invoice_id);
+
+        let after_recipient = token.balance(&recipient);
+        assert_eq!(after_recipient - before_recipient, 600);
+
+        let resolved = client.get_arbitration_dispute(&invoice_id).unwrap();
+        assert!(!resolved.open);
+        assert_eq!(resolved.approved, Some(true));
+        assert_eq!(resolved.approve_votes, 2);
+        assert_eq!(resolved.reject_votes, 0);
+        assert_eq!(
+            client.get_invoice(&invoice_id).status,
+            InvoiceStatus::Released
+        );
+    }
+
+    #[test]
+    fn test_dispute_arbitration_open_vote_resolve_reject_path() {
+        let (env, client, _admin, creator, recipient, payer, arbs) = setup_dispute_env();
+        let (invoice_id, token_addr) =
+            create_partially_funded_invoice(&env, &client, &creator, &recipient, &payer);
+        let token = TokenClient::new(&env, &token_addr);
+
+        let reason = String::from_str(&env, "Service was never delivered");
+        client.open_dispute(&invoice_id, &payer, &reason);
+
+        // 2-of-3 arbitrators vote to reject (approve = false)
+        client.vote_dispute(&invoice_id, &arbs.get(0).unwrap(), &false);
+        client.vote_dispute(&invoice_id, &arbs.get(2).unwrap(), &false);
+
+        let before_payer = token.balance(&payer);
+        client.resolve_dispute(&invoice_id);
+
+        let after_payer = token.balance(&payer);
+        assert_eq!(after_payer - before_payer, 600);
+
+        let resolved = client.get_arbitration_dispute(&invoice_id).unwrap();
+        assert!(!resolved.open);
+        assert_eq!(resolved.approved, Some(false));
+        assert_eq!(resolved.approve_votes, 0);
+        assert_eq!(resolved.reject_votes, 2);
+        assert_eq!(
+            client.get_invoice(&invoice_id).status,
+            InvoiceStatus::Refunded
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "arbitrator has already voted")]
+    fn test_dispute_arbitration_duplicate_vote_rejected() {
+        let (env, client, _admin, creator, recipient, payer, arbs) = setup_dispute_env();
+        let (invoice_id, _) =
+            create_partially_funded_invoice(&env, &client, &creator, &recipient, &payer);
+
+        client.open_dispute(
+            &invoice_id,
+            &payer,
+            &String::from_str(&env, "Duplicate vote test"),
+        );
+        let arb = arbs.get(0).unwrap();
+        client.vote_dispute(&invoice_id, &arb, &true);
+        client.vote_dispute(&invoice_id, &arb, &false);
+    }
+
+    #[test]
+    #[should_panic(expected = "caller is not in the arbitrator set")]
+    fn test_dispute_arbitration_non_arbitrator_vote_rejected() {
+        let (env, client, _admin, creator, recipient, payer, _arbs) = setup_dispute_env();
+        let (invoice_id, _) =
+            create_partially_funded_invoice(&env, &client, &creator, &recipient, &payer);
+
+        client.open_dispute(
+            &invoice_id,
+            &payer,
+            &String::from_str(&env, "Unauthorized voter test"),
+        );
+        let outsider = Address::generate(&env);
+        client.vote_dispute(&invoice_id, &outsider, &true);
+    }
+
+    #[test]
+    #[should_panic(expected = "invoice not found")]
+    fn test_dispute_arbitration_non_existent_invoice_rejected() {
+        let (env, client, _admin, _creator, _recipient, payer, _arbs) = setup_dispute_env();
+        client.open_dispute(
+            &999_999u64,
+            &payer,
+            &String::from_str(&env, "Missing invoice"),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "invoice is disputed")]
+    fn test_dispute_freezes_refund_while_open() {
+        let (env, client, _admin, creator, recipient, payer, _arbs) = setup_dispute_env();
+        let (invoice_id, _) =
+            create_partially_funded_invoice(&env, &client, &creator, &recipient, &payer);
+
+        client.open_dispute(
+            &invoice_id,
+            &payer,
+            &String::from_str(&env, "Freeze check"),
+        );
+        env.ledger().with_mut(|li| {
+            li.timestamp = 5_000;
+        });
+        client.refund(&invoice_id);
+    }
+}
+

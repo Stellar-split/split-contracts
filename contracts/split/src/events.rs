@@ -2677,3 +2677,72 @@ pub fn condition_oracle_set(env: &Env, invoice_id: u64, oracle: &Address, condit
         (oracle.clone(), condition.clone()),
     );
 }
+
+// ---------------------------------------------------------------------------
+// Issue #344: On-chain dispute resolution with arbitration voting events
+// ---------------------------------------------------------------------------
+
+/// Issue #344: Emitted when a dispute is opened on an invoice.
+/// Topics: (split, DisputeOpened, invoice_id)
+/// Data: (payer, reason, event_seq)
+pub fn dispute_opened(env: &Env, invoice_id: u64, payer: &Address, reason: &String) {
+    let event_seq = next_seq(env, invoice_id);
+    env.events().publish(
+        (
+            symbol_short!("split"),
+            Symbol::new(env, "DisputeOpened"),
+            invoice_id,
+        ),
+        (payer.clone(), reason.clone(), event_seq),
+    );
+}
+
+/// Issue #344: Emitted when an arbitrator casts a vote on an open dispute.
+/// Topics: (split, DisputeVoteCast, invoice_id)
+/// Data: (arbitrator, approve, approve_votes, reject_votes, event_seq)
+pub fn dispute_vote_cast(
+    env: &Env,
+    invoice_id: u64,
+    arbitrator: &Address,
+    approve: bool,
+    approve_votes: u32,
+    reject_votes: u32,
+) {
+    let event_seq = next_seq(env, invoice_id);
+    env.events().publish(
+        (
+            symbol_short!("split"),
+            Symbol::new(env, "DisputeVoteCast"),
+            invoice_id,
+        ),
+        (
+            arbitrator.clone(),
+            approve,
+            approve_votes,
+            reject_votes,
+            event_seq,
+        ),
+    );
+}
+
+/// Issue #344: Emitted when a dispute reaches quorum and is resolved.
+/// Topics: (split, DisputeResolved, invoice_id)
+/// Data: (approved, approve_votes, reject_votes, event_seq)
+pub fn arbitration_dispute_resolved(
+    env: &Env,
+    invoice_id: u64,
+    approved: bool,
+    approve_votes: u32,
+    reject_votes: u32,
+) {
+    let event_seq = next_seq(env, invoice_id);
+    env.events().publish(
+        (
+            symbol_short!("split"),
+            Symbol::new(env, "DisputeResolved"),
+            invoice_id,
+        ),
+        (approved, approve_votes, reject_votes, event_seq),
+    );
+}
+

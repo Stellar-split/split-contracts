@@ -290,6 +290,11 @@ fn storage_key_snapshot() {
     keys.push(("cosigner_thresh_key", hex_xdr(&env, cosigner_thresh_key(1))));
     keys.push(("cosign_key", hex_xdr(&env, cosign_key(1))));
 
+    // Issue #344: on-chain dispute resolution with arbitration voting keys
+    keys.push(("dispute_key", hex_xdr(&env, dispute_key(1))));
+    keys.push(("arbitrator_set_key", hex_xdr(&env, arbitrator_set_key())));
+    keys.push(("quorum_threshold_key", hex_xdr(&env, quorum_threshold_key())));
+
     // Sort by key name for deterministic output
     keys.sort_by(|a, b| a.0.cmp(b.0));
 
