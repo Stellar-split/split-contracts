@@ -4141,7 +4141,7 @@ fn test_bridge_pay_credits_invoice_after_swap() {
     env.ledger().set_timestamp(1_000);
     let id = make_invoice(&env, &c, &creator, &recipient, 300, &token_id, 9_999);
 
-    c.bridge_pay(&payer, &id, &alt_token_id, &300_i128);
+    c.dex_bridge_pay(&payer, &id, &alt_token_id, &300_i128);
 
     let invoice = c.get_invoice(&id);
     assert_eq!(invoice.funded, 300);

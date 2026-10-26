@@ -290,6 +290,9 @@ fn storage_key_snapshot() {
     keys.push(("cosigner_thresh_key", hex_xdr(&env, cosigner_thresh_key(1))));
     keys.push(("cosign_key", hex_xdr(&env, cosign_key(1))));
 
+    // Issue #343: cross-chain bridge authority key
+    keys.push(("bridge_authority_key", hex_xdr(&env, bridge_authority_key())));
+
     // Sort by key name for deterministic output
     keys.sort_by(|a, b| a.0.cmp(b.0));
 

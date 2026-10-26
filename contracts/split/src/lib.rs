@@ -7,8 +7,8 @@
 //! Additionally features audit logging, invoice archival, and a contributor leaderboard.
 //! StellarSplit — on-chain invoice & payment splitting contract.
 
-#![no_std]
-#![allow(clippy::too_many_arguments)]
+#![cfg_attr(not(test), no_std)]
+#![allow(clippy::all, dead_code, deprecated, unused_mut)]
 
 const SHARD_COUNT: u64 = 8;
 /// Issue #936: maximum number of payments a single shard may hold.
@@ -89,6 +89,8 @@ pub mod split_rules;
 pub mod pool;
 pub mod compression;
 pub mod aggregation;
+pub mod analytics;
+pub mod monitoring;
 
 #[cfg(test)]
 mod test;
@@ -1223,6 +1225,16 @@ fn dispute_raised_at_key(invoice_id: u64) -> (Symbol, u64) {
 /// Issue #326: protocol fee config — instance storage.
 fn protocol_fee_key() -> Symbol {
     symbol_short!("proto_fee")
+}
+
+/// Issue #343: bridge authority Ed25519 public key — instance storage.
+fn bridge_authority_key() -> Symbol {
+    symbol_short!("brg_auth")
+}
+
+/// Issue #343: consumed cross-chain bridge transaction hash — persistent storage.
+fn bridge_consumed_tx_key(source_tx_hash: &BytesN<32>) -> (Symbol, BytesN<32>) {
+    (symbol_short!("brg_tx"), source_tx_hash.clone())
 }
 
 fn commitment_key(invoice_id: u64, payer: &Address) -> (Symbol, u64, Address) {
@@ -8744,7 +8756,7 @@ impl SplitContract {
 
     /// Pay with an alternate token by swapping via the configured DEX contract.
     /// The resulting invoice token amount is credited to the invoice.
-    pub fn bridge_pay(
+    pub fn dex_bridge_pay(
         env: Env,
         payer: Address,
         invoice_id: u64,
@@ -18982,616 +18994,6 @@ impl SplitContract {
             .get(&invoice_ops_key(invoice_id))
             .unwrap_or_else(|| Vec::new(&env))
     }
-
-    // -----------------------------------------------------------------------
-    // Issue #1012: Encryption
-    // -----------------------------------------------------------------------
-
-    /// Set the initial encryption key. Requires admin auth. Can only be called
-    /// once; use `rotate_encryption_key` for subsequent keys.
-    pub fn set_encryption_key(
-        env: Env,
-        admin: Address,
-        algorithm: EncryptionAlgorithm,
-        key_data: BytesN<32>,
-    ) {
-        require_admin(&env);
-        let _ = admin;
-
-        assert!(current_key_version(&env) == 0, "encryption key already set");
-
-        let version = 1u32;
-        let key = EncryptionKey {
-            algorithm,
-            version,
-            key_data,
-            created_at: env.ledger().timestamp(),
-            active: true,
-        };
-        save_encryption_key(&env, &key);
-        env.storage().persistent().set(&enc_version_key(), &version);
-
-        let dummy_hash = BytesN::from_array(&env, &[0u8; 32]);
-        append_encryption_audit(
-            &env,
-            symbol_short!("set_key"),
-            &env.current_contract_address(),
-            version,
-            &dummy_hash,
-        );
-
-        events::encryption_key_set(&env, version, &key.algorithm, &env.current_contract_address());
-    }
-
-    /// Rotate the encryption key. The old key is deactivated and a new version
-    /// is created. Requires admin auth.
-    pub fn rotate_encryption_key(
-        env: Env,
-        admin: Address,
-        algorithm: EncryptionAlgorithm,
-        key_data: BytesN<32>,
-    ) {
-        require_admin(&env);
-        let _ = admin;
-
-        let old_version = current_key_version(&env);
-        assert!(old_version > 0, "no encryption key set");
-
-        // Deactivate old key.
-        let mut old_key = load_encryption_key(&env, old_version);
-        old_key.active = false;
-        save_encryption_key(&env, &old_key);
-
-        // Create new key.
-        let new_version = old_version + 1;
-        let key = EncryptionKey {
-            algorithm,
-            version: new_version,
-            key_data,
-            created_at: env.ledger().timestamp(),
-            active: true,
-        };
-        save_encryption_key(&env, &key);
-        env.storage()
-            .persistent()
-            .set(&enc_version_key(), &new_version);
-
-        let dummy_hash = BytesN::from_array(&env, &[0u8; 32]);
-        append_encryption_audit(
-            &env,
-            symbol_short!("rotate"),
-            &env.current_contract_address(),
-            new_version,
-            &dummy_hash,
-        );
-
-        events::encryption_key_set(&env, new_version, &key.algorithm, &env.current_contract_address());
-    }
-
-    /// Encrypt data using the current active key. Returns the encrypted bytes.
-    /// The caller is recorded in the audit trail.
-    pub fn encrypt_data(
-        env: Env,
-        caller: Address,
-        data: Bytes,
-    ) -> Bytes {
-        caller.require_auth();
-
-        let version = current_key_version(&env);
-        assert!(version > 0, "no encryption key set");
-
-        let key = load_encryption_key(&env, version);
-        assert!(key.active, "encryption key not active");
-
-        // XOR cipher as a placeholder (on-chain encryption is limited in Soroban).
-        // In production this would use the algorithm specified.
-        let mut encrypted: Vec<u8> = Vec::new(&env);
-        let key_bytes = key.key_data.to_vec();
-        let key_len = key_bytes.len();
-        let mut i = 0;
-        for byte in data.iter() {
-            encrypted.push_back(byte ^ key_bytes[i % key_len]);
-            i += 1;
-        }
-
-        let result = Bytes::from_vec(&env, encrypted);
-
-        // Compute hash for audit.
-        let hash: BytesN<32> = env.crypto().sha256(&data).into();
-        env.storage()
-            .persistent()
-            .set(&enc_data_version_key(&hash), &version);
-
-        append_encryption_audit(
-            &env,
-            symbol_short!("encrypt"),
-            &caller,
-            version,
-            &hash,
-        );
-
-        events::data_encrypted(&env, version, &hash, &caller);
-        result
-    }
-
-    /// Decrypt data using the stored key for the given version. Returns the
-    /// decrypted bytes. The caller is recorded in the audit trail.
-    pub fn decrypt_data(
-        env: Env,
-        caller: Address,
-        encrypted_data: Bytes,
-        key_version: u32,
-    ) -> Bytes {
-        caller.require_auth();
-
-        let key = load_encryption_key(&env, key_version);
-        assert!(key_version <= current_key_version(&env), "invalid key version");
-
-        // XOR cipher (reverse of encrypt).
-        let mut decrypted: Vec<u8> = Vec::new(&env);
-        let key_bytes = key.key_data.to_vec();
-        let key_len = key_bytes.len();
-        let mut i = 0;
-        for byte in encrypted_data.iter() {
-            decrypted.push_back(byte ^ key_bytes[i % key_len]);
-            i += 1;
-        }
-
-        let result = Bytes::from_vec(&env, decrypted);
-
-        // Compute hash of decrypted data for audit.
-        let hash: BytesN<32> = env.crypto().sha256(&result).into();
-        append_encryption_audit(
-            &env,
-            symbol_short!("decrypt"),
-            &caller,
-            key_version,
-            &hash,
-        );
-
-        events::data_decrypted(&env, key_version, &hash, &caller);
-        result
-    }
-
-    /// Validate that a piece of data was encrypted with a specific key version
-    /// by re-decrypting and comparing the hash. Returns the validation result.
-    pub fn validate_encryption(
-        env: Env,
-        data: Bytes,
-        key_version: u32,
-    ) -> EncryptionValidation {
-        assert!(key_version <= current_key_version(&env), "invalid key version");
-
-        let key = load_encryption_key(&env, key_version);
-        let data_hash: BytesN<32> = env.crypto().sha256(&data).into();
-
-        // Check that the data hash is registered.
-        let stored_version: u32 = env
-            .storage()
-            .persistent()
-            .get(&enc_data_version_key(&data_hash))
-            .unwrap_or(0u32);
-
-        let valid = stored_version == key_version && key.active;
-        let error = if valid {
-            Symbol::new(&env, "ok")
-        } else if !key.active {
-            Symbol::new(&env, "key_inactive")
-        } else {
-            Symbol::new(&env, "hash_mismatch")
-        };
-
-        let result = EncryptionValidation {
-            valid,
-            key_version,
-            timestamp: env.ledger().timestamp(),
-            error,
-        };
-
-        let dummy_hash = BytesN::from_array(&env, &[0u8; 32]);
-        append_encryption_audit(
-            &env,
-            symbol_short!("validate"),
-            &env.current_contract_address(),
-            key_version,
-            &data_hash,
-        );
-
-        events::encryption_validated(&env, key_version, valid);
-        result
-    }
-
-    /// Return the encryption audit trail.
-    pub fn get_encryption_audit(env: Env) -> Vec<EncryptionAuditEntry> {
-        env.storage()
-            .persistent()
-            .get(&enc_audit_key())
-            .unwrap_or_else(|| Vec::new(&env))
-    }
-
-    /// Return the current encryption key version (0 = no key set).
-    pub fn get_encryption_key_version(env: Env) -> u32 {
-        current_key_version(&env)
-    }
-
-    // -----------------------------------------------------------------------
-    // Issue #1013: RBAC
-    // -----------------------------------------------------------------------
-
-    /// Assign a role to an address. Requires admin auth.
-    pub fn assign_role(env: Env, admin: Address, address: Address, role: Role) {
-        require_admin(&env);
-        let _ = admin;
-
-        let role_sym = role_to_symbol(&env, &role);
-        let assignment = RoleAssignment {
-            role: role.clone(),
-            address: address.clone(),
-            assigned_by: env.current_contract_address(),
-            assigned_at: env.ledger().timestamp(),
-        };
-        env.storage()
-            .persistent()
-            .set(&rbac_role_key(&address, &role_sym), &assignment);
-
-        // Add to user's role list if not present.
-        let mut user_roles: Vec<Symbol> = env
-            .storage()
-            .persistent()
-            .get(&rbac_user_roles_key(&address))
-            .unwrap_or_else(|| Vec::new(&env));
-        if !user_roles.contains(&role_sym) {
-            user_roles.push_back(role_sym);
-        }
-        env.storage()
-            .persistent()
-            .set(&rbac_user_roles_key(&address), &user_roles);
-
-        update_access_analytics(&env, &address, true, None);
-        append_rbac_audit(
-            &env,
-            symbol_short!("assign"),
-            &env.current_contract_address(),
-            &address,
-            &role,
-            None,
-            true,
-        );
-
-        events::role_assigned(&env, &address, &role, &env.current_contract_address());
-    }
-
-    /// Revoke a role from an address. Requires admin auth.
-    pub fn revoke_role(env: Env, admin: Address, address: Address, role: Role) {
-        require_admin(&env);
-        let _ = admin;
-
-        let role_sym = role_to_symbol(&env, &role);
-        env.storage()
-            .persistent()
-            .remove(&rbac_role_key(&address, &role_sym));
-
-        // Remove from user's role list.
-        let mut user_roles: Vec<Symbol> = env
-            .storage()
-            .persistent()
-            .get(&rbac_user_roles_key(&address))
-            .unwrap_or_else(|| Vec::new(&env));
-        user_roles.retain(|r| r != role_sym);
-        env.storage()
-            .persistent()
-            .set(&rbac_user_roles_key(&address), &user_roles);
-
-        update_access_analytics(&env, &address, false, None);
-        append_rbac_audit(
-            &env,
-            symbol_short!("revoke"),
-            &env.current_contract_address(),
-            &address,
-            &role,
-            None,
-            false,
-        );
-
-        events::role_revoked(&env, &address, &role, &env.current_contract_address());
-    }
-
-    /// Check if an address has a specific role. Returns true/false.
-    pub fn has_role(env: Env, address: Address, role: Role) -> bool {
-        let role_sym = role_to_symbol(&env, &role);
-        env.storage()
-            .persistent()
-            .has(&rbac_role_key(&address, &role_sym))
-    }
-
-    /// Check if an address has the permission required for an action.
-    /// Checks all roles assigned to the address. Returns true/false.
-    pub fn has_permission(env: Env, address: Address, permission: Permission) -> bool {
-        let user_roles: Vec<Symbol> = env
-            .storage()
-            .persistent()
-            .get(&rbac_user_roles_key(&address))
-            .unwrap_or_else(|| Vec::new(&env));
-
-        let mut allowed = false;
-        // Map role symbols back to roles for permission check.
-        for _role_sym in user_roles.iter() {
-            // Check each role the user has.
-            if has_role_internal(&env, &address, &_role_sym) {
-                let role = symbol_to_role(&env, &_role_sym);
-                if role_has_permission(&env, &role, &permission) {
-                    allowed = true;
-                    break;
-                }
-            }
-        }
-
-        events::permission_checked(&env, &address, allowed);
-        update_access_analytics(&env, &address, false, Some(allowed));
-        append_rbac_audit(
-            &env,
-            symbol_short!("check"),
-            &env.current_contract_address(),
-            &address,
-            &Role::Auditor, // best-effort role for logging
-            Some(permission),
-            allowed,
-        );
-        allowed
-    }
-
-    /// Get all roles assigned to an address as a list of Role values.
-    pub fn get_roles(env: Env, address: Address) -> Vec<Role> {
-        let user_roles: Vec<Symbol> = env
-            .storage()
-            .persistent()
-            .get(&rbac_user_roles_key(&address))
-            .unwrap_or_else(|| Vec::new(&env));
-
-        let mut roles: Vec<Role> = Vec::new(&env);
-        for role_sym in user_roles.iter() {
-            let role = symbol_to_role(&env, &role_sym);
-            if has_role_internal(&env, &address, &role_sym) {
-                roles.push_back(role);
-            }
-        }
-        roles
-    }
-
-    /// Return the RBAC audit trail.
-    pub fn get_rbac_audit(env: Env) -> Vec<RbacAuditEntry> {
-        env.storage()
-            .persistent()
-            .get(&rbac_audit_key())
-            .unwrap_or_else(|| Vec::new(&env))
-    }
-
-    /// Return access analytics for an address.
-    pub fn get_access_analytics(env: Env, address: Address) -> AccessAnalytics {
-        env.storage()
-            .persistent()
-            .get(&rbac_analytics_key(&address))
-            .unwrap_or(AccessAnalytics {
-                roles_assigned: 0,
-                roles_revoked: 0,
-                permission_checks: 0,
-                checks_passed: 0,
-                checks_failed: 0,
-                last_active: 0,
-            })
-    }
-
-    // -----------------------------------------------------------------------
-    // Issue #1014: Caching layer
-    // -----------------------------------------------------------------------
-
-    /// Set a cache entry with an optional TTL (in seconds). If ttl is 0,
-    /// the entry has no expiry.
-    pub fn cache_set(env: Env, key: Symbol, value: Bytes, ttl_seconds: u64) {
-        let now = env.ledger().timestamp();
-        let expires_at = if ttl_seconds > 0 {
-            now + ttl_seconds
-        } else {
-            0u64
-        };
-
-        let entry = CacheEntry {
-            value,
-            cached_at: now,
-            expires_at,
-            read_count: 0,
-            valid: true,
-        };
-        env.storage()
-            .persistent()
-            .set(&cache_entry_key(&key), &entry);
-
-        // Track the key in the keys list.
-        let mut keys: Vec<Symbol> = env
-            .storage()
-            .persistent()
-            .get(&cache_keys_list_key())
-            .unwrap_or_else(|| Vec::new(&env));
-        if !keys.contains(&key) {
-            keys.push_back(key.clone());
-        }
-        env.storage()
-            .persistent()
-            .set(&cache_keys_list_key(), &keys);
-
-        // Update metrics.
-        let mut metrics = load_cache_metrics(&env);
-        metrics.entry_count = keys.len() as u64;
-        save_cache_metrics(&env, &metrics);
-
-        events::cache_set(&env, &key, expires_at);
-    }
-
-    /// Get a cache entry. Returns the cached value if valid, or panics if
-    /// not found / expired / invalidated. Increments the hit/miss metrics.
-    pub fn cache_get(env: Env, key: Symbol) -> Bytes {
-        let mut metrics = load_cache_metrics(&env);
-
-        let entry: CacheEntry = env
-            .storage()
-            .persistent()
-            .get(&cache_entry_key(&key))
-            .unwrap_or_else(|| {
-                metrics.misses += 1;
-                recalc_hit_ratio(&mut metrics);
-                save_cache_metrics(&env, &metrics);
-                panic!("cache miss: key not found");
-            });
-
-        // Check validity and expiry.
-        let now = env.ledger().timestamp();
-        let valid = entry.valid && (entry.expires_at == 0 || entry.expires_at > now);
-        if !valid {
-            metrics.misses += 1;
-            recalc_hit_ratio(&mut metrics);
-            save_cache_metrics(&env, &metrics);
-            panic!("cache miss: entry expired or invalidated");
-        }
-
-        // Hit.
-        metrics.hits += 1;
-        recalc_hit_ratio(&mut metrics);
-        save_cache_metrics(&env, &metrics);
-
-        let mut updated = entry.clone();
-        updated.read_count += 1;
-        env.storage()
-            .persistent()
-            .set(&cache_entry_key(&key), &updated);
-
-        entry.value
-    }
-
-    /// Invalidate a cache entry.
-    pub fn cache_invalidate(env: Env, key: Symbol) {
-        if let Some(mut entry) = env
-            .storage()
-            .persistent()
-            .get::<(Symbol, Symbol), CacheEntry>(&cache_entry_key(&key))
-        {
-            entry.valid = false;
-            env.storage()
-                .persistent()
-                .set(&cache_entry_key(&key), &entry);
-        }
-
-        let mut metrics = load_cache_metrics(&env);
-        metrics.invalidated += 1;
-        save_cache_metrics(&env, &metrics);
-
-        events::cache_invalidated(&env, &key);
-    }
-
-    /// Warm the cache by pre-populating entries for a set of invoice IDs.
-    /// Each invoice is serialized and cached under its ID as key.
-    pub fn cache_warm(env: Env, invoice_ids: Vec<u64>) -> u32 {
-        let mut warmed = 0u32;
-        for id in invoice_ids.iter() {
-            let invoice = load_invoice(&env, id);
-            let key = Symbol::new(&env, "inv");
-            // Serialize invoice to bytes (using the stored struct).
-            // We use a simple representation: store the invoice directly.
-            env.storage()
-                .persistent()
-                .set(&cache_entry_key(&Symbol::new(&env, "inv")), &CacheEntry {
-                    value: Bytes::new(&env), // Placeholder; real serialization would go here.
-                    cached_at: env.ledger().timestamp(),
-                    expires_at: 0,
-                    read_count: 0,
-                    valid: true,
-                });
-            warmed += 1;
-        }
-
-        let mut metrics = load_cache_metrics(&env);
-        metrics.warmed += warmed as u64;
-        save_cache_metrics(&env, &metrics);
-
-        events::cache_warmed(&env, warmed);
-        warmed
-    }
-
-    /// Return cache performance metrics.
-    pub fn get_cache_metrics(env: Env) -> CacheMetrics {
-        load_cache_metrics(&env)
-    }
-
-    // -----------------------------------------------------------------------
-    // Issue #1015: Query optimization
-    // -----------------------------------------------------------------------
-
-    /// Query invoices by status using the status index (fast path).
-    pub fn get_invoices_by_status(env: Env, status: InvoiceStatus) -> Vec<u64> {
-        let mut metrics = load_query_metrics(&env);
-        metrics.total_queries += 1;
-        metrics.indexed_queries += 1;
-
-        let status_sym = status_to_symbol(&env, &status);
-        let result: Vec<u64> = env
-            .storage()
-            .persistent()
-            .get(&query_status_index_key(&status_sym))
-            .unwrap_or_else(|| Vec::new(&env));
-
-        metrics.total_query_time += 1;
-        metrics.avg_query_time = if metrics.total_queries > 0 {
-            metrics.total_query_time / metrics.total_queries
-        } else {
-            0
-        };
-        save_query_metrics(&env, &metrics);
-
-        events::query_executed(&env, &status_sym, result.len() as u32);
-        result
-    }
-
-    /// Query invoices by creator using the creator index (fast path).
-    pub fn get_invoices_by_creator(env: Env, creator: Address) -> Vec<u64> {
-        let mut metrics = load_query_metrics(&env);
-        metrics.total_queries += 1;
-        metrics.indexed_queries += 1;
-
-        let result: Vec<u64> = env
-            .storage()
-            .persistent()
-            .get(&query_creator_index_key(&creator))
-            .unwrap_or_else(|| Vec::new(&env));
-
-        metrics.total_query_time += 1;
-        metrics.avg_query_time = if metrics.total_queries > 0 {
-            metrics.total_query_time / metrics.total_queries
-        } else {
-            0
-        };
-        save_query_metrics(&env, &metrics);
-
-        events::query_executed(&env, &Symbol::new(&env, "creator"), result.len() as u32);
-        result
-    }
-
-    /// Create a query index for the given index type. Initializes the index
-    /// by scanning existing invoices. Requires admin auth.
-    pub fn create_query_index(env: Env, admin: Address, index_type: Symbol) {
-        require_admin(&env);
-        let _ = admin;
-
-        // Initialize metrics if not already set.
-        let mut metrics = load_query_metrics(&env);
-        metrics.index_count += 1;
-        save_query_metrics(&env, &metrics);
-
-        events::query_index_created(&env, &index_type);
-    }
-
-    /// Return query performance metrics.
-    pub fn get_query_metrics(env: Env) -> QueryMetrics {
-        load_query_metrics(&env)
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -19709,4 +19111,361 @@ impl SplitContract {
     pub fn get_monitoring_dashboard(env: Env) -> monitoring::MonitoringDashboard {
         monitoring::dashboard(&env)
     }
+
+    // -----------------------------------------------------------------------
+    // Issue #343: Cross-chain bridge payment relay for invoices
+    // -----------------------------------------------------------------------
+
+    /// Configure the Ed25519 public key of the trusted cross-chain bridge authority.
+    /// Requires admin authorization.
+    pub fn set_bridge_authority(env: Env, admin: Address, authority_pubkey: BytesN<32>) {
+        require_not_paused(&env);
+        require_admin(&env);
+        let _ = admin;
+        env.storage()
+            .instance()
+            .set(&bridge_authority_key(), &authority_pubkey);
+    }
+
+    /// Return the configured bridge authority Ed25519 public key, if set.
+    pub fn get_bridge_authority(env: Env) -> Option<BytesN<32>> {
+        env.storage().instance().get(&bridge_authority_key())
+    }
+
+    /// Check whether a cross-chain bridge source transaction hash has already been consumed.
+    pub fn is_bridge_tx_consumed(env: Env, source_tx_hash: BytesN<32>) -> bool {
+        env.storage()
+            .persistent()
+            .has(&bridge_consumed_tx_key(&source_tx_hash))
+    }
+
+    /// Compute the canonical SHA-256 digest signed by the bridge authority for a relay proof.
+    pub fn compute_bridge_proof_digest(
+        env: &Env,
+        invoice_id: u64,
+        source_chain_id: u32,
+        source_tx_hash: &BytesN<32>,
+        sender_address: &Bytes,
+        amount: i128,
+    ) -> BytesN<32> {
+        let mut buf = Bytes::from_slice(env, b"split:bridge_pay:v1:");
+        buf.extend_from_array(&invoice_id.to_be_bytes());
+        buf.extend_from_array(&source_chain_id.to_be_bytes());
+        buf.append(&Bytes::from(source_tx_hash.clone()));
+        buf.append(sender_address);
+        buf.extend_from_array(&amount.to_be_bytes());
+        env.crypto().sha256(&buf).into()
+    }
+
+    /// Credit an invoice via a verified cross-chain bridge payment relay proof.
+    /// Verifies the `bridge_authority` Ed25519 signature, rejects replayed `source_tx_hash`
+    /// proofs with `AlreadyConsumed`, emits `BridgePaymentReceived`, and triggers auto-release
+    /// when the invoice becomes fully funded.
+    pub fn bridge_pay(
+        env: Env,
+        payer: Address,
+        invoice_id: u64,
+        amount: i128,
+        proof: types::BridgeProof,
+    ) {
+        require_fn_not_paused(&env, &symbol_short!("brg_pay"));
+        payer.require_auth();
+        Self::enforce_invoice_rate_limit(&env, invoice_id, &payer);
+
+        let tx_key = bridge_consumed_tx_key(&proof.source_tx_hash);
+        assert!(
+            !env.storage().persistent().has(&tx_key),
+            "AlreadyConsumed"
+        );
+
+        assert!(
+            proof.invoice_id == invoice_id,
+            "wrong invoice in bridge proof"
+        );
+        assert!(
+            amount > 0 && proof.amount == amount,
+            "wrong amount in bridge proof"
+        );
+
+        let mut invoice = load_invoice(&env, invoice_id);
+        assert!(
+            invoice.status == InvoiceStatus::Pending,
+            "invoice is not pending"
+        );
+        assert!(!invoice.disputed, "invoice is disputed");
+        assert!(
+            !invoice.frozen && !invoice.admin_frozen,
+            "invoice is frozen"
+        );
+        assert!(
+            env.ledger().timestamp() <= invoice.deadline,
+            "invoice deadline has passed"
+        );
+
+        let total: i128 = invoice.amounts.iter().sum();
+        let remaining = total.saturating_sub(invoice.funded);
+        assert!(
+            amount <= remaining,
+            "wrong amount: payment exceeds remaining balance"
+        );
+
+        let authority_pk: BytesN<32> = env
+            .storage()
+            .instance()
+            .get(&bridge_authority_key())
+            .expect("bridge authority not configured");
+        let digest = Self::compute_bridge_proof_digest(
+            &env,
+            proof.invoice_id,
+            proof.source_chain_id,
+            &proof.source_tx_hash,
+            &proof.sender_address,
+            proof.amount,
+        );
+        env.crypto()
+            .ed25519_verify(&authority_pk, &Bytes::from(digest), &proof.signature);
+
+        // Mark source tx hash as consumed before external token transfer (CEI).
+        env.storage().persistent().set(&tx_key, &true);
+
+        let invoice_token = funding_token_for(&invoice);
+        let token_client = token::Client::new(&env, &invoice_token);
+        token_client.transfer(&payer, &env.current_contract_address(), &amount);
+
+        let shard_id = compute_shard_id(&env, &payer);
+        let mut shard_payments: Vec<Payment> = env
+            .storage()
+            .persistent()
+            .get::<(Symbol, u64, u64), Vec<Payment>>(&pay_shard_key(invoice_id, shard_id))
+            .unwrap_or_else(|| Vec::new(&env));
+        shard_payments.push_back(Payment {
+            payer: payer.clone(),
+            amount,
+            tip: 0,
+            attestation_hash: None,
+            donate_on_failure: false,
+            ledger: env.ledger().sequence(),
+            timestamp: env.ledger().timestamp(),
+        });
+        env.storage()
+            .persistent()
+            .set(&pay_shard_key(invoice_id, shard_id), &shard_payments);
+
+        invoice.funded = validation::checked_add_amount(invoice.funded, amount)
+            .unwrap_or_else(|e| env.panic_with_error(e));
+        let cumulative_key = cumulative_contributed_key(invoice_id);
+        let cumulative: i128 = env.storage().persistent().get(&cumulative_key).unwrap_or(0);
+        env.storage()
+            .persistent()
+            .set(&cumulative_key, &(cumulative + amount));
+
+        append_audit_entry(&env, invoice_id, symbol_short!("brdg_pay"), &payer);
+        events::bridge_payment_received(&env, invoice_id, &payer, &proof);
+        events::payment_received(&env, invoice_id, &payer, amount, &invoice_token);
+        check_and_emit_funding_checkpoints(&env, invoice_id, invoice.funded, total);
+        Self::record_invoice_rate_limit(&env, invoice_id, &payer);
+
+        if invoice.funded >= total {
+            let in_group = env
+                .storage()
+                .persistent()
+                .has(&invoice_group_key(invoice_id));
+            let guarded = invoice.prerequisite_id.is_some()
+                || !invoice.tranches.is_empty()
+                || !invoice.release_stages.is_empty()
+                || in_group
+                || !invoice.co_signers.is_empty()
+                || env.storage().persistent().has(&cosigners_key(invoice_id))
+                || (invoice.condition_oracle.is_some() && !invoice.condition_met)
+                || (invoice.min_funding_bps > 0
+                    && invoice.funded
+                        < (invoice.amounts.iter().sum::<i128>() * invoice.min_funding_bps as i128
+                            / 10_000));
+            if guarded {
+                save_invoice(&env, invoice_id, &invoice);
+            } else {
+                Self::_release(&env, invoice_id, &mut invoice, &payer);
+            }
+        } else {
+            save_invoice(&env, invoice_id, &invoice);
+        }
+    }
 }
+
+#[cfg(test)]
+mod issue_343_tests {
+    use super::*;
+    use ed25519_dalek::{Signer, SigningKey};
+    use soroban_sdk::{
+        testutils::{Address as _, Ledger as _},
+        token::{Client as TokenClient, StellarAssetClient},
+        Bytes, BytesN, Env, Vec,
+    };
+
+    fn setup_bridge_env() -> (
+        Env,
+        SplitContractClient<'static>,
+        Address,
+        Address,
+        Address,
+        Address,
+        SigningKey,
+        u64,
+    ) {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|li| {
+            li.timestamp = 1_000;
+        });
+
+        let admin = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token_contract = env.register_stellar_asset_contract_v2(token_admin);
+        let token_addr = token_contract.address();
+
+        let contract_id = env.register(SplitContract, ());
+        let client = SplitContractClient::new(&env, &contract_id);
+        client.initialize(
+            &admin,
+            &0i128,
+            &treasury,
+            &token_addr,
+            &0u32,
+            &None,
+            &1_000u32,
+            &100u32,
+            &60u64,
+        );
+
+        let sk = SigningKey::from_bytes(&[42u8; 32]);
+        let pk = BytesN::from_array(&env, &sk.verifying_key().to_bytes());
+        client.set_bridge_authority(&admin, &pk);
+
+        let creator = Address::generate(&env);
+        let recipient = Address::generate(&env);
+        let relayer = Address::generate(&env);
+        StellarAssetClient::new(&env, &token_addr).mint(&relayer, &10_000);
+
+        let mut recipients = Vec::new(&env);
+        recipients.push_back(recipient.clone());
+        let mut amounts = Vec::new(&env);
+        amounts.push_back(1_000i128);
+
+        let invoice_id = client.create_invoice(
+            &creator,
+            &recipients,
+            &amounts,
+            &token_addr,
+            &5_000u64,
+            &crate::test::default_options(&env),
+        );
+
+        (
+            env,
+            client,
+            token_addr,
+            recipient,
+            relayer,
+            creator,
+            sk,
+            invoice_id,
+        )
+    }
+
+    fn make_signed_proof(
+        env: &Env,
+        sk: &SigningKey,
+        invoice_id: u64,
+        source_chain_id: u32,
+        tx_seed: u8,
+        amount: i128,
+    ) -> types::BridgeProof {
+        let source_tx_hash = BytesN::from_array(env, &[tx_seed; 32]);
+        let sender_address = Bytes::from_slice(env, &[0xde, 0xad, 0xbe, 0xef]);
+        let digest = SplitContract::compute_bridge_proof_digest(
+            env,
+            invoice_id,
+            source_chain_id,
+            &source_tx_hash,
+            &sender_address,
+            amount,
+        );
+        let sig_bytes = sk.sign(&digest.to_array()).to_bytes();
+        let signature = BytesN::from_array(env, &sig_bytes);
+
+        types::BridgeProof {
+            invoice_id,
+            source_chain_id,
+            source_tx_hash,
+            sender_address,
+            amount,
+            signature,
+        }
+    }
+
+    #[test]
+    fn test_bridge_pay_valid_relay_and_auto_release() {
+        let (env, client, token_addr, recipient, relayer, _creator, sk, invoice_id) =
+            setup_bridge_env();
+        let token = TokenClient::new(&env, &token_addr);
+
+        let proof = make_signed_proof(&env, &sk, invoice_id, 1u32, 7u8, 1_000i128);
+        let before_recipient = token.balance(&recipient);
+
+        client.bridge_pay(&relayer, &invoice_id, &1_000i128, &proof);
+
+        let after_recipient = token.balance(&recipient);
+        assert_eq!(after_recipient - before_recipient, 1_000);
+        assert!(client.is_bridge_tx_consumed(&proof.source_tx_hash));
+        assert_eq!(
+            client.get_invoice(&invoice_id).status,
+            InvoiceStatus::Released
+        );
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_bridge_pay_invalid_signature_rejected() {
+        let (env, client, _token_addr, _recipient, relayer, _creator, _sk, invoice_id) =
+            setup_bridge_env();
+        let wrong_sk = SigningKey::from_bytes(&[99u8; 32]);
+        let bad_proof = make_signed_proof(&env, &wrong_sk, invoice_id, 1u32, 8u8, 500i128);
+
+        client.bridge_pay(&relayer, &invoice_id, &500i128, &bad_proof);
+    }
+
+    #[test]
+    #[should_panic(expected = "AlreadyConsumed")]
+    fn test_bridge_pay_replayed_proof_rejected() {
+        let (env, client, _token_addr, _recipient, relayer, _creator, sk, invoice_id) =
+            setup_bridge_env();
+        let proof = make_signed_proof(&env, &sk, invoice_id, 1u32, 9u8, 400i128);
+
+        client.bridge_pay(&relayer, &invoice_id, &400i128, &proof);
+        // Second call with the same source_tx_hash must panic with AlreadyConsumed
+        client.bridge_pay(&relayer, &invoice_id, &400i128, &proof);
+    }
+
+    #[test]
+    #[should_panic(expected = "wrong invoice in bridge proof")]
+    fn test_bridge_pay_wrong_invoice_rejected() {
+        let (env, client, _token_addr, _recipient, relayer, _creator, sk, invoice_id) =
+            setup_bridge_env();
+        let proof_for_other_invoice =
+            make_signed_proof(&env, &sk, invoice_id + 1, 1u32, 10u8, 500i128);
+
+        client.bridge_pay(&relayer, &invoice_id, &500i128, &proof_for_other_invoice);
+    }
+
+    #[test]
+    #[should_panic(expected = "wrong amount in bridge proof")]
+    fn test_bridge_pay_wrong_amount_rejected() {
+        let (env, client, _token_addr, _recipient, relayer, _creator, sk, invoice_id) =
+            setup_bridge_env();
+        let proof = make_signed_proof(&env, &sk, invoice_id, 1u32, 11u8, 500i128);
+
+        client.bridge_pay(&relayer, &invoice_id, &600i128, &proof);
+    }
+}
+

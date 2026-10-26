@@ -2677,3 +2677,35 @@ pub fn condition_oracle_set(env: &Env, invoice_id: u64, oracle: &Address, condit
         (oracle.clone(), condition.clone()),
     );
 }
+
+// ---------------------------------------------------------------------------
+// Issue #343: Cross-chain bridge payment relay events
+// ---------------------------------------------------------------------------
+
+/// Issue #343: Emitted when a verified cross-chain bridge payment relay credits an invoice.
+/// Topics: (split, BridgePaymentReceived, invoice_id)
+/// Data: (payer, source_chain_id, source_tx_hash, sender_address, amount, event_seq)
+pub fn bridge_payment_received(
+    env: &Env,
+    invoice_id: u64,
+    payer: &Address,
+    proof: &crate::types::BridgeProof,
+) {
+    let event_seq = next_seq(env, invoice_id);
+    env.events().publish(
+        (
+            symbol_short!("split"),
+            Symbol::new(env, "BridgePaymentReceived"),
+            invoice_id,
+        ),
+        (
+            payer.clone(),
+            proof.source_chain_id,
+            proof.source_tx_hash.clone(),
+            proof.sender_address.clone(),
+            proof.amount,
+            event_seq,
+        ),
+    );
+}
+
