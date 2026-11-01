@@ -194,6 +194,18 @@
                   },
                   {
                     "key": {
+                      "symbol": "refund_reason"
+                    },
+                    "val": {
+                      "vec": [
+                        {
+                          "symbol": "None"
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "key": {
                       "symbol": "status"
                     },
                     "val": {

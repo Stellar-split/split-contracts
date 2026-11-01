@@ -91,6 +91,8 @@ pub enum Error {
     InvalidGracePeriod = 39,
     /// The refund grace period has already elapsed or been waived.
     RefundGraceElapsed = 40,
+    /// The deadline is too far in the future; it exceeds `MAX_DEADLINE_HORIZON`.
+    DeadlineOutOfRange = 41,
 }
 
 /// Returns a human-readable recovery suggestion for the given error.
@@ -175,6 +177,94 @@ pub fn get_recovery_suggestion(error: Error) -> String {
             &Env::default(),
             "Only the blacklisted payer may perform this action; retry from the payer account.",
         ),
+        Error::InvalidCosignerConfig => String::from_str(
+            &Env::default(),
+            "Co-signer configuration is invalid; ensure the list is non-empty, has no duplicates, and threshold is valid.",
+        ),
+        Error::NotCosigner => String::from_str(
+            &Env::default(),
+            "Caller is not a configured co-signer for this invoice.",
+        ),
+        Error::AlreadyVoted => String::from_str(
+            &Env::default(),
+            "Co-signer has already voted; vote cannot be changed.",
+        ),
+        Error::ApprovalRequired => String::from_str(
+            &Env::default(),
+            "Co-signer approval is required but has not reached the required threshold.",
+        ),
+        Error::ApprovalRejected => String::from_str(
+            &Env::default(),
+            "Co-signers have rejected the release; threshold can no longer be reached.",
+        ),
+        Error::NotVoted => String::from_str(
+            &Env::default(),
+            "Co-signer has not voted yet; there is nothing to revoke.",
+        ),
+        Error::CosignersLocked => String::from_str(
+            &Env::default(),
+            "Co-signer configuration is locked and cannot be changed after voting has started.",
+        ),
+        Error::NoCosigners => String::from_str(
+            &Env::default(),
+            "No co-signer approval is configured for this invoice.",
+        ),
+        Error::InvalidOracleConfig => String::from_str(
+            &Env::default(),
+            "Oracle condition configuration is invalid; check threshold, staleness window, and oracle addresses.",
+        ),
+        Error::OracleUnavailable => String::from_str(
+            &Env::default(),
+            "Oracle is unavailable or did not return a price; try again later.",
+        ),
+        Error::OracleStalePrice => String::from_str(
+            &Env::default(),
+            "Oracle price is too old and exceeds the staleness window; wait for a fresh price.",
+        ),
+        Error::OracleInvalidPrice => String::from_str(
+            &Env::default(),
+            "Oracle returned an invalid price (non-positive or future timestamp).",
+        ),
+        Error::OracleConditionNotMet => String::from_str(
+            &Env::default(),
+            "Oracle price does not satisfy the release condition; condition must be met before release.",
+        ),
+        Error::NoOracleCondition => String::from_str(
+            &Env::default(),
+            "No oracle condition is configured for this invoice.",
+        ),
+        Error::InvalidSchedule => String::from_str(
+            &Env::default(),
+            "Release schedule is invalid; ensure release_at is in the future and ledger delay is within limits.",
+        ),
+        Error::ReleaseNotYetDue => String::from_str(
+            &Env::default(),
+            "Scheduled release time has not been reached yet; try again later.",
+        ),
+        Error::ScheduleLedgerNotReached => String::from_str(
+            &Env::default(),
+            "Scheduled minimum ledger count has not elapsed yet; try again later.",
+        ),
+        Error::ScheduleNotFound => String::from_str(
+            &Env::default(),
+            "No active release schedule exists for this invoice.",
+        ),
+        Error::RefundGraceActive => String::from_str(
+            &Env::default(),
+            "Refund grace period is still active; refund is not permitted yet.",
+        ),
+        Error::InvalidGracePeriod => String::from_str(
+            &Env::default(),
+            "Refund grace period exceeds the maximum allowed duration.",
+        ),
+        Error::RefundGraceElapsed => String::from_str(
+            &Env::default(),
+            "Refund grace period has already elapsed or been waived; no refund is possible.",
+        ),
+        Error::DeadlineOutOfRange => String::from_str(
+            &Env::default(),
+            "Deadline is too far in the future; it exceeds the maximum allowed horizon.",
+        ),
     }
 }
 
@@ -200,6 +290,28 @@ pub fn error_from_code(code: u32) -> Option<Error> {
         17 => Some(Error::NotBlacklisted),
         18 => Some(Error::AlreadyFinalised),
         19 => Some(Error::NotBlacklistedPayer),
+        20 => Some(Error::InvalidCosignerConfig),
+        21 => Some(Error::NotCosigner),
+        22 => Some(Error::AlreadyVoted),
+        23 => Some(Error::ApprovalRequired),
+        24 => Some(Error::ApprovalRejected),
+        25 => Some(Error::NotVoted),
+        26 => Some(Error::CosignersLocked),
+        27 => Some(Error::NoCosigners),
+        28 => Some(Error::InvalidOracleConfig),
+        29 => Some(Error::OracleUnavailable),
+        30 => Some(Error::OracleStalePrice),
+        31 => Some(Error::OracleInvalidPrice),
+        32 => Some(Error::OracleConditionNotMet),
+        33 => Some(Error::NoOracleCondition),
+        34 => Some(Error::InvalidSchedule),
+        35 => Some(Error::ReleaseNotYetDue),
+        36 => Some(Error::ScheduleLedgerNotReached),
+        37 => Some(Error::ScheduleNotFound),
+        38 => Some(Error::RefundGraceActive),
+        39 => Some(Error::InvalidGracePeriod),
+        40 => Some(Error::RefundGraceElapsed),
+        41 => Some(Error::DeadlineOutOfRange),
         _ => None,
     }
 }

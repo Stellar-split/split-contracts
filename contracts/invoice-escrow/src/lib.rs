@@ -37,9 +37,16 @@ use soroban_sdk::{
 use oracle::PriceOracleClient;
 use types::{
     ApprovalStatus, BlacklistEntry, CosignerApproval, EscrowInvoice, EscrowReleased, EscrowStatus,
-    OracleCondition, OracleReading, OracleSource, PriceComparator, PriceData, RefundGrace,
-    RefundGraceStatus, ReleaseSchedule, ScheduleStatus,
+    OracleCondition, OracleReading, OracleSource, OptionalRefundReason, PriceComparator, PriceData, RefundGrace,
+    RefundGraceStatus, RefundReason, ReleaseSchedule, ScheduleStatus,
 };
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+/// Maximum allowed deadline horizon (seconds from now). Roughly 10 years.
+const MAX_DEADLINE_HORIZON: u64 = 315_360_000;
 
 // ---------------------------------------------------------------------------
 // Storage key helpers
@@ -139,6 +146,18 @@ fn require_admin(env: &Env) -> Address {
         .expect("not initialized");
     admin.require_auth();
     admin
+}
+
+/// Validates that a deadline is in the future and not too far away.
+fn validate_deadline(env: &Env, deadline: u64) -> Result<(), Error> {
+    let now = env.ledger().timestamp();
+    if deadline <= now {
+        return Err(Error::DeadlinePassed);
+    }
+    if deadline > now.saturating_add(MAX_DEADLINE_HORIZON) {
+        return Err(Error::DeadlineOutOfRange);
+    }
+    Ok(())
 }
 
 fn get_invoice(env: &Env, id: u64) -> Result<EscrowInvoice, Error> {
@@ -748,7 +767,7 @@ impl InvoiceEscrowContract {
             funded_amount: 0,
             deadline,
             status: EscrowStatus::Pending,
-            refund_reason: None,
+            refund_reason: OptionalRefundReason::None,
         };
         save_invoice(&env, id, &invoice);
 
@@ -933,7 +952,7 @@ impl InvoiceEscrowContract {
     /// * [`Error::DeadlineNotPassed`]  — Deadline has not expired yet.
     /// * [`Error::RefundGraceActive`]  — Deadline passed but the grace period
     ///   is still running (and has not been waived).
-    pub fn refund(env: Env, invoice_id: u64, payers: Vec<Address>) -> Result<(), Error> {
+    pub fn refund(env: Env, invoice_id: u64, payers: Vec<Address>, reason: RefundReason) -> Result<(), Error> {
         let mut invoice = get_invoice(&env, invoice_id)?;
 
         // --- Validate all preconditions before any mutation. ---
@@ -969,7 +988,7 @@ impl InvoiceEscrowContract {
         }
 
         invoice.status = EscrowStatus::Refunded;
-        invoice.refund_reason = Some(reason);
+        invoice.refund_reason = OptionalRefundReason::Some(reason);
         save_invoice(&env, invoice_id, &invoice);
         Ok(())
     }

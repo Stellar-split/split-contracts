@@ -2450,21 +2450,8 @@ pub struct EncryptionValidation {
 // Issue #1013: RBAC types
 // ---------------------------------------------------------------------------
 
-/// Role in the access control system.
-#[contracttype]
-#[derive(Clone, Debug, PartialEq)]
-pub enum Role {
-    /// Full contract administrator.
-    Admin,
-    /// Can create and manage invoices.
-    Creator,
-    /// Can pay toward invoices.
-    Payer,
-    /// Can approve invoices for release.
-    Approver,
-    /// Can audit contract state (read-only).
-    Auditor,
-}
+// Note: Role enum is already defined above; duplicate definition removed.
+// TODO: Merge RBAC variants from issue #1013 when implementing full RBAC
 
 /// Permission flags that can be granted to roles.
 #[contracttype]

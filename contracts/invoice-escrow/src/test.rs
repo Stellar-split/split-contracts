@@ -3,7 +3,7 @@
 extern crate std;
 
 use crate::errors::Error;
-use crate::types::EscrowStatus;
+use crate::types::{EscrowStatus, RefundReason};
 use crate::InvoiceEscrowContract;
 use crate::InvoiceEscrowContractClient;
 use soroban_sdk::testutils::{Address as _, Events, Ledger, LedgerInfo};
@@ -393,7 +393,7 @@ fn test_create_invoice_deadline_at_max_horizon_accepted() {
     env.ledger().set_timestamp(now);
 
     // Boundary: exactly at the maximum allowed horizon.
-    let deadline = now + InvoiceEscrowContract::MAX_DEADLINE_HORIZON;
+    let deadline = now + crate::MAX_DEADLINE_HORIZON;
     let id = client.create_invoice(&creator, &token, &1_000_000, &deadline);
     let invoice = client.get_invoice(&id);
     assert_eq!(invoice.deadline, deadline);
@@ -413,7 +413,7 @@ fn test_create_invoice_deadline_beyond_max_horizon_rejected() {
     env.ledger().set_timestamp(now);
 
     // Boundary: one second past the maximum allowed horizon.
-    let deadline = now + InvoiceEscrowContract::MAX_DEADLINE_HORIZON + 1;
+    let deadline = now + crate::MAX_DEADLINE_HORIZON + 1;
     let result = client.try_create_invoice(&creator, &token, &1_000_000, &deadline);
     assert_eq!(result, Err(Ok(Error::DeadlineOutOfRange)));
 }
@@ -500,11 +500,13 @@ fn test_deposit_after_deadline_fails() {
     mint(&env, &token, &token_admin, &payer, 2_000_000);
 
     client.initialize(&admin);
-    // Deadline 0 — create invoice, then advance ledger past deadline before depositing.
-    let id = client.create_invoice(&creator, &token, &1_000_000, &0u64);
+    // Set timestamp, then create invoice with a deadline just ahead.
+    env.ledger().set_timestamp(1_000);
+    let id = client.create_invoice(&creator, &token, &1_000_000, &1_001u64);
 
+    // Advance ledger past deadline before depositing.
     env.ledger().set(LedgerInfo {
-        timestamp: 1,
+        timestamp: 1_002,
         protocol_version: env.ledger().protocol_version(),
         sequence_number: 1,
         network_id: Default::default(),
@@ -555,7 +557,7 @@ fn test_refund_after_deadline() {
 
     let mut payers = soroban_sdk::Vec::new(&env);
     payers.push_back(payer.clone());
-    client.refund(&id, &payers);
+    client.refund(&id, &payers, &RefundReason::DeadlineExpired);
 
     let invoice = client.get_invoice(&id);
     assert_eq!(invoice.status, EscrowStatus::Refunded);
@@ -584,7 +586,7 @@ fn test_refund_before_deadline_fails() {
 
     let mut payers = soroban_sdk::Vec::new(&env);
     payers.push_back(payer);
-    let result = client.try_refund(&id, &payers);
+    let result = client.try_refund(&id, &payers, &RefundReason::DeadlineExpired);
     assert_eq!(result, Err(Ok(Error::DeadlineNotPassed)));
 }
 
@@ -1339,7 +1341,8 @@ mod oracle_tests {
 
         client.initialize(&admin);
         let id = client.create_invoice(&creator, &token, &1_000, &(NOW + 10_000));
-        Ctx { env, contract_id, payer, asset: Address::generate(&env), id }
+        let asset = Address::generate(&env);
+        Ctx { env, contract_id, payer, asset, id }
     }
 
     fn mock_oracle(env: &Env, price: Option<PriceData>) -> Address {
@@ -1957,7 +1960,7 @@ mod refund_grace_tests {
         assert_eq!(client.get_refund_grace_status(&id), RefundGraceStatus::NoGrace);
 
         ctx.set_time(DEADLINE + 1);
-        client.refund(&id, &vec![&ctx.env, ctx.payer.clone()]);
+        client.refund(&id, &vec![&ctx.env, ctx.payer.clone()], &RefundReason::DeadlineExpired);
         assert_eq!(client.get_invoice(&id).status, EscrowStatus::Refunded);
     }
 
@@ -1971,19 +1974,19 @@ mod refund_grace_tests {
         let payers = vec![&ctx.env, ctx.payer.clone()];
 
         assert_eq!(client.get_refund_grace_status(&id), RefundGraceStatus::NotStarted);
-        assert_eq!(client.try_refund(&id, &payers), Err(Ok(Error::DeadlineNotPassed)));
+        assert_eq!(client.try_refund(&id, &payers, &RefundReason::DeadlineExpired), Err(Ok(Error::DeadlineNotPassed)));
 
         ctx.set_time(DEADLINE + 1);
         assert_eq!(client.get_refund_grace_status(&id), RefundGraceStatus::Active);
-        assert_eq!(client.try_refund(&id, &payers), Err(Ok(Error::RefundGraceActive)));
+        assert_eq!(client.try_refund(&id, &payers, &RefundReason::DeadlineExpired), Err(Ok(Error::RefundGraceActive)));
 
         // Boundary: refunds open strictly after deadline + grace.
         ctx.set_time(DEADLINE + GRACE);
-        assert_eq!(client.try_refund(&id, &payers), Err(Ok(Error::RefundGraceActive)));
+        assert_eq!(client.try_refund(&id, &payers, &RefundReason::DeadlineExpired), Err(Ok(Error::RefundGraceActive)));
 
         ctx.set_time(DEADLINE + GRACE + 1);
         assert_eq!(client.get_refund_grace_status(&id), RefundGraceStatus::Elapsed);
-        client.refund(&id, &payers);
+        client.refund(&id, &payers, &RefundReason::DeadlineExpired);
         assert_eq!(client.get_invoice(&id).status, EscrowStatus::Refunded);
         let tok = token::Client::new(&ctx.env, &ctx.token);
         assert_eq!(tok.balance(&ctx.payer), 10_000);
@@ -2045,9 +2048,9 @@ mod refund_grace_tests {
         assert_eq!(client.refund_available_after(&id), DEADLINE + GRACE + 1_000);
 
         ctx.set_time(DEADLINE + GRACE + 1);
-        assert_eq!(client.try_refund(&id, &payers), Err(Ok(Error::RefundGraceActive)));
+        assert_eq!(client.try_refund(&id, &payers, &RefundReason::DeadlineExpired), Err(Ok(Error::RefundGraceActive)));
         ctx.set_time(DEADLINE + GRACE + 1_001);
-        client.refund(&id, &payers);
+        client.refund(&id, &payers, &RefundReason::DeadlineExpired);
         assert_eq!(client.get_invoice(&id).status, EscrowStatus::Refunded);
     }
 
@@ -2102,14 +2105,14 @@ mod refund_grace_tests {
         let payers = vec![&ctx.env, ctx.payer.clone()];
 
         ctx.set_time(DEADLINE + 1);
-        assert_eq!(client.try_refund(&id, &payers), Err(Ok(Error::RefundGraceActive)));
+        assert_eq!(client.try_refund(&id, &payers, &RefundReason::DeadlineExpired), Err(Ok(Error::RefundGraceActive)));
 
         client.waive_refund_grace(&id);
         assert_eq!(client.get_refund_grace_status(&id), RefundGraceStatus::Waived);
         assert_eq!(client.refund_grace_remaining(&id), 0);
         assert_eq!(client.refund_available_after(&id), DEADLINE);
 
-        client.refund(&id, &payers);
+        client.refund(&id, &payers, &RefundReason::DeadlineExpired);
         assert_eq!(client.get_invoice(&id).status, EscrowStatus::Refunded);
     }
 
@@ -2123,7 +2126,7 @@ mod refund_grace_tests {
 
         client.waive_refund_grace(&id);
         assert_eq!(
-            client.try_refund(&id, &vec![&ctx.env, ctx.payer.clone()]),
+            client.try_refund(&id, &vec![&ctx.env, ctx.payer.clone()], &RefundReason::DeadlineExpired),
             Err(Ok(Error::DeadlineNotPassed))
         );
     }

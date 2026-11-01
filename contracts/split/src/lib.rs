@@ -125,6 +125,10 @@ mod sustainability;
 mod cooperative;
 mod education_lockup;
 
+// Issue #1033: Analytics and monitoring for usage tracking and alerts.
+mod analytics;
+mod monitoring;
+
 // Issue #1011: Enhanced emergency pause mechanism.
 pub mod emergency_pause;
 // Issue #1010: Enhanced contract upgrade mechanism with version management.
