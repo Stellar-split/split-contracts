@@ -8252,7 +8252,7 @@ fn test_creator_fee_deducted_on_release() {
 }
 
 #[test]
-#[should_panic(expected = "FeeSumExceedsCap")]
+#[should_panic(expected = "#47")]
 fn test_creator_fee_exceeds_cap_panics() {
     let (env, contract_id, token_id) = setup();
     let c = client(&env, &contract_id);

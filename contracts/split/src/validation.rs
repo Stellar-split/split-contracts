@@ -874,11 +874,14 @@ mod tests {
     #[test]
     fn generated_addresses_are_valid() {
         let env = Env::default();
-        for _ in 0..10 {
-            let a = Address::generate(&env);
-            assert_eq!(validate_strkey(&strkey_of(&a)), Ok(()));
-            assert_eq!(validate_recipient_address(&env, &a), Ok(()));
-        }
+        let contract_id = env.register(crate::SplitContract, ());
+        env.as_contract(&contract_id, || {
+            for _ in 0..10 {
+                let a = Address::generate(&env);
+                assert_eq!(validate_strkey(&strkey_of(&a)), Ok(()));
+                assert_eq!(validate_recipient_address(&env, &a), Ok(()));
+            }
+        });
     }
 
     #[test]
