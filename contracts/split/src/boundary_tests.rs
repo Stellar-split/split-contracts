@@ -78,7 +78,7 @@ fn payment_amount_boundaries() {
     m.check(try_pay_with_nonce(&c, &payer, id, 1, 0), "minimum payment of one accepted");
     m.check(c.get_invoice(&id).funded == 1, "funded is one");
     m.check(!try_pay_with_nonce(&c, &payer, id, 100, 1), "remaining + 1 rejected");
-    m.check(try_pay_with_nonce(&c, &payer, id, 99, 2), "exact remainder accepted");
+    m.check(try_pay_with_nonce(&c, &payer, id, 99, 1), "exact remainder accepted");
     m.check(c.get_invoice(&id).status == InvoiceStatus::Released, "fully funded releases");
     m.assert_complete();
 }
