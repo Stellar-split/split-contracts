@@ -16995,6 +16995,105 @@ fn max_leaderboard_size_key() -> Symbol {
     symbol_short!("mx_ldr_sz")
 }
 
+// Stub functions for unimplemented features
+fn query_status_index_key(status: &Symbol) -> (Symbol, Symbol) {
+    (symbol_short!("q_sts_idx"), status.clone())
+}
+
+fn query_creator_index_key(creator: &Address) -> (Symbol, Address) {
+    (symbol_short!("q_cr_idx"), creator.clone())
+}
+
+fn rbac_user_roles_key(user: &Address) -> (Symbol, Address) {
+    (symbol_short!("rbac_ur"), user.clone())
+}
+
+fn rbac_role_key(role: &Symbol) -> (Symbol, Symbol) {
+    (symbol_short!("rbac_r"), role.clone())
+}
+
+fn rbac_audit_key(user: &Address) -> (Symbol, Address) {
+    (symbol_short!("rbac_aud"), user.clone())
+}
+
+fn rbac_analytics_key() -> Symbol {
+    symbol_short!("rbac_ana")
+}
+
+fn cache_entry_key(key: &Symbol) -> (Symbol, Symbol) {
+    (symbol_short!("cache_e"), key.clone())
+}
+
+fn cache_keys_list_key() -> Symbol {
+    symbol_short!("cache_lst")
+}
+
+fn enc_audit_key(invoice_id: u64) -> (Symbol, u64) {
+    (symbol_short!("enc_aud"), invoice_id)
+}
+
+fn enc_version_key() -> Symbol {
+    symbol_short!("enc_ver")
+}
+
+fn enc_data_version_key(invoice_id: u64) -> (Symbol, u64) {
+    (symbol_short!("enc_dv"), invoice_id)
+}
+
+fn current_key_version() -> u32 {
+    1
+}
+
+fn load_cache_metrics(env: &Env) -> types::CacheMetrics {
+    types::CacheMetrics {
+        total_accesses: 0,
+        cache_hits: 0,
+        cache_misses: 0,
+        avg_access_time: 0,
+        last_eviction_time: 0,
+    }
+}
+
+fn save_cache_metrics(env: &Env, metrics: &types::CacheMetrics) {}
+
+fn load_encryption_key(env: &Env) -> types::EncryptionKey {
+    types::EncryptionKey {
+        algorithm: types::EncryptionAlgorithm::Aes256Gcm,
+    }
+}
+
+fn save_encryption_key(env: &Env, key: &types::EncryptionKey) {}
+
+fn append_encryption_audit(env: &Env, invoice_id: u64) {}
+
+fn append_rbac_audit(env: &Env, user: &Address, action: &Symbol) {}
+
+fn update_access_analytics(env: &Env, user: &Address) {}
+
+fn recalc_hit_ratio(env: &Env) -> u64 {
+    0
+}
+
+fn role_to_symbol(role: &types::Role) -> Symbol {
+    symbol_short!("role")
+}
+
+fn symbol_to_role(sym: &Symbol) -> types::Role {
+    types::Role::Admin
+}
+
+fn has_role_internal(env: &Env, user: &Address, role: &types::Role) -> bool {
+    false
+}
+
+fn role_has_permission(role: &types::Role, perm: &types::Permission) -> bool {
+    false
+}
+
+fn status_to_symbol(env: &Env, status: &types::InvoiceStatus) -> Symbol {
+    symbol_short!("stat")
+}
+
 #[allow(dead_code)]
 fn remove_invoice(env: &Env, id: u64) {
     env.storage().persistent().remove(&invoice_key(id));
