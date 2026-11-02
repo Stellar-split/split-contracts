@@ -17064,7 +17064,7 @@ fn load_encryption_key(env: &Env) -> types::EncryptionKey {
 
 fn save_encryption_key(env: &Env, key: &types::EncryptionKey) {}
 
-fn append_encryption_audit(env: &Env, invoice_id: u64) {}
+fn append_encryption_audit(env: &Env, action: Symbol, caller: &Address, version: u32, hash: &BytesN<32>) {}
 
 fn append_rbac_audit(env: &Env, user: &Address, action: &Symbol) {}
 
