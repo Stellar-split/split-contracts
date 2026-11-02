@@ -2634,7 +2634,7 @@ mod tests {
 /// Data: (guard, detail)
 pub fn guard_failure(env: &Env, invoice_id: u64, guard: &Symbol, detail: i128) {
     env.events().publish(
-        (symbol_short!("split"), symbol_short!("guard_ko"), invoice_id),
+        (symbol_short!("split"), symbol_short!("grd_fail"), invoice_id),
         (guard.clone(), detail),
     );
 }

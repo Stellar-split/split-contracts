@@ -8040,10 +8040,10 @@ impl SplitContract {
             "invoice is not pending"
         );
         assert!(!invoice.disputed, "invoice is disputed");
-        assert!(
-            env.ledger().timestamp() <= invoice.deadline,
-            "invoice deadline has passed"
-        );
+        if env.ledger().timestamp() > invoice.deadline {
+            events::guard_failure(env, invoice_id, &Symbol::new(env, "deadline"), 0);
+            assert!(false, "invoice deadline has passed");
+        }
         // Issue #483: reject zero or negative payment amounts.
         guard_nonzero_amount(amount).expect("ZeroAmountNotAllowed");
 
