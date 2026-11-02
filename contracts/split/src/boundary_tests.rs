@@ -67,16 +67,18 @@ fn payment_amount_boundaries() {
 
     let (id, _, _) = single_invoice(&env, &c, &token_id, 100, DEADLINE);
 
-    m.check(!try_pay(&c, &payer, id, 0), "zero payment rejected");
-    m.check(!try_pay(&c, &payer, id, -1), "negative payment rejected (underflow)");
-    m.check(!try_pay(&c, &payer, id, 101), "overpay by one rejected (overflow)");
-    m.check(!try_pay(&c, &payer, id, i128::MAX), "i128::MAX payment rejected");
+    // Rejected payments use nonce 0 (will fail but that's expected)
+    m.check(!try_pay_with_nonce(&c, &payer, id, 0, 0), "zero payment rejected");
+    m.check(!try_pay_with_nonce(&c, &payer, id, -1, 0), "negative payment rejected (underflow)");
+    m.check(!try_pay_with_nonce(&c, &payer, id, 101, 0), "overpay by one rejected (overflow)");
+    m.check(!try_pay_with_nonce(&c, &payer, id, i128::MAX, 0), "i128::MAX payment rejected");
     m.check(c.get_invoice(&id).funded == 0, "rejected payments leave funded at zero");
 
-    m.check(try_pay(&c, &payer, id, 1), "minimum payment of one accepted");
+    // Successful payments increment nonce
+    m.check(try_pay_with_nonce(&c, &payer, id, 1, 0), "minimum payment of one accepted");
     m.check(c.get_invoice(&id).funded == 1, "funded is one");
-    m.check(!try_pay(&c, &payer, id, 100), "remaining + 1 rejected");
-    m.check(try_pay(&c, &payer, id, 99), "exact remainder accepted");
+    m.check(!try_pay_with_nonce(&c, &payer, id, 100, 1), "remaining + 1 rejected");
+    m.check(try_pay_with_nonce(&c, &payer, id, 99, 2), "exact remainder accepted");
     m.check(c.get_invoice(&id).status == InvoiceStatus::Released, "fully funded releases");
     m.assert_complete();
 }

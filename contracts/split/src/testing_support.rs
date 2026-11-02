@@ -85,5 +85,9 @@ pub(crate) fn multi_invoice(
 
 /// Pay `amount` as `payer`, returning whether the call succeeded.
 pub(crate) fn try_pay(c: &SplitContractClient, payer: &Address, id: u64, amount: i128) -> bool {
-    c.try_pay(payer, &id, &amount, &0_u64, &false, &false, &None).is_ok()
+    try_pay_with_nonce(c, payer, id, amount, 0)
+}
+
+pub(crate) fn try_pay_with_nonce(c: &SplitContractClient, payer: &Address, id: u64, amount: i128, nonce: u64) -> bool {
+    c.try_pay(payer, &id, &amount, &nonce, &false, &false, &None).is_ok()
 }
