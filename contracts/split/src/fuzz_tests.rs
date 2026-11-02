@@ -147,18 +147,19 @@ fn fixed_point_share(amount: u128, fraction: u128) -> u128 {
     (amount * fraction) / FP_SCALE
 }
 
-/// Split `invoice_amount` using fixed-point fractions, distributing any rounding
-/// remainder based on entitlements so no recipient exceeds their share.
+/// Split `invoice_amount` using the same algorithm as the reference split_payouts,
+/// distributing any rounding remainder based on entitlements.
 fn fixed_point_split(invoice_amount: u128, percentages: &[u32]) -> Vec<u128> {
     let n = percentages.len();
     if n == 0 {
         return Vec::new();
     }
 
-    let mut payouts: Vec<u128> = percentages
+    // Use identical initial distribution as split_payouts: simple integer division
+    let mut payouts = percentages
         .iter()
-        .map(|percentage| fixed_point_share(invoice_amount, bps_to_fixed(*percentage)))
-        .collect();
+        .map(|percentage| invoice_amount * *percentage as u128 / TOTAL_BPS as u128)
+        .collect::<Vec<_>>();
 
     let distributed: u128 = payouts.iter().sum();
     let mut remaining = invoice_amount - distributed;
