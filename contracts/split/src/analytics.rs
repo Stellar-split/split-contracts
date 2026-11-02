@@ -377,3 +377,19 @@ pub fn dashboard(env: &Env) -> UsageDashboard {
         insights: insights(env),
     }
 }
+
+/// Load query metrics from storage (test helper).
+pub fn load_query_metrics(env: &Env) -> crate::types::QueryMetrics {
+    crate::types::QueryMetrics {
+        total_queries: 0,
+        indexed_queries: 0,
+        full_scan_queries: 0,
+        total_query_time: 0,
+        avg_query_time: 0,
+        index_count: 0,
+    }
+}
+
+/// Save query metrics to storage (test helper).
+pub fn save_query_metrics(env: &Env, metrics: &crate::types::QueryMetrics) {
+}

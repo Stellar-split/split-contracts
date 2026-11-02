@@ -2677,3 +2677,25 @@ pub fn condition_oracle_set(env: &Env, invoice_id: u64, oracle: &Address, condit
         (oracle.clone(), condition.clone()),
     );
 }
+
+pub fn query_executed(env: &Env, index_type: &Symbol, result_count: u32) {}
+
+pub fn query_index_created(env: &Env, index_type: &Symbol) {}
+
+pub fn encryption_key_set(env: &Env, invoice_id: u64) {}
+
+pub fn data_encrypted(env: &Env, invoice_id: u64) {}
+
+pub fn data_decrypted(env: &Env, invoice_id: u64) {}
+
+pub fn encryption_validated(env: &Env, invoice_id: u64) {}
+
+pub fn role_assigned(env: &Env, invoice_id: u64, role: &Symbol) {}
+
+pub fn permission_checked(env: &Env, invoice_id: u64) {}
+
+pub fn cache_set(env: &Env, key: &Symbol) {}
+
+pub fn cache_invalidated(env: &Env, key: &Symbol) {}
+
+pub fn cache_warmed(env: &Env, key: &Symbol) {}

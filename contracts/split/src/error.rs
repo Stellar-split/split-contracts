@@ -173,6 +173,16 @@ pub enum ContractError {
     UnsupportedOperation = 76,
     /// Issue #1011: Emergency pause recovery plan is not yet complete; unpause is blocked.
     RecoveryIncomplete = 77,
+    /// A supplied deadline value is invalid (past or far in future).
+    InvalidDeadline = 78,
+    /// A supplied recipient address is invalid or missing.
+    InvalidRecipientAddress = 79,
+    /// The oracle condition provided is invalid.
+    InvalidOracleCondition = 80,
+    /// An invalid shard index was provided.
+    InvalidShardIndex = 81,
+    /// The shard capacity has been exceeded.
+    ShardCapacityExceeded = 82,
 }
 
 /// Issue #952: Human-readable, actionable recovery suggestions for every
@@ -404,6 +414,36 @@ pub mod recovery {
             }
             ContractError::InvalidOracleAddress => {
                 "The oracle address is invalid or not registered; verify the oracle configuration."
+            }
+            ContractError::OracleConditionNotMet => {
+                "The oracle's reported condition was not satisfied; wait for the condition to be met and retry."
+            }
+            ContractError::OracleFeedNotFound => {
+                "No oracle feed is configured for the requested asset/pair; configure the oracle feed and retry."
+            }
+            ContractError::InvalidArgument => {
+                "A supplied argument failed validation; check the argument format and range before retrying."
+            }
+            ContractError::MissingStorageEntry => {
+                "A required storage entry is missing; ensure the contract is properly initialized."
+            }
+            ContractError::UnsupportedOperation => {
+                "This operation is not supported by this contract version; upgrade the contract or use a supported operation."
+            }
+            ContractError::InvalidDeadline => {
+                "Provide a deadline that is in the future and not beyond 10 years from now."
+            }
+            ContractError::InvalidRecipientAddress => {
+                "Provide a valid recipient address on the Stellar network."
+            }
+            ContractError::InvalidOracleCondition => {
+                "Ensure the oracle condition is properly formatted and valid."
+            }
+            ContractError::InvalidShardIndex => {
+                "Provide a shard index within the valid range for the contract."
+            }
+            ContractError::ShardCapacityExceeded => {
+                "Reduce the number of operations or increase the shard capacity."
             }
         }
     }

@@ -141,6 +141,7 @@ pub mod rate_limiting;
 use error::ContractError;
 use validation::assert_valid_bps;
 use calc::{calc_platform_fee, funding_bps};
+use analytics::{load_query_metrics, save_query_metrics};
 use soroban_sdk::crypto::bls12_381::{Fr, G1Affine};
 use soroban_sdk::xdr::ToXdr;
 use soroban_sdk::{
@@ -153,7 +154,7 @@ const MAX_PARENT_DEPTH: u32 = 10;
 
 use types::{
     AdminAction, AdminRole, AdminSet, ArchivalPolicy, ArchivalRecord, ArchivalStats,
-    ArchivalStatus, AuditEntry, BatchExecutionReport, BatchingStats, Bid, CircuitBreakerConfig,
+    ArchivalStatus, AuditEntry, BatchExecutionReport, BatchingStats, Bid, CacheMetrics, CircuitBreakerConfig,
     CircuitBreakerState, CircuitBreakerStatus, CircuitBreakerTransition, CostEstimate,
     OperationCostModel, OperationCostReport, OperationProfile, PaymentBatch, PaymentBatchStatus,
     CloneOverrides, CloneRecord, CompactInvoice, CompactMigrateResult, CompletionProof, ComputeEstimate,
@@ -164,7 +165,7 @@ use types::{
     InvoiceOptions2, InvoicePayment, InvoiceStats, InvoiceStatus, InvoiceTemplate,
     InvoiceTemplateRecord, LegacyInvoice, OperationSnapshot, RecipientAuth, RecipientAuthLogEntry, RecipientAuthStatus, OverflowBehavior, OverfundingPolicy, Payment,
     PaymentCertificate, PaymentCommitment, PaymentProof, PaymentRecord, PendingAdminAction,
-    ProtocolFeeConfig, QueuedAction, RebateTier, Recipient, RepScore, ResolveAction,
+    ProtocolFeeConfig, QueuedAction, QueryMetrics, RebateTier, Recipient, RepScore, ResolveAction,
     ResolveRule, ReversibleOp, ReversibleOpKind, ReversibleOpStatus, Role, SimulateReleaseResult, SplitRule, SubscriptionParams, TimelockAction,
     Tombstone, Tranche, TransferRecord, TreasuryRecord, UpgradeProposal,
 };
