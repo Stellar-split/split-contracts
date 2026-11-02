@@ -5769,8 +5769,8 @@ fn test_incremental_payments_match_full_funding_state() {
     let id = make_invoice(&env, &c, &creator, &recipient, 300, &token_id, 9_999);
 
     // Incremental payments: 100 + 100 + 100.
-    for _ in 0..3 {
-        c.pay(&payer, &id, &100_i128, &0_u64, &false, &false, &None);
+    for i in 0..3 {
+        c.pay(&payer, &id, &100_i128, &(i as u64), &false, &false, &None);
     }
 
     let invoice = c.get_invoice(&id);
@@ -5795,7 +5795,7 @@ fn test_incremental_funded_matches_single_payment() {
 
     let id_b = make_invoice(&env, &c, &creator, &recipient, 200, &token_id, 9_999);
     c.pay(&payer, &id_b, &50_i128, &0_u64, &false, &false, &None);
-    c.pay(&payer, &id_b, &150_i128, &0_u64, &false, &false, &None);
+    c.pay(&payer, &id_b, &150_i128, &1_u64, &false, &false, &None);
 
     assert_eq!(c.get_invoice(&id_a).funded, c.get_invoice(&id_b).funded);
     assert_eq!(c.get_invoice(&id_a).status, c.get_invoice(&id_b).status);
@@ -5816,9 +5816,9 @@ fn test_incremental_audit_log_grows_per_action() {
     let id = make_invoice(&env, &c, &creator, &recipient, 300, &token_id, 9_999);
     c.pay(&payer, &id, &100_i128, &0_u64, &false, &false, &None);
     assert_eq!(c.get_audit_log(&id).len(), 1);
-    c.pay(&payer, &id, &100_i128, &0_u64, &false, &false, &None);
+    c.pay(&payer, &id, &100_i128, &1_u64, &false, &false, &None);
     assert_eq!(c.get_audit_log(&id).len(), 2);
-    c.pay(&payer, &id, &100_i128, &0_u64, &false, &false, &None);
+    c.pay(&payer, &id, &100_i128, &2_u64, &false, &false, &None);
     // Third payment triggers release, appending a release entry.
     assert!(c.get_audit_log(&id).len() >= 3);
 }
@@ -9717,7 +9717,7 @@ fn test_1034_tracks_create_pay_and_release() {
 
     let id = make_invoice(&env, &c, &creator, &recipient, 200, &token_id, 9_999);
     c.pay(&payer, &id, &100_i128, &0_u64, &false, &false, &None);
-    c.pay(&payer, &id, &100_i128, &0_u64, &false, &false, &None);
+    c.pay(&payer, &id, &100_i128, &1_u64, &false, &false, &None);
     assert_eq!(c.get_invoice(&id).status, InvoiceStatus::Released);
 
     let totals = c.get_usage_totals();
