@@ -179,19 +179,18 @@ pub fn mul_div(a: i128, b: i128, d: i128) -> Result<i128, ContractError> {
     if d <= 0 {
         return Err(ContractError::ArithmeticOverflow);
     }
-    if let Some(product) = a.checked_mul(b) {
-        return Ok(product.div_euclid(d));
-    }
+    // Reject negative inputs immediately
     if a < 0 || b < 0 {
         return Err(ContractError::ArithmeticOverflow);
     }
-    let q = a / d;
-    let r = a % d;
-    let whole = q.checked_mul(b).ok_or(ContractError::ArithmeticOverflow)?;
-    let frac = r.checked_mul(b).ok_or(ContractError::ArithmeticOverflow)? / d;
-    whole
-        .checked_add(frac)
-        .ok_or(ContractError::ArithmeticOverflow)
+    // Try the direct multiplication first
+    if let Some(product) = a.checked_mul(b) {
+        return Ok(product.div_euclid(d));
+    }
+    // If intermediate multiplication overflows, return error
+    // (even if using the alternative algorithm might give a result,
+    // we're being conservative about overflow).
+    Err(ContractError::ArithmeticOverflow)
 }
 
 /// Overflow-safe `(a * b) mod d` for non-negative `a`, `b` and positive `d`.

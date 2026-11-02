@@ -6220,6 +6220,15 @@ impl SplitContract {
         );
 
         assert!(!recipients.is_empty(), "must have at least one recipient");
+        // Validate all amounts are positive
+        for amount in amounts.iter() {
+            assert!(amount > 0, "amount must be positive");
+        }
+        // Verify total doesn't overflow
+        let mut total_check: i128 = 0;
+        for amount in amounts.iter() {
+            total_check = total_check.checked_add(amount).expect("amount sum overflow");
+        }
         // Issue #526: enforce minimum recipient count.
         {
             let min_recipients: u32 = env
