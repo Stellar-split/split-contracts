@@ -27,7 +27,7 @@
 
 use crate::analytics::{self, UsageKind};
 use crate::storage_keys::ev_seq_key;
-use crate::types::{CircuitBreakerState, DisputeOutcome, FeeSplit, InvoicePhase, InvoiceStatus, OverfundingPolicy, RepScore, TimelockAction};
+use crate::types::{CircuitBreakerState, DisputeOutcome, EncryptionAlgorithm, FeeSplit, InvoicePhase, InvoiceStatus, OverfundingPolicy, RepScore, ReversibleOpKind, Role, TimelockAction};
 use soroban_sdk::{contracttype, symbol_short, Address, BytesN, Env, String, Symbol, Vec};
 
 // ---------------------------------------------------------------------------
@@ -529,7 +529,7 @@ pub fn recipient_auth_changed(env: &Env, invoice_id: u64, recipient: &Address, a
 /// Issue #929: Emitted when a reversible operation is recorded.
 /// Topics: (split, rv_rec, invoice_id)
 /// Data: (op_id, kind)
-pub fn reversible_op_recorded(env: &Env, invoice_id: u64, op_id: u64, kind: crate::types::ReversibleOpKind) {
+pub fn reversible_op_recorded(env: &Env, invoice_id: u64, op_id: u64, kind: ReversibleOpKind) {
     env.events().publish(
         (symbol_short!("split"), symbol_short!("rv_rec"), invoice_id),
         (op_id, kind),
@@ -1669,14 +1669,14 @@ pub fn role_granted(env: &Env, grantee: &Address, role_discriminant: u32, admin:
 /// Topics: (split, role_rev, grantee)
 /// Data: (role_discriminant, admin)
 #[allow(dead_code)]
-pub fn role_revoked(env: &Env, grantee: &Address, role_discriminant: u32, admin: &Address) {
+pub fn role_revoked(env: &Env, grantee: &Address, role: &Role, admin: &Address) {
     env.events().publish(
         (
             symbol_short!("split"),
             symbol_short!("role_rev"),
             grantee.clone(),
         ),
-        (role_discriminant, admin.clone()),
+        (admin.clone()),
     );
 }
 
@@ -2682,20 +2682,20 @@ pub fn query_executed(env: &Env, index_type: &Symbol, result_count: u32) {}
 
 pub fn query_index_created(env: &Env, index_type: &Symbol) {}
 
-pub fn encryption_key_set(env: &Env, version: u32, algorithm: &types::EncryptionAlgorithm, caller: &Address) {}
+pub fn encryption_key_set(env: &Env, version: u32, algorithm: &EncryptionAlgorithm, caller: &Address) {}
 
 pub fn data_encrypted(env: &Env, version: u32, hash: &BytesN<32>, caller: &Address) {}
 
 pub fn data_decrypted(env: &Env, version: u32, hash: &BytesN<32>, caller: &Address) {}
 
-pub fn encryption_validated(env: &Env, version: u32, caller: &Address) {}
+pub fn encryption_validated(env: &Env, version: u32, valid: bool) {}
 
-pub fn role_assigned(env: &Env, user: &Address, role: &Symbol) {}
+pub fn role_assigned(env: &Env, user: &Address, role: &Role, assigner: &Address) {}
 
-pub fn permission_checked(env: &Env, user: &Address, permission: &Symbol) {}
+pub fn permission_checked(env: &Env, user: &Address, allowed: bool) {}
 
 pub fn cache_set(env: &Env, key: &Symbol, value_size: u64) {}
 
 pub fn cache_invalidated(env: &Env, key: &Symbol) {}
 
-pub fn cache_warmed(env: &Env, key: &Symbol) {}
+pub fn cache_warmed(env: &Env, count: u32) {}

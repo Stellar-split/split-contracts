@@ -2475,6 +2475,16 @@ pub enum Permission {
     ManageEncryption,
 }
 
+/// Wrapper for Optional<Permission> - Soroban SDK doesn't support Option<T> for contracttype enums
+#[contracttype]
+#[derive(Clone, Debug)]
+pub enum OptionalPermission {
+    /// No permission
+    None,
+    /// Some permission
+    Some(Permission),
+}
+
 /// Role assignment record.
 #[contracttype]
 #[derive(Clone, Debug)]
@@ -2502,7 +2512,7 @@ pub struct RbacAuditEntry {
     /// Role involved.
     pub role: Role,
     /// Permission checked (if applicable).
-    pub permission: Option<Permission>,
+    pub permission: OptionalPermission,
     /// Whether the check passed (for check actions).
     pub allowed: bool,
     /// Ledger timestamp.
