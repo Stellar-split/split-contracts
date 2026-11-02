@@ -390,6 +390,21 @@ pub mod recovery {
             ContractError::RecoveryIncomplete => {
                 "Complete all recovery plan steps before unpausing the contract."
             }
+            ContractError::InvalidSignature => {
+                "The provided signature is invalid; ensure the correct signer and signing key are used."
+            }
+            ContractError::MissingSignature => {
+                "A required co-signer signature is missing; collect all required signatures and retry."
+            }
+            ContractError::SignatureReplayed => {
+                "This signature has already been used; provide a fresh signature for this transaction."
+            }
+            ContractError::SignatureExpired => {
+                "The signature has expired; generate a new signature with a future expiry time."
+            }
+            ContractError::InvalidOracleAddress => {
+                "The oracle address is invalid or not registered; verify the oracle configuration."
+            }
         }
     }
 
