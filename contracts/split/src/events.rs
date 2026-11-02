@@ -2682,19 +2682,19 @@ pub fn query_executed(env: &Env, index_type: &Symbol, result_count: u32) {}
 
 pub fn query_index_created(env: &Env, index_type: &Symbol) {}
 
-pub fn encryption_key_set(env: &Env, invoice_id: u64) {}
+pub fn encryption_key_set(env: &Env, version: u32, algorithm: &types::EncryptionAlgorithm, caller: &Address) {}
 
-pub fn data_encrypted(env: &Env, invoice_id: u64) {}
+pub fn data_encrypted(env: &Env, version: u32, hash: &BytesN<32>, caller: &Address) {}
 
-pub fn data_decrypted(env: &Env, invoice_id: u64) {}
+pub fn data_decrypted(env: &Env, version: u32, hash: &BytesN<32>, caller: &Address) {}
 
-pub fn encryption_validated(env: &Env, invoice_id: u64) {}
+pub fn encryption_validated(env: &Env, version: u32, caller: &Address) {}
 
-pub fn role_assigned(env: &Env, invoice_id: u64, role: &Symbol) {}
+pub fn role_assigned(env: &Env, user: &Address, role: &Symbol) {}
 
-pub fn permission_checked(env: &Env, invoice_id: u64) {}
+pub fn permission_checked(env: &Env, user: &Address, permission: &Symbol) {}
 
-pub fn cache_set(env: &Env, key: &Symbol) {}
+pub fn cache_set(env: &Env, key: &Symbol, value_size: u64) {}
 
 pub fn cache_invalidated(env: &Env, key: &Symbol) {}
 
