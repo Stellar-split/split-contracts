@@ -5,6 +5,7 @@
     "mux_id": 0
   },
   "auth": [
+    [],
     []
   ],
   "ledger": {
@@ -42,7 +43,7 @@
           },
           "ext": "v0"
         },
-        "live_until": 15
+        "live_until": 6311999
       },
       {
         "entry": {

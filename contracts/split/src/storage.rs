@@ -3,7 +3,7 @@
 //! Issue #563: All persistent storage writes go through these helpers to ensure
 //! that TTL bump calls are consistent and cannot be accidentally forgotten.
 
-use crate::constants::{MAX_INVOICE_TTL_LEDGERS, MIN_INVOICE_TTL_LEDGERS};
+use crate::constants::{MAX_INVOICE_TTL_LEDGERS, MAX_TEMPORARY_TTL_LEDGERS, MIN_INVOICE_TTL_LEDGERS};
 use soroban_sdk::{Env, IntoVal, TryFromVal, Val};
 
 /// Maximum number of payment shards that may be stored for a single invoice.
@@ -85,7 +85,7 @@ where
 {
     env.storage()
         .temporary()
-        .extend_ttl(key, MIN_INVOICE_TTL_LEDGERS, MAX_INVOICE_TTL_LEDGERS);
+        .extend_ttl(key, MIN_INVOICE_TTL_LEDGERS, MAX_TEMPORARY_TTL_LEDGERS);
 }
 
 /// Save an entry into the given tier and bump its TTL.

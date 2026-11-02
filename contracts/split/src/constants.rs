@@ -10,6 +10,11 @@ pub const MIN_INVOICE_TTL_LEDGERS: u32 = 518_400;
 /// Invoices can be bumped multiple times within this window to extend their lifetime.
 pub const MAX_INVOICE_TTL_LEDGERS: u32 = 31_536_000;
 
+/// Maximum TTL for temporary storage in Soroban ledgers.
+/// Temporary storage has a lower maximum TTL than persistent/instance storage.
+/// This is approximately 1 month (~6_311_999 ledgers at ~5 seconds per ledger).
+pub const MAX_TEMPORARY_TTL_LEDGERS: u32 = 6_311_999;
+
 /// Issue #935: Total number of basis points representing 100%.
 ///
 /// Basis points (bps) are used for all rate and ratio values in the contract.
