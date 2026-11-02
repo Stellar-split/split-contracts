@@ -17040,7 +17040,7 @@ fn enc_data_version_key(invoice_id: u64) -> (Symbol, u64) {
     (symbol_short!("enc_dv"), invoice_id)
 }
 
-fn current_key_version() -> u32 {
+fn current_key_version(env: &Env) -> u32 {
     1
 }
 
