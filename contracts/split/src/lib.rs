@@ -17056,9 +17056,13 @@ fn load_cache_metrics(env: &Env) -> types::CacheMetrics {
 
 fn save_cache_metrics(env: &Env, metrics: &types::CacheMetrics) {}
 
-fn load_encryption_key(env: &Env) -> types::EncryptionKey {
+fn load_encryption_key(env: &Env, version: u32) -> types::EncryptionKey {
     types::EncryptionKey {
         algorithm: types::EncryptionAlgorithm::Aes256Gcm,
+        version,
+        key_data: BytesN::from_array(env, &[0u8; 32]),
+        created_at: 0,
+        active: true,
     }
 }
 
