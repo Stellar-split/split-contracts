@@ -17008,8 +17008,8 @@ fn rbac_user_roles_key(user: &Address) -> (Symbol, Address) {
     (symbol_short!("rbac_ur"), user.clone())
 }
 
-fn rbac_role_key(role: &Symbol) -> (Symbol, Symbol) {
-    (symbol_short!("rbac_r"), role.clone())
+fn rbac_role_key(address: &Address, role: &Symbol) -> (Symbol, Address, Symbol) {
+    (symbol_short!("rbac_r"), address.clone(), role.clone())
 }
 
 fn rbac_audit_key(user: &Address) -> (Symbol, Address) {
@@ -17078,11 +17078,11 @@ fn recalc_hit_ratio(env: &Env) -> u64 {
     0
 }
 
-fn role_to_symbol(role: &types::Role) -> Symbol {
+fn role_to_symbol(env: &Env, role: &types::Role) -> Symbol {
     symbol_short!("role")
 }
 
-fn symbol_to_role(sym: &Symbol) -> types::Role {
+fn symbol_to_role(env: &Env, sym: &Symbol) -> types::Role {
     types::Role::Admin
 }
 
