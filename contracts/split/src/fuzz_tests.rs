@@ -147,24 +147,44 @@ fn fixed_point_share(amount: u128, fraction: u128) -> u128 {
     (amount * fraction) / FP_SCALE
 }
 
-/// Split `invoice_amount` using fixed-point fractions, assigning any rounding
-/// remainder to the last recipient so the total is preserved exactly.
+/// Split `invoice_amount` using fixed-point fractions, distributing any rounding
+/// remainder based on entitlements so no recipient exceeds their share.
 fn fixed_point_split(invoice_amount: u128, percentages: &[u32]) -> Vec<u128> {
     let n = percentages.len();
     if n == 0 {
         return Vec::new();
     }
 
-    let mut payouts = Vec::with_capacity(n);
-    let mut distributed: u128 = 0;
+    let mut payouts: Vec<u128> = percentages
+        .iter()
+        .map(|percentage| fixed_point_share(invoice_amount, bps_to_fixed(*percentage)))
+        .collect();
 
-    for percentage in percentages.iter().take(n - 1) {
-        let share = fixed_point_share(invoice_amount, bps_to_fixed(*percentage));
-        payouts.push(share);
-        distributed += share;
+    let distributed: u128 = payouts.iter().sum();
+    let mut remaining = invoice_amount - distributed;
+
+    while remaining > 0 {
+        let mut assigned_in_pass = false;
+
+        for (index, percentage) in percentages.iter().enumerate() {
+            if remaining == 0 {
+                break;
+            }
+
+            let entitlement = recipient_entitlement(invoice_amount, *percentage);
+            if payouts[index] < entitlement {
+                payouts[index] += 1;
+                remaining -= 1;
+                assigned_in_pass = true;
+            }
+        }
+
+        assert!(
+            assigned_in_pass,
+            "no recipient can receive the remaining rounding unit"
+        );
     }
 
-    payouts.push(invoice_amount - distributed);
     payouts
 }
 

@@ -324,8 +324,8 @@ mod tests {
 
     #[test]
     fn normalize_2_decimal_upscales() {
-        // 2-decimal token: 100 raw -> 1_000_000 canonical
-        assert_eq!(normalize_amount(100, 2).unwrap(), 1_000_000);
+        // 2-decimal token: 100 raw (1.00 token) -> 10_000_000 canonical (7 decimals)
+        assert_eq!(normalize_amount(100, 2).unwrap(), 10_000_000);
     }
 
     #[test]
