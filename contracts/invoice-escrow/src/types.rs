@@ -342,6 +342,49 @@ pub struct RefundGrace {
     pub waived: bool,
 }
 
+// ──────────────────────────────────────────────────────────────────────
+// Arbitration / dispute resolution types
+// ──────────────────────────────────────────────────────────────────────
+
+/// Outcome an arbiter can impose on a disputed invoice.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq, Copy)]
+pub enum DisputeOutcome {
+    /// The arbiter overrides the co-signer rejection and forces release
+    /// of the funded amount to the invoice creator.
+    ForceRelease,
+    /// The arbiter upholds the rejection and the payers are refunded.
+    ForceRefund,
+}
+
+/// Lifecycle state of a dispute raised over a co-signer deadlock.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DisputeStatus {
+    /// Awaiting the arbiter's decision.
+    Open,
+    /// The arbiter has issued a binding decision.
+    Resolved(DisputeOutcome),
+}
+
+/// Dispute record attached to an invoice whose co-signers rejected release.
+///
+/// Raised by the creator or any configured co-signer once
+/// [`ApprovalStatus::Rejected`] is reached, and decided by the contract's
+/// single configured arbiter via `arbitrate_dispute`. This gives deadlocked
+/// invoices a deterministic resolution path instead of funds being stuck
+/// until the deadline / refund grace period passes.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Dispute {
+    /// Address that raised the dispute (creator or a co-signer).
+    pub raised_by: Address,
+    /// Unix timestamp at which the dispute was raised.
+    pub raised_at: u64,
+    /// Current status of the dispute.
+    pub status: DisputeStatus,
+}
+
 /// Where an invoice is in its refund grace timeline.
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
