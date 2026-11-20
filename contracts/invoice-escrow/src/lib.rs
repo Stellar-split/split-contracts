@@ -68,6 +68,12 @@ fn dispute_key(id: u64) -> (Symbol, u64) {
     (symbol_short!("dispute"), id)
 }
 
+/// Persistent storage: ledger timestamp a payment-deadline reminder was last
+/// recorded as delivered for an invoice (payment reminders automation).
+fn reminder_key(id: u64) -> (Symbol, u64) {
+    (symbol_short!("remind"), id)
+}
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
@@ -981,6 +987,92 @@ impl InvoiceEscrowContract {
     /// Return the dispute record for an invoice, if one has ever been raised.
     pub fn get_dispute(env: Env, invoice_id: u64) -> Option<DisputeRecord> {
         env.storage().persistent().get(&dispute_key(invoice_id))
+    }
+
+    // -----------------------------------------------------------------------
+    // Payment reminders
+    // -----------------------------------------------------------------------
+    //
+    // Soroban contracts cannot push notifications off-chain, so reminders are
+    // implemented as an on-chain queryable "is a reminder due" check, grounded
+    // in the invoice's real `deadline`/`status` fields, that an off-chain
+    // poller/indexer service calls on a schedule. Delivery is tracked
+    // on-chain so the same reminder window is never reported as newly due
+    // more than once.
+
+    /// Return `true` if invoice `invoice_id` is within `lead_time_secs` of its
+    /// payment deadline, is still open for deposits (`Pending`/`Active`), and
+    /// no reminder has been recorded for this window yet. An off-chain
+    /// service polls this (with whatever `lead_time_secs` interval it is
+    /// configured for) to decide whether to notify the creator/payers, then
+    /// calls [`Self::mark_reminder_sent`] to prevent duplicate notifications.
+    ///
+    /// # Errors
+    /// * [`Error::InvoiceNotFound`] — Unknown invoice ID.
+    pub fn is_reminder_due(env: Env, invoice_id: u64, lead_time_secs: u64) -> Result<bool, Error> {
+        let invoice = get_invoice(&env, invoice_id)?;
+        if invoice.status != EscrowStatus::Pending && invoice.status != EscrowStatus::Active {
+            return Ok(false);
+        }
+
+        let now = env.ledger().timestamp();
+        if now > invoice.deadline {
+            return Ok(false);
+        }
+        let due_at = invoice.deadline.saturating_sub(lead_time_secs);
+        if now < due_at {
+            return Ok(false);
+        }
+
+        // Already notified within this reminder window?
+        if let Some(last_sent) = env
+            .storage()
+            .persistent()
+            .get::<_, u64>(&reminder_key(invoice_id))
+        {
+            if last_sent >= due_at {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    /// Record that a payment-deadline reminder was delivered for an invoice,
+    /// preventing [`Self::is_reminder_due`] from reporting the same window as
+    /// due again. Callable by the contract admin, which is expected to be
+    /// (or to authorize) the off-chain reminder-delivery service.
+    ///
+    /// # Errors
+    /// * [`Error::InvoiceNotFound`]      — Unknown invoice ID.
+    /// * [`Error::NotAdmin`]             — Caller is not the contract admin.
+    /// * [`Error::ReminderAlreadySent`]  — A reminder was already recorded
+    ///   more recently than the current ledger timestamp.
+    pub fn mark_reminder_sent(env: Env, invoice_id: u64) -> Result<(), Error> {
+        require_admin(&env);
+        let _ = get_invoice(&env, invoice_id)?;
+
+        let now = env.ledger().timestamp();
+        if let Some(last_sent) = env
+            .storage()
+            .persistent()
+            .get::<_, u64>(&reminder_key(invoice_id))
+        {
+            if last_sent >= now {
+                return Err(Error::ReminderAlreadySent);
+            }
+        }
+        env.storage().persistent().set(&reminder_key(invoice_id), &now);
+        env.events().publish(
+            (symbol_short!("escrow"), symbol_short!("reminded"), invoice_id),
+            now,
+        );
+        Ok(())
+    }
+
+    /// Return the ledger timestamp a reminder was last recorded as delivered
+    /// for an invoice, or `None` if no reminder has ever been sent.
+    pub fn get_last_reminder_sent(env: Env, invoice_id: u64) -> Option<u64> {
+        env.storage().persistent().get(&reminder_key(invoice_id))
     }
 
     // -----------------------------------------------------------------------

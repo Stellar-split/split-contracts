@@ -54,4 +54,6 @@ pub enum Error {
     DisputeTimeoutNotElapsed = 22,
     /// Caller has no stake (deposit) in this invoice and cannot raise a dispute.
     NotAStakeholder = 23,
+    /// A reminder has already been recorded for the current reminder window.
+    ReminderAlreadySent = 24,
 }
