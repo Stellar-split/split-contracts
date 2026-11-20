@@ -1644,12 +1644,22 @@ fn update_creator_stats_on_creation(env: &Env, creator: &Address) {
 }
 
 /// Issue #299: Update creator stats on payment received.
+///
+/// Issue #1065: Each payment can move a creator across the volume-based fee
+/// tiers configured via `set_creator_fee_tiers` (issue #919). That table and
+/// its lookup (`sync_creator_fee_tier`) already existed but nothing called it
+/// automatically, so tier changes were never actually tracked unless someone
+/// invoked it by hand. Updating the tier record here — right after the
+/// lifetime volume it depends on changes — gives dynamic fee scaling a real
+/// audit trail (`CreatorTierRecord`, `cfee_chg` events) without adding a
+/// second, competing fee-tier mechanism.
 fn update_creator_stats_on_payment(env: &Env, creator: &Address, amount: i128) {
     let volume_key = creator_stats_volume_key(creator);
     let volume: u64 = env.storage().persistent().get(&volume_key).unwrap_or(0u64);
     env.storage()
         .persistent()
         .set(&volume_key, &(volume + amount as u64));
+    SplitContract::sync_creator_fee_tier(env.clone(), creator.clone());
 }
 
 /// Issue #299: Update creator stats on release.
