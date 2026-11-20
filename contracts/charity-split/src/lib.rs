@@ -180,13 +180,13 @@ fn compute_split(env: &Env, inv: &CharityInvoice) -> Result<DonationSplit, Error
             .checked_mul(inv.donation_bps as i128)
             .ok_or(Error::Overflow)?
             / BPS_DENOMINATOR;
-        let net = amount - cut;
+        let net = amount.checked_sub(cut).ok_or(Error::Overflow)?;
         paid_out = paid_out.checked_add(net).ok_or(Error::Overflow)?;
         payouts.push_back(net);
     }
     Ok(DonationSplit {
         payouts,
-        donation: inv.total - paid_out,
+        donation: inv.total.checked_sub(paid_out).ok_or(Error::Overflow)?,
     })
 }
 
@@ -400,7 +400,7 @@ impl CharitySplitContract {
             return Err(Error::NothingToRefund);
         }
         env.storage().persistent().remove(&key);
-        inv.funded -= amount;
+        inv.funded = inv.funded.checked_sub(amount).ok_or(Error::Overflow)?;
         save_invoice(&env, &inv);
         token::Client::new(&env, &inv.token).transfer(&env.current_contract_address(), &payer, &amount);
         emit_refunded(&env, invoice_id, &payer, amount);
