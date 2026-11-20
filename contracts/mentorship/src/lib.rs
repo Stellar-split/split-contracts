@@ -560,6 +560,38 @@ impl MentorshipContract {
             _ => 0,
         }
     }
+
+    /// Issue #1067: read-only helper for recipient (mentor) payout
+    /// scheduling. A mentor's revenue share is paid out via
+    /// `share_earnings`/`complete_program` on a schedule keyed to each
+    /// program's term (`start_ledger`..`end_ledger`); this lists the ids of
+    /// `mentor`'s programs that are still `Active` but whose term has
+    /// already ended, i.e. whose scheduled completion/payout is due now so
+    /// an off-chain worker knows to call `complete_program`.
+    pub fn get_due_payouts(env: Env, mentor: Address) -> Vec<u64> {
+        let now = env.ledger().sequence();
+        let ids: Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&mentor_programs_key(&mentor))
+            .unwrap_or_else(|| Vec::new(&env));
+        let mut due: Vec<u64> = Vec::new(&env);
+        for id in ids.iter() {
+            if let Some(program) = env
+                .storage()
+                .persistent()
+                .get::<_, MentorshipProgram>(&program_key(id))
+            {
+                if program.status == ProgramStatus::Active
+                    && program.end_ledger != 0
+                    && program.end_ledger <= now
+                {
+                    due.push_back(id);
+                }
+            }
+        }
+        due
+    }
 }
 
 #[cfg(test)]

@@ -125,6 +125,31 @@ fn emit_refunded(env: &Env, id: u64, payer: &Address, amount: i128) {
     );
 }
 
+/// Issue #1066: invoice automatically expired after its deadline passed.
+fn emit_expired(env: &Env, id: u64, funded: i128) {
+    env.events().publish(
+        (symbol_short!("charity"), symbol_short!("expired"), id),
+        funded,
+    );
+}
+
+/// Issue #1066: if `inv` is still `Open` and its deadline (when set) has
+/// passed, flip it to `Expired` and persist the change. Returns `true` when
+/// the invoice is (now) expired.
+fn enforce_deadline(env: &Env, inv: &mut CharityInvoice) -> bool {
+    if inv.status == CharityInvoiceStatus::Open
+        && inv.deadline != 0
+        && env.ledger().timestamp() > inv.deadline
+    {
+        inv.status = CharityInvoiceStatus::Expired;
+        save_invoice(env, inv);
+        emit_expired(env, inv.id, inv.funded);
+        true
+    } else {
+        inv.status == CharityInvoiceStatus::Expired
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
@@ -276,8 +301,12 @@ impl CharitySplitContract {
         amounts: Vec<i128>,
         charity: Address,
         donation_bps: u32,
+        deadline: u64,
     ) -> Result<u64, Error> {
         creator.require_auth();
+        if deadline != 0 && deadline <= env.ledger().timestamp() {
+            return Err(Error::InvalidDeadline);
+        }
         if !(MIN_DONATION_BPS..=MAX_DONATION_BPS).contains(&donation_bps) {
             return Err(Error::InvalidDonationBps);
         }
@@ -320,6 +349,59 @@ impl CharitySplitContract {
             donated: 0,
             status: CharityInvoiceStatus::Open,
             created_at: env.ledger().timestamp(),
+            deadline,
+            cloned_from: None,
+        };
+        save_invoice(&env, &inv);
+        emit_invoice_created(&env, &inv);
+        Ok(id)
+    }
+
+    /// Issue #1069: clone an existing invoice's recipients, amounts, charity
+    /// and donation configuration into a brand-new `Open` invoice, so a
+    /// creator can reuse a recurring invoice as a template instead of
+    /// re-entering every recipient/amount by hand. The clone gets a fresh
+    /// id, zeroed funding/donation progress, and records `cloned_from` for
+    /// lineage tracking. Only the original creator may clone it, and the
+    /// template invoice may be in any status (including Released).
+    pub fn clone_invoice(
+        env: Env,
+        creator: Address,
+        invoice_id: u64,
+        deadline: u64,
+    ) -> Result<u64, Error> {
+        creator.require_auth();
+        let template = load_invoice(&env, invoice_id)?;
+        if template.creator != creator {
+            return Err(Error::NotCreator);
+        }
+        if deadline != 0 && deadline <= env.ledger().timestamp() {
+            return Err(Error::InvalidDeadline);
+        }
+
+        let id: u64 = env
+            .storage()
+            .instance()
+            .get(&counter_key())
+            .ok_or(Error::NotInitialized)?;
+        let next = id.checked_add(1).ok_or(Error::Overflow)?;
+        env.storage().instance().set(&counter_key(), &next);
+
+        let inv = CharityInvoice {
+            id,
+            creator,
+            token: template.token,
+            total: template.total,
+            funded: 0,
+            recipients: template.recipients,
+            amounts: template.amounts,
+            charity: template.charity,
+            donation_bps: template.donation_bps,
+            donated: 0,
+            status: CharityInvoiceStatus::Open,
+            created_at: env.ledger().timestamp(),
+            deadline,
+            cloned_from: Some(invoice_id),
         };
         save_invoice(&env, &inv);
         emit_invoice_created(&env, &inv);
@@ -334,6 +416,9 @@ impl CharitySplitContract {
             return Err(Error::InvalidAmount);
         }
         let mut inv = load_invoice(&env, invoice_id)?;
+        if enforce_deadline(&env, &mut inv) {
+            return Err(Error::InvoiceExpired);
+        }
         if inv.status != CharityInvoiceStatus::Open {
             return Err(Error::InvoiceNotOpen);
         }
@@ -360,8 +445,9 @@ impl CharitySplitContract {
         if amount <= 0 {
             return Err(Error::InvalidAmount);
         }
-        let inv = load_invoice(&env, invoice_id)?;
-        if inv.status == CharityInvoiceStatus::Cancelled {
+        let mut inv = load_invoice(&env, invoice_id)?;
+        enforce_deadline(&env, &mut inv);
+        if inv.status == CharityInvoiceStatus::Cancelled || inv.status == CharityInvoiceStatus::Expired {
             return Err(Error::InvoiceNotOpen);
         }
         token::Client::new(&env, &inv.token).transfer(&donor, &inv.charity, &amount);
@@ -387,11 +473,28 @@ impl CharitySplitContract {
         Ok(())
     }
 
-    /// Payer reclaims their contribution to a cancelled invoice.
+    /// Issue #1066: permissionless entry point that anyone may call to flip
+    /// an `Open` invoice whose deadline has passed into `Expired`, blocking
+    /// further payments. Also called implicitly by `pay`/`donate_extra`.
+    pub fn expire_invoice(env: Env, invoice_id: u64) -> Result<(), Error> {
+        let mut inv = load_invoice(&env, invoice_id)?;
+        if inv.status != CharityInvoiceStatus::Open {
+            return Err(Error::InvoiceNotOpen);
+        }
+        if inv.deadline == 0 || env.ledger().timestamp() <= inv.deadline {
+            return Err(Error::InvoiceNotExpired);
+        }
+        inv.status = CharityInvoiceStatus::Expired;
+        save_invoice(&env, &inv);
+        emit_expired(&env, invoice_id, inv.funded);
+        Ok(())
+    }
+
+    /// Payer reclaims their contribution to a cancelled or expired invoice.
     pub fn claim_refund(env: Env, payer: Address, invoice_id: u64) -> Result<i128, Error> {
         payer.require_auth();
         let mut inv = load_invoice(&env, invoice_id)?;
-        if inv.status != CharityInvoiceStatus::Cancelled {
+        if inv.status != CharityInvoiceStatus::Cancelled && inv.status != CharityInvoiceStatus::Expired {
             return Err(Error::NotCancelled);
         }
         let key = contribution_key(invoice_id, &payer);
@@ -402,6 +505,51 @@ impl CharitySplitContract {
         env.storage().persistent().remove(&key);
         inv.funded -= amount;
         save_invoice(&env, &inv);
+        token::Client::new(&env, &inv.token).transfer(&env.current_contract_address(), &payer, &amount);
+        emit_refunded(&env, invoice_id, &payer, amount);
+        Ok(amount)
+    }
+
+    /// Issue #1068: creator issues a partial refund of a payer's contribution
+    /// to a still-open invoice (e.g. to correct an overpayment or dispute),
+    /// without cancelling the whole invoice. The refunded amount is deducted
+    /// from both the payer's recorded contribution and the invoice's funded
+    /// total, and transferred back to the payer immediately.
+    pub fn partial_refund(
+        env: Env,
+        creator: Address,
+        invoice_id: u64,
+        payer: Address,
+        amount: i128,
+    ) -> Result<i128, Error> {
+        creator.require_auth();
+        if amount <= 0 {
+            return Err(Error::InvalidAmount);
+        }
+        let mut inv = load_invoice(&env, invoice_id)?;
+        if inv.creator != creator {
+            return Err(Error::NotCreator);
+        }
+        if inv.status == CharityInvoiceStatus::Cancelled || inv.status == CharityInvoiceStatus::Expired {
+            // Full refunds already go through claim_refund for these states.
+            return Err(Error::InvoiceNotOpen);
+        }
+
+        let key = contribution_key(invoice_id, &payer);
+        let contributed: i128 = env.storage().persistent().get(&key).unwrap_or(0);
+        if amount > contributed {
+            return Err(Error::ExceedsContribution);
+        }
+
+        let remaining = contributed - amount;
+        if remaining > 0 {
+            env.storage().persistent().set(&key, &remaining);
+        } else {
+            env.storage().persistent().remove(&key);
+        }
+        inv.funded = inv.funded.checked_sub(amount).ok_or(Error::Overflow)?;
+        save_invoice(&env, &inv);
+
         token::Client::new(&env, &inv.token).transfer(&env.current_contract_address(), &payer, &amount);
         emit_refunded(&env, invoice_id, &payer, amount);
         Ok(amount)
