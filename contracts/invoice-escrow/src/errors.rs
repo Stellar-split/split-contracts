@@ -93,6 +93,13 @@ pub enum Error {
     RefundGraceElapsed = 40,
     /// The deadline is too far in the future; it exceeds `MAX_DEADLINE_HORIZON`.
     DeadlineOutOfRange = 41,
+    /// Invoice is locked for an active dispute; deposits, release, refund,
+    /// and cancellation are blocked until the dispute is resolved.
+    InvoiceLocked = 42,
+    /// No active dispute lock exists for this invoice.
+    NotDisputed = 43,
+    /// Invoice already has an active dispute lock.
+    AlreadyDisputed = 44,
 }
 
 /// Returns a human-readable recovery suggestion for the given error.
@@ -265,6 +272,18 @@ pub fn get_recovery_suggestion(error: Error) -> String {
             &Env::default(),
             "Deadline is too far in the future; it exceeds the maximum allowed horizon.",
         ),
+        Error::InvoiceLocked => String::from_str(
+            &Env::default(),
+            "Invoice is locked for an active dispute; wait for the arbitrator to resolve it.",
+        ),
+        Error::NotDisputed => String::from_str(
+            &Env::default(),
+            "No active dispute lock exists for this invoice.",
+        ),
+        Error::AlreadyDisputed => String::from_str(
+            &Env::default(),
+            "Invoice already has an active dispute lock.",
+        ),
     }
 }
 
@@ -312,6 +331,9 @@ pub fn error_from_code(code: u32) -> Option<Error> {
         39 => Some(Error::InvalidGracePeriod),
         40 => Some(Error::RefundGraceElapsed),
         41 => Some(Error::DeadlineOutOfRange),
+        42 => Some(Error::InvoiceLocked),
+        43 => Some(Error::NotDisputed),
+        44 => Some(Error::AlreadyDisputed),
         _ => None,
     }
 }

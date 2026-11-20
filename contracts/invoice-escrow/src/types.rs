@@ -342,6 +342,27 @@ pub struct RefundGrace {
     pub waived: bool,
 }
 
+// ──────────────────────────────────────────────────────────────────────
+// Dispute lock types (issue #1063)
+// ──────────────────────────────────────────────────────────────────────
+
+/// Lock placed on an invoice while a dispute is being investigated.
+///
+/// While a lock is active, `deposit`, `release`, `refund`, and
+/// `cancel_invoice` are all blocked (`Error::InvoiceLocked`), so neither
+/// party can change the escrow's state out from under the dispute. Only the
+/// admin (acting as arbitrator) can open or force-resolve a lock.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct DisputeLock {
+    /// Ledger timestamp the dispute was opened.
+    pub locked_at: u64,
+    /// Admin/arbitrator address that opened the lock.
+    pub opened_by: Address,
+    /// Hash of the off-chain dispute reason/evidence.
+    pub reason_hash: BytesN<32>,
+}
+
 /// Where an invoice is in its refund grace timeline.
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
