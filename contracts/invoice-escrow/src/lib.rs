@@ -36,8 +36,8 @@ use soroban_sdk::{
 };
 use oracle::PriceOracleClient;
 use types::{
-    ApprovalStatus, BlacklistEntry, CosignerApproval, Dispute, DisputeOutcome, DisputeStatus, EscrowInvoice,
-    EscrowReleased, EscrowStatus, OracleCondition, OracleReading, OracleSource, OptionalRefundReason,
+    ApprovalStatus, BlacklistEntry, ComplianceSnapshot, CosignerApproval, Dispute, DisputeOutcome, DisputeStatus,
+    EscrowInvoice, EscrowReleased, EscrowStatus, OracleCondition, OracleReading, OracleSource, OptionalRefundReason,
     PriceComparator, PriceData, RefundGrace, RefundGraceStatus, RefundReason, ReleaseSchedule, ScheduleStatus,
 };
 
@@ -1924,6 +1924,42 @@ impl InvoiceEscrowContract {
     /// * [`Error::InvoiceNotFound`] — Unknown invoice ID.
     pub fn get_invoice(env: Env, invoice_id: u64) -> Result<EscrowInvoice, Error> {
         get_invoice(&env, invoice_id)
+    }
+
+    /// Return a [`ComplianceSnapshot`] aggregating an invoice's
+    /// compliance-relevant state in one call.
+    ///
+    /// Reporting tools otherwise need separate calls to `get_invoice`,
+    /// `get_approval_status`, `get_dispute` and the blacklist entry for the
+    /// creator; this entrypoint collects exactly that data into one
+    /// consistent, point-in-time record for automated reporting /
+    /// regulatory export pipelines, without introducing any new storage —
+    /// it only reads what the contract already persists.
+    ///
+    /// # Errors
+    /// * [`Error::InvoiceNotFound`] — Unknown invoice ID.
+    pub fn get_compliance_snapshot(env: Env, invoice_id: u64) -> Result<ComplianceSnapshot, Error> {
+        let invoice = get_invoice(&env, invoice_id)?;
+        let approval_status = get_approval(&env, invoice_id).map(|a| a.status);
+        let dispute_status = get_dispute(&env, invoice_id).map(|d| d.status);
+        let creator_blacklisted = env
+            .storage()
+            .persistent()
+            .get::<_, BlacklistEntry>(&blacklist_key(&invoice.creator))
+            .map(|e| e.finalised && e.upheld)
+            .unwrap_or(false);
+
+        Ok(ComplianceSnapshot {
+            invoice_id,
+            status: invoice.status,
+            total_amount: invoice.total_amount,
+            funded_amount: invoice.funded_amount,
+            deadline: invoice.deadline,
+            refund_reason: invoice.refund_reason,
+            approval_status,
+            dispute_status,
+            creator_blacklisted,
+        })
     }
 
     /// Return the current locked balance held in escrow for a given invoice.

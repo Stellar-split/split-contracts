@@ -321,6 +321,40 @@ pub struct ReleaseSchedule {
 }
 
 // ──────────────────────────────────────────────────────────────────────
+// Compliance reporting types
+// ──────────────────────────────────────────────────────────────────────
+
+/// Read-only aggregation of an invoice's compliance-relevant state.
+///
+/// Built from data the contract already tracks (invoice status/amounts,
+/// co-signer approval, and dispute records) so off-chain reporting tools
+/// can pull one consistent snapshot per invoice instead of stitching
+/// together several separate queries and events.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ComplianceSnapshot {
+    /// The invoice this snapshot describes.
+    pub invoice_id: u64,
+    /// Current lifecycle status.
+    pub status: EscrowStatus,
+    /// Total amount the invoice requires.
+    pub total_amount: i128,
+    /// Amount deposited so far.
+    pub funded_amount: i128,
+    /// Unix timestamp the invoice was created against as its deadline.
+    pub deadline: u64,
+    /// Reason recorded for the most recent refund, if any.
+    pub refund_reason: OptionalRefundReason,
+    /// Current co-signer approval status, if co-signers are configured.
+    pub approval_status: Option<ApprovalStatus>,
+    /// Current dispute status, if a dispute has ever been raised.
+    pub dispute_status: Option<DisputeStatus>,
+    /// Whether the invoice's creator address is currently blacklisted
+    /// (finalised and upheld) as a payer on this contract.
+    pub creator_blacklisted: bool,
+}
+
+// ──────────────────────────────────────────────────────────────────────
 // Refund grace period types
 // ──────────────────────────────────────────────────────────────────────
 
