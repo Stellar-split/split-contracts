@@ -234,6 +234,12 @@ fn get_payment_close_at_internal(env: &Env, id: u64) -> Option<u64> {
     env.storage().persistent().get(&payment_close_at_key(id))
 }
 
+/// Smart split rules: history of previously-active `split_rules` configs for
+/// an invoice, appended to whenever the creator adjusts the rules before any
+/// contribution is recorded — persistent storage.
+fn split_rule_history_key(id: u64) -> (Symbol, u64) {
+    (symbol_short!("splt_hst"), id)
+}
 /// Issue #332: contiguous Vec<Address> of all recipients — persistent storage.
 fn recipients_list_key(id: u64) -> (Symbol, u64) {
     (symbol_short!("rec_lst"), id)
@@ -3601,6 +3607,87 @@ impl SplitContract {
         save_invoice(&env, invoice_id, &invoice);
         events::co_creator_removed(&env, invoice_id, &caller, &co_creator);
         append_audit_entry(&env, invoice_id, symbol_short!("rem_co_cr"), &caller);
+    }
+
+    /// Dynamically adjust an invoice's smart split rules before any funds
+    /// have been contributed. Only the primary creator may call this, and
+    /// only while `funded == 0` — once a contribution lands, split rules are
+    /// locked (`SplitRatioLocked`) to protect payers from a bait-and-switch
+    /// on the payout formula they funded under. The previous rule set is
+    /// appended to the invoice's split-rule history for audit purposes.
+    ///
+    /// `new_rules` must either be empty (fall back to plain `amounts[]`
+    /// payout) or have exactly one rule per recipient summing to 100%
+    /// (10_000 bps) of the funded amount, mirroring the validation performed
+    /// at invoice creation.
+    pub fn update_split_rules(
+        env: Env,
+        caller: Address,
+        invoice_id: u64,
+        new_rules: Vec<SplitRule>,
+    ) {
+        require_not_paused(&env);
+        caller.require_auth();
+        let mut invoice = load_invoice(&env, invoice_id);
+        assert!(invoice.creator == caller, "only the primary creator can update split rules");
+        assert!(
+            invoice.funded == 0,
+            "{}",
+            ContractError::SplitRatioLocked as u32
+        );
+
+        if !new_rules.is_empty() {
+            assert!(
+                new_rules.len() == invoice.recipients.len(),
+                "split_rules length must match recipients"
+            );
+            let total_amounts: i128 = invoice.amounts.iter().sum();
+            assert!(total_amounts > 0, "total amounts must be positive");
+            let mut total_bps: u32 = 0;
+            for rule in new_rules.iter() {
+                match rule {
+                    SplitRule::Fixed(amt) => {
+                        total_bps += (amt as u128 * 10_000u128 / total_amounts as u128) as u32;
+                    }
+                    SplitRule::Percentage(bps) => {
+                        total_bps += bps;
+                    }
+                    SplitRule::Tiered(_, bps) => {
+                        total_bps += bps;
+                    }
+                }
+            }
+            assert!(
+                total_bps == 10_000,
+                "split_rules must sum to 100% of funded amount"
+            );
+        }
+
+        // Archive the outgoing rule set before overwriting it.
+        let mut history: Vec<Vec<SplitRule>> = env
+            .storage()
+            .persistent()
+            .get(&split_rule_history_key(invoice_id))
+            .unwrap_or_else(|| Vec::new(&env));
+        history.push_back(invoice.split_rules.clone());
+        env.storage()
+            .persistent()
+            .set(&split_rule_history_key(invoice_id), &history);
+
+        invoice.split_rules = new_rules;
+        save_invoice(&env, invoice_id, &invoice);
+        append_audit_entry(&env, invoice_id, symbol_short!("upd_splt"), &caller);
+    }
+
+    /// Return the history of previously-active split rule sets for an
+    /// invoice (most recent last), not including the currently active set.
+    /// Empty if the split rules have never been adjusted via
+    /// [`Self::update_split_rules`].
+    pub fn get_split_rule_history(env: Env, invoice_id: u64) -> Vec<Vec<SplitRule>> {
+        env.storage()
+            .persistent()
+            .get(&split_rule_history_key(invoice_id))
+            .unwrap_or_else(|| Vec::new(&env))
     }
 
     /// Raise a dispute on an invoice as a contributor (payer).
