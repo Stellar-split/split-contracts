@@ -79,6 +79,12 @@ impl SplitFactory {
             !env.storage().instance().has(&factory_admin_key()),
             "already initialized"
         );
+        // Require the admin's own signature so the first caller to invoke
+        // `initialize` cannot hijack the factory by naming themselves (or
+        // another address they control) as admin before the legitimate
+        // deployer runs it. Without this, initialize is a signature-free
+        // mutation that permanently fixes who is treated as admin.
+        admin.require_auth();
         env.storage().instance().set(&factory_admin_key(), &admin);
     }
 
