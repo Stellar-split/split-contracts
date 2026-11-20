@@ -291,6 +291,7 @@ fn test_create_invoice_success() {
 
     client.initialize(&admin);
     let deadline = env.ledger().timestamp() + 10_000;
+    client.add_whitelisted_token(&admin, &token);
     let id = client.create_invoice(&creator, &token, &1_000_000, &deadline);
     assert_eq!(id, 0);
 
@@ -311,6 +312,7 @@ fn test_create_invoice_invalid_amount() {
 
     client.initialize(&admin);
     let deadline = env.ledger().timestamp() + 10_000;
+    client.add_whitelisted_token(&admin, &token);
     let result = client.try_create_invoice(&creator, &token, &0, &deadline);
     assert_eq!(result, Err(Ok(Error::InvalidTotalAmount)));
 }
@@ -333,16 +335,17 @@ fn test_deposit_partial_and_full_auto_release() {
 
     client.initialize(&admin);
     let deadline = env.ledger().timestamp() + 10_000;
+    client.add_whitelisted_token(&admin, &token);
     let id = client.create_invoice(&creator, &token, &1_000_000, &deadline);
 
     // Partial deposit
-    client.deposit(&payer, &id, &600_000);
+    client.deposit(&payer, &id, &600_000, &0u64);
     let invoice = client.get_invoice(&id);
     assert_eq!(invoice.status, EscrowStatus::Active);
     assert_eq!(invoice.funded_amount, 600_000);
 
     // Complete deposit — triggers auto-release
-    client.deposit(&payer, &id, &400_000);
+    client.deposit(&payer, &id, &400_000, &1u64);
     let invoice = client.get_invoice(&id);
     assert_eq!(invoice.status, EscrowStatus::Released);
 }
@@ -361,9 +364,10 @@ fn test_deposit_over_funded_fails() {
 
     client.initialize(&admin);
     let deadline = env.ledger().timestamp() + 10_000;
+    client.add_whitelisted_token(&admin, &token);
     let id = client.create_invoice(&creator, &token, &1_000_000, &deadline);
 
-    let result = client.try_deposit(&payer, &id, &1_500_000);
+    let result = client.try_deposit(&payer, &id, &1_500_000, &0u64);
     assert_eq!(result, Err(Ok(Error::OverFunded)));
 }
 
@@ -380,11 +384,13 @@ fn test_deposit_after_deadline_fails() {
     mint(&env, &token, &token_admin, &payer, 2_000_000);
 
     client.initialize(&admin);
-    // Deadline 0 — create invoice, then advance ledger past deadline before depositing.
-    let id = client.create_invoice(&creator, &token, &1_000_000, &0u64);
+    // Short-lived deadline — create invoice, then advance ledger past deadline before depositing.
+    client.add_whitelisted_token(&admin, &token);
+    let deadline = env.ledger().timestamp() + 1;
+    let id = client.create_invoice(&creator, &token, &1_000_000, &deadline);
 
     env.ledger().set(LedgerInfo {
-        timestamp: 1,
+        timestamp: deadline + 1,
         protocol_version: 22,
         sequence_number: 1,
         network_id: Default::default(),
@@ -394,7 +400,7 @@ fn test_deposit_after_deadline_fails() {
         max_entry_ttl: 3_110_400,
     });
 
-    let result = client.try_deposit(&payer, &id, &500_000);
+    let result = client.try_deposit(&payer, &id, &500_000, &0u64);
     assert_eq!(result, Err(Ok(Error::DeadlinePassed)));
 }
 
@@ -416,10 +422,12 @@ fn test_refund_after_deadline() {
 
     client.initialize(&admin);
     // Deadline 1 second in the future
-    let id = client.create_invoice(&creator, &token, &1_000_000, &1u64);
+    client.add_whitelisted_token(&admin, &token);
+    let deadline = env.ledger().timestamp() + 1;
+    let id = client.create_invoice(&creator, &token, &1_000_000, &deadline);
 
     // Deposit partial
-    client.deposit(&payer, &id, &500_000);
+    client.deposit(&payer, &id, &500_000, &0u64);
 
     // Advance ledger time past deadline
     env.ledger().set(LedgerInfo {
@@ -459,8 +467,9 @@ fn test_refund_before_deadline_fails() {
 
     client.initialize(&admin);
     let deadline = env.ledger().timestamp() + 100_000;
+    client.add_whitelisted_token(&admin, &token);
     let id = client.create_invoice(&creator, &token, &1_000_000, &deadline);
-    client.deposit(&payer, &id, &500_000);
+    client.deposit(&payer, &id, &500_000, &0u64);
 
     let mut payers = soroban_sdk::Vec::new(&env);
     payers.push_back(payer);
@@ -483,6 +492,7 @@ fn test_cancel_invoice_by_admin() {
 
     client.initialize(&admin);
     let deadline = env.ledger().timestamp() + 10_000;
+    client.add_whitelisted_token(&admin, &token);
     let id = client.create_invoice(&creator, &token, &1_000_000, &deadline);
 
     client.cancel_invoice(&id);
@@ -537,8 +547,9 @@ fn test_blacklist_blocks_finalised_payer_deposit() {
 
     // Create invoice and try to deposit — must fail.
     let deadline = env.ledger().timestamp() + 10_000;
+    client.add_whitelisted_token(&admin, &token);
     let id = client.create_invoice(&creator, &token, &1_000_000, &deadline);
-    let result = client.try_deposit(&payer, &id, &500_000);
+    let result = client.try_deposit(&payer, &id, &500_000, &0u64);
     assert_eq!(result, Err(Ok(Error::PayerBlacklisted)));
 }
 
@@ -561,8 +572,9 @@ fn test_blacklist_blocks_finalised_payer_pay_invoice() {
     client.finalise_blacklist(&admin, &payer, &true);
 
     let deadline = env.ledger().timestamp() + 10_000;
+    client.add_whitelisted_token(&admin, &token);
     let id = client.create_invoice(&creator, &token, &1_000_000, &deadline);
-    let result = client.try_pay_invoice(&payer, &id, &500_000);
+    let result = client.try_pay_invoice(&payer, &id, &500_000, &0u64);
     assert_eq!(result, Err(Ok(Error::PayerBlacklisted)));
 }
 
@@ -595,8 +607,9 @@ fn test_appeal_then_reinstate_allows_deposit() {
 
     // Payer should now be able to deposit.
     let deadline = env.ledger().timestamp() + 10_000;
+    client.add_whitelisted_token(&admin, &token);
     let id = client.create_invoice(&creator, &token, &1_000_000, &deadline);
-    client.deposit(&payer, &id, &500_000);
+    client.deposit(&payer, &id, &500_000, &0u64);
 
     let invoice = client.get_invoice(&id);
     assert_eq!(invoice.funded_amount, 500_000);
@@ -739,6 +752,7 @@ fn test_get_escrow_balance_existing_invoice_returns_funded_amount() {
     // Mint enough tokens to the payer.
     mint(&env, &token, &token_admin, &payer, total);
 
+    client.add_whitelisted_token(&admin, &token);
     let invoice_id = client.create_invoice(
         &Address::generate(&env),
         &token,
@@ -750,7 +764,7 @@ fn test_get_escrow_balance_existing_invoice_returns_funded_amount() {
     assert_eq!(client.get_escrow_balance(&invoice_id), 0);
 
     // Deposit a partial amount.
-    client.deposit(&payer, &invoice_id, &deposit_amount);
+    client.deposit(&payer, &invoice_id, &deposit_amount, &0u64);
 
     // Balance must reflect the deposited amount.
     assert_eq!(client.get_escrow_balance(&invoice_id), deposit_amount);
@@ -789,10 +803,11 @@ fn test_release_emits_escrow_released_event() {
 
     mint(&env, &token, &token_admin, &payer, total);
 
+    client.add_whitelisted_token(&admin, &token);
     let invoice_id = client.create_invoice(&creator, &token, &total, &deadline);
 
     // Deposit the full amount so the invoice becomes fully funded.
-    client.deposit(&payer, &invoice_id, &total);
+    client.deposit(&payer, &invoice_id, &total, &0u64);
 
     // Verify EscrowReleased event was emitted.
     let all_events = env.events().all();

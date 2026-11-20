@@ -63,6 +63,16 @@ fn blacklist_key(payer: &Address) -> (Symbol, Address) {
     (symbol_short!("blacklist"), payer.clone())
 }
 
+/// Persistent storage: whitelist flag for a token contract.
+fn token_whitelist_key(token: &Address) -> (Symbol, Address) {
+    (symbol_short!("tok_wl"), token.clone())
+}
+
+/// Persistent storage: per-payer per-invoice deposit nonce (next expected value).
+fn nonce_key(id: u64, payer: &Address) -> (Symbol, u64, Address) {
+    (symbol_short!("dep_nce"), id, payer.clone())
+}
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
@@ -70,6 +80,11 @@ fn blacklist_key(payer: &Address) -> (Symbol, Address) {
 /// Number of ledgers during which a blacklisted payer can submit an appeal.
 /// ~30 minutes at 5s ledger close time.
 const APPEAL_WINDOW_LEDGERS: u32 = 360;
+
+/// Maximum allowed window (in seconds) between "now" and an invoice deadline.
+/// Prevents deadlines so far in the future that funds could be practically
+/// locked forever (~2 years).
+const MAX_DEADLINE_WINDOW_SECONDS: u64 = 63_072_000;
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -177,6 +192,14 @@ fn emit_blacklist_finalised(env: &Env, payer: &Address, upheld: bool) {
     env.events().publish(
         (symbol_short!("blacklist"), symbol_short!("bl_fin")),
         (payer.clone(), upheld),
+    );
+}
+
+/// Topics: `(escrow, tok_wl)` — Data: `(token, whitelisted)`
+fn emit_token_whitelist_updated(env: &Env, token: &Address, whitelisted: bool) {
+    env.events().publish(
+        (symbol_short!("escrow"), symbol_short!("tok_wl")),
+        (token.clone(), whitelisted),
     );
 }
 
@@ -312,6 +335,68 @@ impl InvoiceEscrowContract {
     }
 
     // -----------------------------------------------------------------------
+    // Token whitelist
+    // -----------------------------------------------------------------------
+
+    /// Add a token contract to the admin-approved whitelist.
+    ///
+    /// Only whitelisted tokens may be used in [`Self::create_invoice`].
+    ///
+    /// # Errors
+    /// * [`Error::NotInitialized`] — Contract not initialized.
+    /// * [`Error::NotAdmin`]       — Caller is not the admin.
+    pub fn add_whitelisted_token(env: Env, admin: Address, token: Address) -> Result<(), Error> {
+        if !env.storage().instance().has(&admin_key()) {
+            return Err(Error::NotInitialized);
+        }
+        let stored_admin: Address = env.storage().instance().get(&admin_key()).unwrap();
+        if admin != stored_admin {
+            return Err(Error::NotAdmin);
+        }
+        admin.require_auth();
+
+        env.storage()
+            .persistent()
+            .set(&token_whitelist_key(&token), &true);
+        emit_token_whitelist_updated(&env, &token, true);
+        Ok(())
+    }
+
+    /// Remove a token contract from the admin-approved whitelist.
+    ///
+    /// # Errors
+    /// * [`Error::NotInitialized`] — Contract not initialized.
+    /// * [`Error::NotAdmin`]       — Caller is not the admin.
+    pub fn remove_whitelisted_token(
+        env: Env,
+        admin: Address,
+        token: Address,
+    ) -> Result<(), Error> {
+        if !env.storage().instance().has(&admin_key()) {
+            return Err(Error::NotInitialized);
+        }
+        let stored_admin: Address = env.storage().instance().get(&admin_key()).unwrap();
+        if admin != stored_admin {
+            return Err(Error::NotAdmin);
+        }
+        admin.require_auth();
+
+        env.storage()
+            .persistent()
+            .remove(&token_whitelist_key(&token));
+        emit_token_whitelist_updated(&env, &token, false);
+        Ok(())
+    }
+
+    /// Return `true` if `token` is on the admin-approved whitelist.
+    pub fn is_token_whitelisted(env: Env, token: Address) -> bool {
+        env.storage()
+            .persistent()
+            .get(&token_whitelist_key(&token))
+            .unwrap_or(false)
+    }
+
+    // -----------------------------------------------------------------------
     // Escrow — invoice management
     // -----------------------------------------------------------------------
 
@@ -341,6 +426,24 @@ impl InvoiceEscrowContract {
         if total_amount <= 0 {
             return Err(Error::InvalidTotalAmount);
         }
+
+        let now = env.ledger().timestamp();
+        if deadline <= now {
+            return Err(Error::DeadlineNotInFuture);
+        }
+        if deadline - now > MAX_DEADLINE_WINDOW_SECONDS {
+            return Err(Error::DeadlineTooFar);
+        }
+
+        if !env
+            .storage()
+            .persistent()
+            .get(&token_whitelist_key(&token))
+            .unwrap_or(false)
+        {
+            return Err(Error::TokenNotWhitelisted);
+        }
+
         creator.require_auth();
 
         let id: u64 = env
@@ -379,11 +482,35 @@ impl InvoiceEscrowContract {
     /// * [`Error::InvalidAmount`]      — `amount` ≤ 0.
     /// * [`Error::OverFunded`]         — Deposit would exceed `total_amount`.
     /// * [`Error::PayerBlacklisted`]   — Payer is finalised-blacklisted.
-    pub fn deposit(env: Env, payer: Address, invoice_id: u64, amount: i128) -> Result<(), Error> {
+    /// * [`Error::InvalidNonce`]       — `nonce` does not match the expected
+    ///   next nonce for this `(payer, invoice_id)` pair.
+    pub fn deposit(
+        env: Env,
+        payer: Address,
+        invoice_id: u64,
+        amount: i128,
+        nonce: u64,
+    ) -> Result<(), Error> {
         if amount <= 0 {
             return Err(Error::InvalidAmount);
         }
         payer.require_auth();
+
+        // Replay protection: caller must supply the expected next nonce for
+        // this (payer, invoice_id) pair. Prevents a captured/replayed
+        // deposit authorization from being submitted more than once.
+        let expected_nonce: u64 = env
+            .storage()
+            .persistent()
+            .get(&nonce_key(invoice_id, &payer))
+            .unwrap_or(0);
+        if nonce != expected_nonce {
+            return Err(Error::InvalidNonce);
+        }
+        env.storage().persistent().set(
+            &nonce_key(invoice_id, &payer),
+            &expected_nonce.checked_add(1).expect("nonce overflow"),
+        );
 
         // Block finalised-blacklisted payers.
         if let Some(entry) = env
@@ -769,8 +896,17 @@ impl InvoiceEscrowContract {
         payer: Address,
         invoice_id: u64,
         amount: i128,
+        nonce: u64,
     ) -> Result<(), Error> {
-        Self::deposit(env, payer, invoice_id, amount)
+        Self::deposit(env, payer, invoice_id, amount, nonce)
+    }
+
+    /// Return the next expected deposit nonce for a `(payer, invoice_id)` pair.
+    pub fn get_deposit_nonce(env: Env, invoice_id: u64, payer: Address) -> u64 {
+        env.storage()
+            .persistent()
+            .get(&nonce_key(invoice_id, &payer))
+            .unwrap_or(0)
     }
 
     // -----------------------------------------------------------------------

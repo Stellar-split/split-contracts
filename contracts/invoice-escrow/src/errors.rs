@@ -46,4 +46,12 @@ pub enum Error {
     AlreadyFinalised = 18,
     /// Caller is not the blacklisted payer.
     NotBlacklistedPayer = 19,
+    /// Deadline must be strictly in the future.
+    DeadlineNotInFuture = 20,
+    /// Deadline exceeds the maximum allowed window from now.
+    DeadlineTooFar = 21,
+    /// Token is not on the admin-approved whitelist.
+    TokenNotWhitelisted = 22,
+    /// Provided nonce does not match the expected next nonce for this payer/invoice.
+    InvalidNonce = 23,
 }
