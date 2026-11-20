@@ -23,6 +23,8 @@ pub enum CharityInvoiceStatus {
     Released,
     /// Cancelled by the creator; payers may claim refunds.
     Cancelled,
+    /// Issue #1066: deadline passed while still open; payers may claim refunds.
+    Expired,
 }
 
 /// An invoice whose payout donates a fixed share to a charity.
@@ -44,6 +46,9 @@ pub struct CharityInvoice {
     pub donated: i128,
     pub status: CharityInvoiceStatus,
     pub created_at: u64,
+    /// Issue #1066: ledger timestamp after which the invoice can no longer
+    /// accept payments. `0` means no deadline (never expires).
+    pub deadline: u64,
 }
 
 /// Result of applying the donation to an invoice's recipient amounts.

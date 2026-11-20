@@ -125,6 +125,31 @@ fn emit_refunded(env: &Env, id: u64, payer: &Address, amount: i128) {
     );
 }
 
+/// Issue #1066: invoice automatically expired after its deadline passed.
+fn emit_expired(env: &Env, id: u64, funded: i128) {
+    env.events().publish(
+        (symbol_short!("charity"), symbol_short!("expired"), id),
+        funded,
+    );
+}
+
+/// Issue #1066: if `inv` is still `Open` and its deadline (when set) has
+/// passed, flip it to `Expired` and persist the change. Returns `true` when
+/// the invoice is (now) expired.
+fn enforce_deadline(env: &Env, inv: &mut CharityInvoice) -> bool {
+    if inv.status == CharityInvoiceStatus::Open
+        && inv.deadline != 0
+        && env.ledger().timestamp() > inv.deadline
+    {
+        inv.status = CharityInvoiceStatus::Expired;
+        save_invoice(env, inv);
+        emit_expired(env, inv.id, inv.funded);
+        true
+    } else {
+        inv.status == CharityInvoiceStatus::Expired
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
@@ -276,8 +301,12 @@ impl CharitySplitContract {
         amounts: Vec<i128>,
         charity: Address,
         donation_bps: u32,
+        deadline: u64,
     ) -> Result<u64, Error> {
         creator.require_auth();
+        if deadline != 0 && deadline <= env.ledger().timestamp() {
+            return Err(Error::InvalidDeadline);
+        }
         if !(MIN_DONATION_BPS..=MAX_DONATION_BPS).contains(&donation_bps) {
             return Err(Error::InvalidDonationBps);
         }
@@ -320,6 +349,7 @@ impl CharitySplitContract {
             donated: 0,
             status: CharityInvoiceStatus::Open,
             created_at: env.ledger().timestamp(),
+            deadline,
         };
         save_invoice(&env, &inv);
         emit_invoice_created(&env, &inv);
@@ -334,6 +364,9 @@ impl CharitySplitContract {
             return Err(Error::InvalidAmount);
         }
         let mut inv = load_invoice(&env, invoice_id)?;
+        if enforce_deadline(&env, &mut inv) {
+            return Err(Error::InvoiceExpired);
+        }
         if inv.status != CharityInvoiceStatus::Open {
             return Err(Error::InvoiceNotOpen);
         }
@@ -360,8 +393,9 @@ impl CharitySplitContract {
         if amount <= 0 {
             return Err(Error::InvalidAmount);
         }
-        let inv = load_invoice(&env, invoice_id)?;
-        if inv.status == CharityInvoiceStatus::Cancelled {
+        let mut inv = load_invoice(&env, invoice_id)?;
+        enforce_deadline(&env, &mut inv);
+        if inv.status == CharityInvoiceStatus::Cancelled || inv.status == CharityInvoiceStatus::Expired {
             return Err(Error::InvoiceNotOpen);
         }
         token::Client::new(&env, &inv.token).transfer(&donor, &inv.charity, &amount);
@@ -387,11 +421,28 @@ impl CharitySplitContract {
         Ok(())
     }
 
-    /// Payer reclaims their contribution to a cancelled invoice.
+    /// Issue #1066: permissionless entry point that anyone may call to flip
+    /// an `Open` invoice whose deadline has passed into `Expired`, blocking
+    /// further payments. Also called implicitly by `pay`/`donate_extra`.
+    pub fn expire_invoice(env: Env, invoice_id: u64) -> Result<(), Error> {
+        let mut inv = load_invoice(&env, invoice_id)?;
+        if inv.status != CharityInvoiceStatus::Open {
+            return Err(Error::InvoiceNotOpen);
+        }
+        if inv.deadline == 0 || env.ledger().timestamp() <= inv.deadline {
+            return Err(Error::InvoiceNotExpired);
+        }
+        inv.status = CharityInvoiceStatus::Expired;
+        save_invoice(&env, &inv);
+        emit_expired(&env, invoice_id, inv.funded);
+        Ok(())
+    }
+
+    /// Payer reclaims their contribution to a cancelled or expired invoice.
     pub fn claim_refund(env: Env, payer: Address, invoice_id: u64) -> Result<i128, Error> {
         payer.require_auth();
         let mut inv = load_invoice(&env, invoice_id)?;
-        if inv.status != CharityInvoiceStatus::Cancelled {
+        if inv.status != CharityInvoiceStatus::Cancelled && inv.status != CharityInvoiceStatus::Expired {
             return Err(Error::NotCancelled);
         }
         let key = contribution_key(invoice_id, &payer);
