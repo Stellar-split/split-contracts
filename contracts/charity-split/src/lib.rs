@@ -458,6 +458,51 @@ impl CharitySplitContract {
         Ok(amount)
     }
 
+    /// Issue #1068: creator issues a partial refund of a payer's contribution
+    /// to a still-open invoice (e.g. to correct an overpayment or dispute),
+    /// without cancelling the whole invoice. The refunded amount is deducted
+    /// from both the payer's recorded contribution and the invoice's funded
+    /// total, and transferred back to the payer immediately.
+    pub fn partial_refund(
+        env: Env,
+        creator: Address,
+        invoice_id: u64,
+        payer: Address,
+        amount: i128,
+    ) -> Result<i128, Error> {
+        creator.require_auth();
+        if amount <= 0 {
+            return Err(Error::InvalidAmount);
+        }
+        let mut inv = load_invoice(&env, invoice_id)?;
+        if inv.creator != creator {
+            return Err(Error::NotCreator);
+        }
+        if inv.status == CharityInvoiceStatus::Cancelled || inv.status == CharityInvoiceStatus::Expired {
+            // Full refunds already go through claim_refund for these states.
+            return Err(Error::InvoiceNotOpen);
+        }
+
+        let key = contribution_key(invoice_id, &payer);
+        let contributed: i128 = env.storage().persistent().get(&key).unwrap_or(0);
+        if amount > contributed {
+            return Err(Error::ExceedsContribution);
+        }
+
+        let remaining = contributed - amount;
+        if remaining > 0 {
+            env.storage().persistent().set(&key, &remaining);
+        } else {
+            env.storage().persistent().remove(&key);
+        }
+        inv.funded = inv.funded.checked_sub(amount).ok_or(Error::Overflow)?;
+        save_invoice(&env, &inv);
+
+        token::Client::new(&env, &inv.token).transfer(&env.current_contract_address(), &payer, &amount);
+        emit_refunded(&env, invoice_id, &payer, amount);
+        Ok(amount)
+    }
+
     // -----------------------------------------------------------------------
     // Views
     // -----------------------------------------------------------------------
