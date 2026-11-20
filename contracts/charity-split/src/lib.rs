@@ -350,6 +350,58 @@ impl CharitySplitContract {
             status: CharityInvoiceStatus::Open,
             created_at: env.ledger().timestamp(),
             deadline,
+            cloned_from: None,
+        };
+        save_invoice(&env, &inv);
+        emit_invoice_created(&env, &inv);
+        Ok(id)
+    }
+
+    /// Issue #1069: clone an existing invoice's recipients, amounts, charity
+    /// and donation configuration into a brand-new `Open` invoice, so a
+    /// creator can reuse a recurring invoice as a template instead of
+    /// re-entering every recipient/amount by hand. The clone gets a fresh
+    /// id, zeroed funding/donation progress, and records `cloned_from` for
+    /// lineage tracking. Only the original creator may clone it, and the
+    /// template invoice may be in any status (including Released).
+    pub fn clone_invoice(
+        env: Env,
+        creator: Address,
+        invoice_id: u64,
+        deadline: u64,
+    ) -> Result<u64, Error> {
+        creator.require_auth();
+        let template = load_invoice(&env, invoice_id)?;
+        if template.creator != creator {
+            return Err(Error::NotCreator);
+        }
+        if deadline != 0 && deadline <= env.ledger().timestamp() {
+            return Err(Error::InvalidDeadline);
+        }
+
+        let id: u64 = env
+            .storage()
+            .instance()
+            .get(&counter_key())
+            .ok_or(Error::NotInitialized)?;
+        let next = id.checked_add(1).ok_or(Error::Overflow)?;
+        env.storage().instance().set(&counter_key(), &next);
+
+        let inv = CharityInvoice {
+            id,
+            creator,
+            token: template.token,
+            total: template.total,
+            funded: 0,
+            recipients: template.recipients,
+            amounts: template.amounts,
+            charity: template.charity,
+            donation_bps: template.donation_bps,
+            donated: 0,
+            status: CharityInvoiceStatus::Open,
+            created_at: env.ledger().timestamp(),
+            deadline,
+            cloned_from: Some(invoice_id),
         };
         save_invoice(&env, &inv);
         emit_invoice_created(&env, &inv);

@@ -49,6 +49,9 @@ pub struct CharityInvoice {
     /// Issue #1066: ledger timestamp after which the invoice can no longer
     /// accept payments. `0` means no deadline (never expires).
     pub deadline: u64,
+    /// Issue #1069: id of the invoice this one was cloned from, if any.
+    /// Preserves lineage when an invoice is used as a template.
+    pub cloned_from: Option<u64>,
 }
 
 /// Result of applying the donation to an invoice's recipient amounts.
