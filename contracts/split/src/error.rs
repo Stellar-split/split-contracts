@@ -145,4 +145,11 @@ pub enum ContractError {
     AlreadyPaid = 65,
     /// Recipient list is shorter than the configured minimum recipient count.
     TooFewRecipients = 66,
+    /// Caller is not the creator or a co-creator of this invoice and may not
+    /// propose or approve a collaborative change.
+    NotAuthorizedCollaborator = 67,
+    /// No pending change proposal exists for this invoice.
+    NoPendingProposal = 68,
+    /// Caller has already approved the pending proposal.
+    ProposalAlreadyApproved = 69,
 }
