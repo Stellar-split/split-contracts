@@ -46,4 +46,12 @@ pub enum Error {
     AlreadyFinalised = 18,
     /// Caller is not the blacklisted payer.
     NotBlacklistedPayer = 19,
+    /// Invoice already has an active dispute.
+    DisputeAlreadyActive = 20,
+    /// Invoice has no active dispute to resolve.
+    NoActiveDispute = 21,
+    /// The automatic dispute timeout has not elapsed yet.
+    DisputeTimeoutNotElapsed = 22,
+    /// Caller has no stake (deposit) in this invoice and cannot raise a dispute.
+    NotAStakeholder = 23,
 }
