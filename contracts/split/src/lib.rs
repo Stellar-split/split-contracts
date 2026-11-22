@@ -80,6 +80,7 @@ mod events;
 pub mod types;
 mod validation;
 mod calc;
+mod tx_result_cache;
 mod math;
 mod stats;
 pub mod security_audit;
