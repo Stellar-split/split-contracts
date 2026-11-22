@@ -92,6 +92,7 @@ pub mod pool;
 pub mod compression;
 mod zk_commitment_verifier;
 pub mod aggregation;
+mod tiered_access;
 
 #[cfg(test)]
 mod test;
