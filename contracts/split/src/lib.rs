@@ -76,6 +76,7 @@ const DEFAULT_INVOICE_STORAGE_QUOTA: u64 = 65_536;
 
 mod constants;
 mod error;
+mod payment_schedule_optimizer;
 mod events;
 pub mod types;
 mod validation;
