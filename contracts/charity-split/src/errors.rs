@@ -44,4 +44,12 @@ pub enum Error {
     CharityIsRecipient = 17,
     /// Arithmetic overflow.
     Overflow = 18,
+    /// Issue #1066: the deadline, if non-zero, must be in the future.
+    InvalidDeadline = 19,
+    /// Issue #1066: the invoice's deadline has passed; it is expired.
+    InvoiceExpired = 20,
+    /// Issue #1066: the invoice has not passed its deadline yet.
+    InvoiceNotExpired = 21,
+    /// Issue #1068: the requested refund exceeds the payer's contribution.
+    ExceedsContribution = 22,
 }
