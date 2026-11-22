@@ -410,6 +410,40 @@ pub struct ReleaseSchedule {
 }
 
 // ──────────────────────────────────────────────────────────────────────
+// Compliance reporting types
+// ──────────────────────────────────────────────────────────────────────
+
+/// Read-only aggregation of an invoice's compliance-relevant state.
+///
+/// Built from data the contract already tracks (invoice status/amounts,
+/// co-signer approval, and dispute records) so off-chain reporting tools
+/// can pull one consistent snapshot per invoice instead of stitching
+/// together several separate queries and events.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ComplianceSnapshot {
+    /// The invoice this snapshot describes.
+    pub invoice_id: u64,
+    /// Current lifecycle status.
+    pub status: EscrowStatus,
+    /// Total amount the invoice requires.
+    pub total_amount: i128,
+    /// Amount deposited so far.
+    pub funded_amount: i128,
+    /// Unix timestamp the invoice was created against as its deadline.
+    pub deadline: u64,
+    /// Reason recorded for the most recent refund, if any.
+    pub refund_reason: OptionalRefundReason,
+    /// Current co-signer approval status, if co-signers are configured.
+    pub approval_status: Option<ApprovalStatus>,
+    /// Current dispute status, if a dispute has ever been raised.
+    pub dispute_status: Option<DisputeStatus>,
+    /// Whether the invoice's creator address is currently blacklisted
+    /// (finalised and upheld) as a payer on this contract.
+    pub creator_blacklisted: bool,
+}
+
+// ──────────────────────────────────────────────────────────────────────
 // Refund grace period types
 // ──────────────────────────────────────────────────────────────────────
 
@@ -429,6 +463,49 @@ pub struct RefundGrace {
     /// `true` once the admin waives the grace period; refunds are then
     /// allowed as soon as the deadline passes.
     pub waived: bool,
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Arbitration / dispute resolution types
+// ──────────────────────────────────────────────────────────────────────
+
+/// Outcome an arbiter can impose on a disputed invoice.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq, Copy)]
+pub enum DisputeOutcome {
+    /// The arbiter overrides the co-signer rejection and forces release
+    /// of the funded amount to the invoice creator.
+    ForceRelease,
+    /// The arbiter upholds the rejection and the payers are refunded.
+    ForceRefund,
+}
+
+/// Lifecycle state of a dispute raised over a co-signer deadlock.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DisputeStatus {
+    /// Awaiting the arbiter's decision.
+    Open,
+    /// The arbiter has issued a binding decision.
+    Resolved(DisputeOutcome),
+}
+
+/// Dispute record attached to an invoice whose co-signers rejected release.
+///
+/// Raised by the creator or any configured co-signer once
+/// [`ApprovalStatus::Rejected`] is reached, and decided by the contract's
+/// single configured arbiter via `arbitrate_dispute`. This gives deadlocked
+/// invoices a deterministic resolution path instead of funds being stuck
+/// until the deadline / refund grace period passes.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Dispute {
+    /// Address that raised the dispute (creator or a co-signer).
+    pub raised_by: Address,
+    /// Unix timestamp at which the dispute was raised.
+    pub raised_at: u64,
+    /// Current status of the dispute.
+    pub status: DisputeStatus,
 }
 
 /// Where an invoice is in its refund grace timeline.

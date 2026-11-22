@@ -36,8 +36,8 @@ use soroban_sdk::{
 };
 use oracle::PriceOracleClient;
 use types::{
-    ApprovalStatus, BlacklistEntry, CosignerApproval, EscrowInvoice, EscrowReleased, EscrowStatus,
-    GlobalStats, InvoiceAuditReport, OracleCondition, OracleReading, OracleSource, OptionalRefundReason,
+    ApprovalStatus, BlacklistEntry, ComplianceSnapshot, CosignerApproval, Dispute, DisputeOutcome, DisputeStatus,
+    EscrowInvoice, EscrowReleased, EscrowStatus, OracleCondition, OracleReading, OracleSource, OptionalRefundReason,
     PriceComparator, PriceData, RefundGrace, RefundGraceStatus, RefundReason, ReleaseSchedule, ScheduleStatus,
 };
 
@@ -115,6 +115,16 @@ fn schedule_key(id: u64) -> (Symbol, u64) {
 /// Persistent storage: refund grace configuration for an invoice.
 fn grace_key(id: u64) -> (Symbol, u64) {
     (symbol_short!("grace"), id)
+}
+
+/// Instance storage: the configured dispute arbiter, if any.
+fn arbiter_key() -> Symbol {
+    symbol_short!("arbiter")
+}
+
+/// Persistent storage: dispute record for an invoice.
+fn dispute_key(id: u64) -> (Symbol, u64) {
+    (symbol_short!("dispute"), id)
 }
 
 // ---------------------------------------------------------------------------
@@ -344,29 +354,12 @@ fn cast_vote(env: &Env, signer: Address, invoice_id: u64, approve: bool) -> Resu
     Ok(approval.status)
 }
 
-/// Load the contract-wide analytics counters, defaulting to all-zero if
-/// none have been recorded yet (e.g. before the first invoice is created).
-fn get_global_stats(env: &Env) -> GlobalStats {
-    env.storage()
-        .instance()
-        .get(&global_stats_key())
-        .unwrap_or_default()
+fn get_dispute(env: &Env, id: u64) -> Option<Dispute> {
+    env.storage().persistent().get(&dispute_key(id))
 }
 
-fn save_global_stats(env: &Env, stats: &GlobalStats) {
-    env.storage().instance().set(&global_stats_key(), stats);
-}
-
-/// Bump an invoice's configuration revision, persist it and emit the
-/// `(escrow, revised, id)` event so off-chain indexers can track
-/// configuration history without re-fetching the whole invoice.
-fn bump_revision(env: &Env, id: u64, invoice: &mut EscrowInvoice, change: Symbol) {
-    invoice.revision = invoice.revision.saturating_add(1);
-    save_invoice(env, id, invoice);
-    env.events().publish(
-        (symbol_short!("escrow"), symbol_short!("revised"), id),
-        (invoice.revision, change),
-    );
+fn save_dispute(env: &Env, id: u64, dispute: &Dispute) {
+    env.storage().persistent().set(&dispute_key(id), dispute);
 }
 
 fn get_grace(env: &Env, id: u64) -> Option<RefundGrace> {
@@ -621,6 +614,30 @@ fn emit_appeal_submitted(env: &Env, payer: &Address, appeal_hash: &BytesN<32>) {
     env.events().publish(
         (symbol_short!("blacklist"), symbol_short!("appeal")),
         (payer.clone(), appeal_hash.clone()),
+    );
+}
+
+/// Topics: `(escrow, arb_set)` — Data: `arbiter`
+fn emit_arbiter_set(env: &Env, arbiter: &Address) {
+    env.events().publish(
+        (symbol_short!("escrow"), symbol_short!("arb_set")),
+        arbiter.clone(),
+    );
+}
+
+/// Topics: `(escrow, disp_open, id)` — Data: `(raised_by, raised_at)`
+fn emit_dispute_raised(env: &Env, id: u64, raised_by: &Address, raised_at: u64) {
+    env.events().publish(
+        (symbol_short!("escrow"), symbol_short!("disp_open"), id),
+        (raised_by.clone(), raised_at),
+    );
+}
+
+/// Topics: `(escrow, disp_res, id)` — Data: `(arbiter, outcome)`
+fn emit_dispute_resolved(env: &Env, id: u64, arbiter: &Address, outcome: DisputeOutcome) {
+    env.events().publish(
+        (symbol_short!("escrow"), symbol_short!("disp_res"), id),
+        (arbiter.clone(), outcome),
     );
 }
 
@@ -1238,6 +1255,165 @@ impl InvoiceEscrowContract {
     }
 
     // -----------------------------------------------------------------------
+    // Arbitration — dispute resolution for rejected co-signer releases
+    // -----------------------------------------------------------------------
+
+    /// Set (or replace) the contract's dispute arbiter. Admin only.
+    ///
+    /// The arbiter is a single trusted address (e.g. a DAO multisig or a
+    /// third-party arbitration service) empowered to break co-signer
+    /// deadlocks via [`Self::arbitrate_dispute`]. Without an arbiter
+    /// configured, a `Rejected` approval permanently blocks release until
+    /// the deadline / refund grace period passes and `refund` is called.
+    ///
+    /// # Errors
+    /// * [`Error::NotAdmin`] — Caller is not the admin.
+    pub fn set_arbiter(env: Env, arbiter: Address) -> Result<(), Error> {
+        require_admin(&env);
+        env.storage().instance().set(&arbiter_key(), &arbiter);
+        emit_arbiter_set(&env, &arbiter);
+        Ok(())
+    }
+
+    /// Return the configured arbiter, if any.
+    pub fn get_arbiter(env: Env) -> Option<Address> {
+        env.storage().instance().get(&arbiter_key())
+    }
+
+    /// Raise a dispute over an invoice whose co-signers rejected release.
+    ///
+    /// Callable by the invoice creator or any configured co-signer once the
+    /// approval status is [`ApprovalStatus::Rejected`]. Opens a [`Dispute`]
+    /// record that the arbiter must decide via [`Self::arbitrate_dispute`].
+    ///
+    /// # Errors
+    /// * [`Error::InvoiceNotFound`]      — Unknown invoice ID.
+    /// * [`Error::NoArbiter`]            — No arbiter configured.
+    /// * [`Error::NoCosigners`]          — No co-signer approval on this invoice.
+    /// * [`Error::DisputeNotEligible`]   — Approval status is not `Rejected`.
+    /// * [`Error::DisputeAlreadyOpen`]   — A dispute is already open.
+    pub fn raise_dispute(env: Env, caller: Address, invoice_id: u64) -> Result<(), Error> {
+        caller.require_auth();
+        if env.storage().instance().get::<_, Address>(&arbiter_key()).is_none() {
+            return Err(Error::NoArbiter);
+        }
+        let invoice = get_invoice(&env, invoice_id)?;
+        let approval = get_approval(&env, invoice_id).ok_or(Error::NoCosigners)?;
+        if approval.status != ApprovalStatus::Rejected {
+            return Err(Error::DisputeNotEligible);
+        }
+        if caller != invoice.creator && !approval.signers.contains(&caller) {
+            return Err(Error::NotCosigner);
+        }
+        if let Some(existing) = get_dispute(&env, invoice_id) {
+            if existing.status == DisputeStatus::Open {
+                return Err(Error::DisputeAlreadyOpen);
+            }
+        }
+
+        let now = env.ledger().timestamp();
+        let dispute = Dispute {
+            raised_by: caller.clone(),
+            raised_at: now,
+            status: DisputeStatus::Open,
+        };
+        save_dispute(&env, invoice_id, &dispute);
+        emit_dispute_raised(&env, invoice_id, &caller, now);
+        Ok(())
+    }
+
+    /// Return the dispute record for an invoice, if one has been raised.
+    pub fn get_dispute(env: Env, invoice_id: u64) -> Option<Dispute> {
+        get_dispute(&env, invoice_id)
+    }
+
+    /// Decide an open dispute. Arbiter only.
+    ///
+    /// * [`DisputeOutcome::ForceRelease`] overrides the co-signer rejection
+    ///   and releases the funded amount to the creator immediately (the
+    ///   invoice must still be fully funded).
+    /// * [`DisputeOutcome::ForceRefund`] upholds the rejection: the listed
+    ///   `payers` are refunded with [`RefundReason::ErrorRecovery`], exactly
+    ///   like a normal [`Self::refund`] call, bypassing the deadline / grace
+    ///   period checks since the dispute itself is the authorization.
+    ///
+    /// # Errors
+    /// * [`Error::InvoiceNotFound`]          — Unknown invoice ID.
+    /// * [`Error::NotArbiter`]               — Caller is not the configured arbiter.
+    /// * [`Error::NoDispute`]                — No dispute has been raised.
+    /// * [`Error::DisputeAlreadyResolved`]   — The dispute was already decided.
+    /// * [`Error::InsufficientFunding`]      — `ForceRelease` on an underfunded invoice.
+    pub fn arbitrate_dispute(
+        env: Env,
+        arbiter: Address,
+        invoice_id: u64,
+        outcome: DisputeOutcome,
+        payers: Vec<Address>,
+    ) -> Result<(), Error> {
+        let configured: Address = env
+            .storage()
+            .instance()
+            .get(&arbiter_key())
+            .ok_or(Error::NoArbiter)?;
+        if arbiter != configured {
+            return Err(Error::NotArbiter);
+        }
+        arbiter.require_auth();
+
+        let mut dispute = get_dispute(&env, invoice_id).ok_or(Error::NoDispute)?;
+        if dispute.status != DisputeStatus::Open {
+            return Err(Error::DisputeAlreadyResolved);
+        }
+        let mut invoice = get_invoice(&env, invoice_id)?;
+
+        match outcome {
+            DisputeOutcome::ForceRelease => {
+                if invoice.status == EscrowStatus::Released
+                    || invoice.status == EscrowStatus::Refunded
+                    || invoice.status == EscrowStatus::Cancelled
+                {
+                    return Err(Error::InvalidStatus);
+                }
+                if invoice.funded_amount < invoice.total_amount {
+                    return Err(Error::InsufficientFunding);
+                }
+                execute_release(&env, invoice_id, &mut invoice);
+            }
+            DisputeOutcome::ForceRefund => {
+                if invoice.status == EscrowStatus::Released
+                    || invoice.status == EscrowStatus::Refunded
+                    || invoice.status == EscrowStatus::Cancelled
+                {
+                    return Err(Error::InvalidStatus);
+                }
+                let token_client = token::Client::new(&env, &invoice.token);
+                for payer in payers.iter() {
+                    let amount: i128 = env
+                        .storage()
+                        .persistent()
+                        .get(&deposit_key(invoice_id, &payer))
+                        .unwrap_or(0);
+                    if amount > 0 {
+                        env.storage()
+                            .persistent()
+                            .remove(&deposit_key(invoice_id, &payer));
+                        token_client.transfer(&env.current_contract_address(), &payer, &amount);
+                        emit_refunded(&env, invoice_id, &payer, amount, &RefundReason::ErrorRecovery);
+                    }
+                }
+                invoice.status = EscrowStatus::Refunded;
+                invoice.refund_reason = OptionalRefundReason::Some(RefundReason::ErrorRecovery);
+                save_invoice(&env, invoice_id, &invoice);
+            }
+        }
+
+        dispute.status = DisputeStatus::Resolved(outcome);
+        save_dispute(&env, invoice_id, &dispute);
+        emit_dispute_resolved(&env, invoice_id, &arbiter, outcome);
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
     // Oracle condition guards
     // -----------------------------------------------------------------------
 
@@ -1794,6 +1970,42 @@ impl InvoiceEscrowContract {
     /// * [`Error::InvoiceNotFound`] — Unknown invoice ID.
     pub fn get_invoice(env: Env, invoice_id: u64) -> Result<EscrowInvoice, Error> {
         get_invoice(&env, invoice_id)
+    }
+
+    /// Return a [`ComplianceSnapshot`] aggregating an invoice's
+    /// compliance-relevant state in one call.
+    ///
+    /// Reporting tools otherwise need separate calls to `get_invoice`,
+    /// `get_approval_status`, `get_dispute` and the blacklist entry for the
+    /// creator; this entrypoint collects exactly that data into one
+    /// consistent, point-in-time record for automated reporting /
+    /// regulatory export pipelines, without introducing any new storage —
+    /// it only reads what the contract already persists.
+    ///
+    /// # Errors
+    /// * [`Error::InvoiceNotFound`] — Unknown invoice ID.
+    pub fn get_compliance_snapshot(env: Env, invoice_id: u64) -> Result<ComplianceSnapshot, Error> {
+        let invoice = get_invoice(&env, invoice_id)?;
+        let approval_status = get_approval(&env, invoice_id).map(|a| a.status);
+        let dispute_status = get_dispute(&env, invoice_id).map(|d| d.status);
+        let creator_blacklisted = env
+            .storage()
+            .persistent()
+            .get::<_, BlacklistEntry>(&blacklist_key(&invoice.creator))
+            .map(|e| e.finalised && e.upheld)
+            .unwrap_or(false);
+
+        Ok(ComplianceSnapshot {
+            invoice_id,
+            status: invoice.status,
+            total_amount: invoice.total_amount,
+            funded_amount: invoice.funded_amount,
+            deadline: invoice.deadline,
+            refund_reason: invoice.refund_reason,
+            approval_status,
+            dispute_status,
+            creator_blacklisted,
+        })
     }
 
     /// Return the current locked balance held in escrow for a given invoice.
