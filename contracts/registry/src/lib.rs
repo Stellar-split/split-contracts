@@ -43,6 +43,11 @@ fn registry_admin_key() -> Symbol {
     symbol_short!("reg_adm")
 }
 
+/// Per-address moderator flag — persistent storage.
+fn moderator_key(account: &Address) -> (Symbol, Address) {
+    (symbol_short!("mod_role"), account.clone())
+}
+
 /// Per-creator list of registered contract addresses — persistent storage.
 fn creator_contracts_key(creator: &Address) -> (Symbol, Address) {
     (symbol_short!("cr_ctrs"), creator.clone())
@@ -60,6 +65,37 @@ const MAX_CONTRACTS_PER_CREATOR: u32 = 5_000;
 /// Persistent storage: a creator's assigned tier.
 fn creator_tier_key(creator: &Address) -> (Symbol, Address) {
     (symbol_short!("cr_tier"), creator.clone())
+}
+
+// ---------------------------------------------------------------------------
+// Internal helpers
+// ---------------------------------------------------------------------------
+
+fn get_admin(env: &Env) -> Address {
+    env.storage()
+        .instance()
+        .get(&registry_admin_key())
+        .expect("not initialized")
+}
+
+fn is_moderator(env: &Env, account: &Address) -> bool {
+    env.storage()
+        .persistent()
+        .get(&moderator_key(account))
+        .unwrap_or(false)
+}
+
+/// Requires the caller to hold at least `role`, and checks their signature.
+/// `Admin` is the only account with `Role::Admin`; anyone granted the
+/// moderator flag satisfies `Role::Moderator`, and so does the admin.
+fn require_role(env: &Env, caller: &Address, role: Role) {
+    let admin = get_admin(env);
+    let authorized = match role {
+        Role::Admin => *caller == admin,
+        Role::Moderator => *caller == admin || is_moderator(env, caller),
+    };
+    assert!(authorized, "unauthorized: missing required role");
+    caller.require_auth();
 }
 
 // ---------------------------------------------------------------------------
@@ -213,6 +249,65 @@ impl Registry {
         env.storage()
             .persistent()
             .has(&registration_key(&creator, &contract))
+    }
+
+    /// Admin-only: grant or revoke the `Moderator` role for `account`.
+    ///
+    /// Moderators may deregister entries via [`Self::deregister`] but cannot
+    /// appoint other moderators.
+    ///
+    /// # Panics
+    /// * If `caller` is not the registry admin.
+    pub fn set_moderator(env: Env, caller: Address, account: Address, enabled: bool) {
+        require_role(&env, &caller, Role::Admin);
+        let key = moderator_key(&account);
+        if enabled {
+            env.storage().persistent().set(&key, &true);
+        } else {
+            env.storage().persistent().remove(&key);
+        }
+    }
+
+    /// Returns `true` if `account` currently holds the `Moderator` role.
+    pub fn has_role(env: Env, account: Address, role: Role) -> bool {
+        match role {
+            Role::Admin => account == get_admin(&env),
+            Role::Moderator => is_moderator(&env, &account),
+        }
+    }
+
+    /// Admin or moderator-only: remove a (creator, contract) registration.
+    ///
+    /// Intended for removing entries registered in error, or contract
+    /// addresses later found to be spam/abuse, without requiring the
+    /// creator's own signature.
+    ///
+    /// # Panics
+    /// * If `caller` holds neither `Role::Admin` nor `Role::Moderator`.
+    /// * If the (creator, contract) pair is not currently registered.
+    pub fn deregister(env: Env, caller: Address, creator: Address, contract: Address) {
+        require_role(&env, &caller, Role::Moderator);
+
+        let registration_check_key = registration_key(&creator, &contract);
+        assert!(
+            env.storage().persistent().has(&registration_check_key),
+            "not registered"
+        );
+        env.storage().persistent().remove(&registration_check_key);
+
+        let contracts_key = creator_contracts_key(&creator);
+        let contracts: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&contracts_key)
+            .unwrap_or_else(|| Vec::new(&env));
+        let mut updated = Vec::new(&env);
+        for addr in contracts.iter() {
+            if addr != contract {
+                updated.push_back(addr);
+            }
+        }
+        env.storage().persistent().set(&contracts_key, &updated);
     }
 }
 

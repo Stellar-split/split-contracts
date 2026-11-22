@@ -171,6 +171,26 @@ fn validate_config(env: &Env, config: &StrategyConfig) -> Result<(), Error> {
     if !(MIN_PERIOD_LEDGERS..=MAX_PERIOD_LEDGERS).contains(&config.period_ledgers) {
         return Err(Error::InvalidPeriod);
     }
+
+    // Reject payout wallets that would strand funds in this contract: the
+    // contract never custodies the gross amount (`process_income` pulls
+    // straight from the payer to each destination), so a reserve or
+    // deduction wallet pointed at the contract itself has no withdrawal
+    // path and the funds would be unrecoverable.
+    let this = env.current_contract_address();
+    if config.reserve_wallet == this {
+        return Err(Error::InvalidWallet);
+    }
+    if let Some(wallet) = &config.deduction_wallet {
+        if *wallet == this {
+            return Err(Error::InvalidWallet);
+        }
+        // A deduction wallet identical to the reserve wallet would silently
+        // merge two distinct accounting buckets into one on-chain balance.
+        if *wallet == config.reserve_wallet {
+            return Err(Error::InvalidWallet);
+        }
+    }
     Ok(())
 }
 

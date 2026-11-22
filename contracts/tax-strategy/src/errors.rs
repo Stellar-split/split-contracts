@@ -32,4 +32,8 @@ pub enum Error {
     InvalidAmount = 11,
     /// Arithmetic overflow.
     Overflow = 12,
+    /// A payout wallet (reserve or deduction) is invalid — it is this
+    /// contract's own address (funds would be stranded with no withdrawal
+    /// path) or duplicates another payout wallet in the same config.
+    InvalidWallet = 13,
 }
