@@ -90,6 +90,7 @@ mod invoice_compliance_checklist;
 pub mod split_rules;
 pub mod pool;
 pub mod compression;
+mod zk_commitment_verifier;
 pub mod aggregation;
 
 #[cfg(test)]
