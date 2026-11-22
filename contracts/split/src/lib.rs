@@ -122,6 +122,7 @@ mod storage_keys;
 
 mod migrations;
 mod webhooks;
+pub mod shard_routing;
 
 mod insurance_pool;
 mod sustainability;
