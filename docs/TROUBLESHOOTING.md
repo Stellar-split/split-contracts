@@ -119,6 +119,114 @@ in instance storage — **not** a hardcoded address. If a previous `transfer_adm
 debugging further, and check `get_pending_admin()` in case a transfer is stuck mid-handover
 (the new admin must call `accept_admin` to complete it; `cancel_transfer` aborts it).
 
+## The `split` contract
+
+Entries for the main `split` contract. Every code below is in [`ERROR_CODES_SPLIT.md`](ERROR_CODES_SPLIT.md).
+Some checks fail with a plain panic message and no code, and those are listed by message.
+
+```mermaid
+flowchart TD
+    A[Call failed] --> B{Error code or message?}
+    B -->|Error Contract code| C[Look the number up in ERROR_CODES_SPLIT.md]
+    B -->|Panic message| D[Find the message below]
+    C --> E{Which group?}
+    E -->|Paused, frozen, migration| F[Read the contract state: is_paused, get_circuit_breaker_status, get_schema_version]
+    E -->|Auth, role, allowlist| G[Check the caller, role and invoice allowlists]
+    E -->|Amount, deadline, recipients| H[Check the arguments against the invoice]
+    E -->|Payout did not arrive| I[get_failed_payouts, then retry_failed_payout or claim_fallback]
+    F --> J[Fix the state, then retry]
+    G --> J
+    H --> J
+    I --> J
+```
+
+### "Every call fails with `MigrationRequired` (54) after an upgrade"
+
+**Cause:** After a WASM upgrade the stored schema version (`get_schema_version`) is behind the version the
+new build expects. Every guarded entry point calls `migrations::require_schema_current` first and panics
+until the migration has run.
+
+**Fix:** A SuperAdmin calls `migrate(admin)`. It runs each missing step in order, and is safe to call again if
+it stopped part way.
+
+### "`contract is paused`, `ContractPaused` (15) or `function paused`"
+
+**Cause:** The contract is paused (`pause`), one function is paused (`pause_function`), or the circuit
+breaker is open. `is_paused` reports the first, `get_circuit_breaker_status` the last.
+
+**Fix:** An admin with the right role unpauses. While the circuit breaker is open, only the functions on
+`get_circuit_breaker_exemptions` still run. Status reads such as `is_paused` keep working.
+
+### "`contract is frozen for upgrade` (`ContractFrozen`, 28)"
+
+**Cause:** `freeze_for_upgrade` was called and the contract has not been thawed. `get_upgrade_checkpoint`
+returns the checkpoint hash while it is frozen.
+
+**Fix:** A SuperAdmin calls `thaw_contract` once the upgrade work is done.
+
+### "`pay` fails with `invalid nonce`"
+
+**Cause:** The nonce argument must equal the payer's current nonce for that invoice. The first payment uses `0`
+and each successful payment adds one.
+
+**Fix:** Read `get_nonce(invoice_id, payer)` and pass that value. Two payments sent at once from the same payer
+can collide, so send them one after the other.
+
+### "Creating an invoice fails"
+
+| Error | Cause |
+|---|---|
+| `InvalidRecipients` (16) | The recipient and amount lists differ in length. |
+| `EmptyRecipientList` (37) | No recipients. |
+| `BatchLimitExceeded` (18) | More than 200 recipients. `create_batch` with more than five invoices panics with `batch limit exceeded`. |
+| `DuplicateRecipient` (55) | The same address appears twice. |
+| `ZeroAmountNotAllowed` (41) | An amount is zero or negative. |
+| `ArithmeticOverflow` (40) | The total is above `MAX_INVOICE_TOTAL`. |
+| `DeadlinePassed` (3) | The deadline is not after the current ledger time. |
+| `InvalidDeadline` (78) | The deadline is more than ten years ahead. |
+| `InvalidRatioSum` (36) | Split ratios do not add up to 10,000 bps. |
+| `TooFewRecipients` (66) | Fewer recipients than the minimum set with `set_min_recipients`, see `get_min_recipients`. |
+
+### "A payer is refused: `PayerNotAllowed` (8), `ContributorNotAllowed` (42) or `UnauthorisedToken` (43)"
+
+**Cause:** The invoice has an allowed-payer list or a contributor allowlist that does not include the payer, or
+the token is not on the contract's allowed token list (`get_allowed_tokens`).
+
+**Fix:** The creator adds the payer (`add_allowed_payer`, `add_contributor_to_allowlist`), or an admin allows the
+token with `add_allowed_token`.
+
+### "`DuplicatePayment` (29) or `RateLimitExceeded` (25)"
+
+**Cause:** The same payment was repeated inside the duplicate window (`get_duplicate_window_ledgers`), or the
+caller used the creation or payment rate limit.
+
+**Fix:** Do not resend a payment that already went through. Check the invoice with `get_invoice_funded` first.
+For the rate limit, wait for the window to reset.
+
+### "A recipient was not paid at release"
+
+**Cause:** The transfer to that recipient failed, for example they have no trustline for the token
+(`RecipientMissingTrustline`, 51) or no account (`RecipientAccountMissing`, 61). The release continues with the
+other recipients and records the failure.
+
+**Fix:** Read `get_failed_payouts(invoice_id)`. Once the recipient has fixed their account, call
+`retry_failed_payout(invoice_id, recipient)`, or the recipient calls `claim_fallback`. A payout recorded as pending
+after release is collected with `claim_pending_payout`.
+
+### "`reveal_payment` fails with `CommitmentExpired`, `CommitmentMismatch` or `ActiveCommitmentExists`"
+
+**Cause:** Commit-reveal payments have two steps. `ActiveCommitmentExists` means the payer already has a
+commitment on this invoice. `CommitmentExpired` means too many ledgers passed (`set_commitment_expiry`).
+`CommitmentMismatch` means the revealed amount and salt do not hash to the stored commitment.
+
+**Fix:** Reveal with exactly the amount and salt used to build the commitment and before it expires. If it has
+expired, commit again.
+
+### "My test fails"
+
+See [`INTEGRATION_TESTING.md`](INTEGRATION_TESTING.md). The usual causes are a missing `initialize`, a ledger
+time that was never set, a payer that was not minted tokens, and a stale storage snapshot.
+
 ## FAQ
 
 **Q: Why do I get a numeric error code instead of a message from the simulated transaction?**
