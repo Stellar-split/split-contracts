@@ -13260,6 +13260,8 @@ impl SplitContract {
                 &caller,
                 0,
             );
+            // Issue #1118: notify webhook subscribers that the invoice was cancelled.
+            webhooks::dispatch(&env, invoice_id, webhooks::EVENT_CANCELLED);
         }
 
         // Issue #503: decrement per-creator open-invoice counter on cancel.
