@@ -127,16 +127,18 @@ flowchart TB
 
 ### 2.2 Module map
 
-Modules declared in `lib.rs`:
+Modules declared in `lib.rs`, with the issue each came from. Modules marked "entry points" define their
+own `#[contractimpl]` functions. The others are called from `lib.rs`, except where noted.
 
 | Module | Purpose |
 |---|---|
 | `constants` | Shared constants. |
-| `error` | `ContractError` codes and recovery suggestions. |
+| `error` | `ContractError` codes and recovery suggestions. Every code is listed in [`ERROR_CODES_SPLIT.md`](./ERROR_CODES_SPLIT.md). |
 | `types` | `#[contracttype]` structs and enums (invoice records, options, statuses). |
 | `events` | Event helpers. Lifecycle helpers also feed `analytics`. |
 | `validation` | Invoice input validation (#556, #558). |
 | `calc` | Fee and distribution arithmetic. |
+| `math` | Token-decimal normalisation (#555). |
 | `stats` | Protocol-wide counters (`StatsUpdated`). |
 | `security_audit` | Security audit framework (#892). |
 | `payment_tracking` | Per-recipient partial payment tracking (#911). |
@@ -144,19 +146,37 @@ Modules declared in `lib.rs`:
 | `split_rules` | Rules engine that computes per-recipient amounts (#913). |
 | `analytics` | Usage event tracking, daily aggregates, reports and insights (#1034). |
 | `monitoring` | Metrics, alert rules, alert delivery and monitoring stats (#1033). |
+| `webhooks` | Webhook registry and delivery ledger (#930). |
 | `storage` | Persistent storage helpers with TTL management. |
 | `storage_keys` | Central key constructors (#312). |
 | `migrations` | Versioned schema checks (`require_schema_current`). |
-| `insurance_pool` | Recipient insurance pool governance (#888). |
-| `sustainability` | Sustainability impact tracking (#889). |
-| `cooperative` | Creator cooperative profit sharing (#890). |
-| `education_lockup` | Recipient education funding lock-up (#891). |
-| `test`, `fuzz_tests`, `storage_snapshot` | Test-only modules (`#[cfg(test)]`). |
+| `insurance_pool` | Recipient insurance pool governance (#888). Entry points. |
+| `sustainability` | Sustainability impact tracking (#889). Entry points. |
+| `cooperative` | Creator cooperative profit sharing (#890). Entry points. |
+| `education_lockup` | Recipient education funding lock-up (#891). Entry points. |
+| `test`, `fuzz_tests`, `boundary_tests`, `testing_support`, `storage_snapshot` | Test-only modules (`#[cfg(test)]`). |
+
+These modules are declared, but nothing in `lib.rs` calls them yet, so they add no contract behaviour:
+
+| Module | Purpose |
+|---|---|
+| `rate_limiting` | Per-user, per-operation rate limiting with backoff (#1008). `lib.rs` has its own simpler limiter. |
+| `audit_logging` | Contract-wide compliance log (#1009). The per-invoice audit log in `lib.rs` is separate. |
+| `contract_upgrade` | Version, manifest, rollback and history for upgrades (#1010). `propose_upgrade` and `execute_upgrade` in `lib.rs` do not call it. |
+| `emergency_pause` | Named pause conditions and a recovery plan (#1011). The circuit breaker in `lib.rs` is separate. |
+| `pool` | Fixed-size pool of reusable execution slots (#1020). |
+| `compression` | Run-length byte codec with a raw fallback (#1021). |
+| `aggregation` | Batching and coalescing of amount-bearing requests (#1022). |
 
 These files are in `src/` but are **not** declared as modules in `lib.rs`, so they are not compiled:
-`confidential_tracking.rs`, `creator_fee_tiers.rs`, `factory.rs`, `invoice_metadata.rs`, `math.rs`,
-`priority.rs`, `webhooks.rs`. `lib.rs` calls `webhooks::` functions, so wiring that module in is
-needed before those paths build.
+`batch_processor.rs` (#1016), `confidential_tracking.rs` (#921), `creator_fee_tiers.rs` (#919),
+`factory.rs` (#178), `invoice_metadata.rs` (#920), `lazy_loader.rs` (#1018), `parallel.rs` (#1019),
+`priority.rs` (#918) and `storage_optimizer.rs` (#1017). The disabled test modules
+`state_machine_tests.rs`, `concurrency_tests.rs`, `perf_regression_tests.rs` and
+`error_scenario_tests.rs` are not compiled either.
+
+`contracts/carbon-credit/` holds source files but no `Cargo.toml`, and is not a workspace member, so it
+is not built.
 
 ### 2.3 Entry point groups
 
