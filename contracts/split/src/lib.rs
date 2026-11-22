@@ -82,6 +82,7 @@ mod validation;
 mod calc;
 mod math;
 mod stats;
+mod storage_layout_opt;
 pub mod security_audit;
 pub mod payment_tracking;
 pub mod velocity;
