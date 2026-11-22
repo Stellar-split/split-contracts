@@ -93,13 +93,18 @@ pub enum Error {
     RefundGraceElapsed = 40,
     /// The deadline is too far in the future; it exceeds `MAX_DEADLINE_HORIZON`.
     DeadlineOutOfRange = 41,
-    /// Invoice is locked for an active dispute; deposits, release, refund,
-    /// and cancellation are blocked until the dispute is resolved.
-    InvoiceLocked = 42,
-    /// No active dispute lock exists for this invoice.
-    NotDisputed = 43,
-    /// Invoice already has an active dispute lock.
-    AlreadyDisputed = 44,
+    /// No arbiter has been configured for this contract.
+    NoArbiter = 42,
+    /// Caller is not the configured arbiter.
+    NotArbiter = 43,
+    /// A dispute can only be raised once co-signers have rejected a release.
+    DisputeNotEligible = 44,
+    /// A dispute is already open for this invoice.
+    DisputeAlreadyOpen = 45,
+    /// No open dispute exists for this invoice.
+    NoDispute = 46,
+    /// The dispute has already been resolved.
+    DisputeAlreadyResolved = 47,
 }
 
 /// Returns a human-readable recovery suggestion for the given error.
@@ -272,17 +277,29 @@ pub fn get_recovery_suggestion(error: Error) -> String {
             &Env::default(),
             "Deadline is too far in the future; it exceeds the maximum allowed horizon.",
         ),
-        Error::InvoiceLocked => String::from_str(
+        Error::NoArbiter => String::from_str(
             &Env::default(),
-            "Invoice is locked for an active dispute; wait for the arbitrator to resolve it.",
+            "No arbiter is configured; the admin must call set_arbiter before disputes can be raised.",
         ),
-        Error::NotDisputed => String::from_str(
+        Error::NotArbiter => String::from_str(
             &Env::default(),
-            "No active dispute lock exists for this invoice.",
+            "Caller is not the configured arbiter; retry from the arbiter account.",
         ),
-        Error::AlreadyDisputed => String::from_str(
+        Error::DisputeNotEligible => String::from_str(
             &Env::default(),
-            "Invoice already has an active dispute lock.",
+            "A dispute can only be raised once co-signers have rejected the release.",
+        ),
+        Error::DisputeAlreadyOpen => String::from_str(
+            &Env::default(),
+            "A dispute is already open for this invoice; wait for the arbiter to resolve it.",
+        ),
+        Error::NoDispute => String::from_str(
+            &Env::default(),
+            "No open dispute exists for this invoice; raise one with raise_dispute first.",
+        ),
+        Error::DisputeAlreadyResolved => String::from_str(
+            &Env::default(),
+            "This dispute has already been resolved and cannot be decided again.",
         ),
     }
 }
@@ -331,9 +348,12 @@ pub fn error_from_code(code: u32) -> Option<Error> {
         39 => Some(Error::InvalidGracePeriod),
         40 => Some(Error::RefundGraceElapsed),
         41 => Some(Error::DeadlineOutOfRange),
-        42 => Some(Error::InvoiceLocked),
-        43 => Some(Error::NotDisputed),
-        44 => Some(Error::AlreadyDisputed),
+        42 => Some(Error::NoArbiter),
+        43 => Some(Error::NotArbiter),
+        44 => Some(Error::DisputeNotEligible),
+        45 => Some(Error::DisputeAlreadyOpen),
+        46 => Some(Error::NoDispute),
+        47 => Some(Error::DisputeAlreadyResolved),
         _ => None,
     }
 }

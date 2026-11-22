@@ -95,6 +95,30 @@ pub enum SplitRule {
     Tiered(i128, u32),
 }
 
+/// Invoice collaboration workspace: a pending change to an invoice's
+/// deadline and/or off-chain metadata, proposed by the creator or a
+/// co-creator and requiring unanimous sign-off from every other
+/// creator/co-creator before it takes effect.
+///
+/// Created by `propose_invoice_change` and finalised automatically by
+/// `approve_invoice_change` once every required party has approved.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct InvoiceChangeProposal {
+    /// The address that submitted this proposal (auto-approved).
+    pub proposer: Address,
+    /// Proposed new deadline, or `None` to leave it unchanged.
+    pub new_deadline: Option<u64>,
+    /// Proposed new off-chain metadata hash, or `None` to leave it unchanged.
+    pub new_metadata_hash: Option<BytesN<32>>,
+    /// Addresses (creator and/or co-creators) that have approved so far.
+    pub approvals: Vec<Address>,
+    /// Ledger timestamp the proposal was created.
+    pub proposed_at: u64,
+    /// Whether this proposal has already been applied.
+    pub executed: bool,
+}
+
 /// Issue: Action taken by an auto-resolve rule.
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]

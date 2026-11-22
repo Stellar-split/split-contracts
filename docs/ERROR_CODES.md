@@ -74,6 +74,18 @@ never reuse one.
 | 39 | `InvalidGracePeriod` | Grace period above the maximum | Use a shorter period |
 | 40 | `RefundGraceElapsed` | Grace change after it ended | Nothing to change |
 
+## Deadlines and arbitration
+
+| Code | Name | Cause | Recovery |
+|---|---|---|---|
+| 41 | `DeadlineOutOfRange` | Deadline more than `MAX_DEADLINE_HORIZON` away | Use a closer deadline |
+| 42 | `NoArbiter` | Dispute call with no arbiter configured | Admin calls `set_arbiter` first |
+| 43 | `NotArbiter` | Caller is not the configured arbiter | Use the arbiter's account |
+| 44 | `DisputeNotEligible` | `raise_dispute` before approval status is `Rejected` | Wait for co-signers to reject, or resolve normally |
+| 45 | `DisputeAlreadyOpen` | `raise_dispute` called twice | Wait for the arbiter to decide |
+| 46 | `NoDispute` | `arbitrate_dispute` with nothing raised | Call `raise_dispute` first |
+| 47 | `DisputeAlreadyResolved` | Arbiter decides the same dispute twice | Nothing to do; the decision already stands |
+
 ## Scope
 
 This page covers `invoice-escrow` only. The `split` contract has its own error type in

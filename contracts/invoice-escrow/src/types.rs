@@ -43,6 +43,39 @@ pub enum EscrowStatus {
     Refunded,
     /// Admin explicitly cancelled the invoice before release.
     Cancelled,
+    /// A stakeholder has raised a dispute; deposits/release are frozen
+    /// pending admin arbitration or automatic timeout resolution.
+    Disputed,
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Dispute resolution automation
+// ──────────────────────────────────────────────────────────────────────
+
+/// Record of an active (or most recently resolved) dispute on an invoice.
+///
+/// Created by [`crate::InvoiceEscrowContract::raise_dispute`]. The admin may
+/// arbitrate manually at any time via
+/// [`crate::InvoiceEscrowContract::arbitrate_dispute`]. If the admin does not
+/// act within `timeout_secs` of `raised_at`, anyone may call
+/// [`crate::InvoiceEscrowContract::auto_resolve_dispute`] to automatically
+/// refund depositors — protecting the disputing party from an unresponsive
+/// creator/admin by default.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct DisputeRecord {
+    /// The invoice this dispute belongs to.
+    pub invoice_id: u64,
+    /// Address that raised the dispute (must have a deposit on the invoice).
+    pub raised_by: Address,
+    /// Commitment hash of the dispute reason/evidence (revealed off-chain).
+    pub reason_hash: BytesN<32>,
+    /// Unix timestamp the dispute was raised at.
+    pub raised_at: u64,
+    /// Seconds after `raised_at` before automatic resolution becomes callable.
+    pub timeout_secs: u64,
+    /// Whether the dispute has already been resolved (manually or automatically).
+    pub resolved: bool,
 }
 
 /// Core escrow invoice record.
@@ -63,6 +96,95 @@ pub struct EscrowInvoice {
     pub status: EscrowStatus,
     /// Reason recorded for the most recent refund, if any.
     pub refund_reason: OptionalRefundReason,
+    /// Monotonic revision counter for this invoice's mutable configuration
+    /// (co-signer set, oracle condition, release schedule). Starts at `0`
+    /// when the invoice is created and increments by one each time one of
+    /// those configurations is set, replaced or cleared, so off-chain
+    /// consumers can detect and order configuration changes without
+    /// diffing full invoice snapshots.
+    pub revision: u32,
+}
+
+/// Emitted when an invoice's mutable configuration changes (co-signers,
+/// oracle condition, or release schedule), bumping its `revision`.
+///
+/// Event topics: `(escrow, revised, id)`
+/// Event data: `(revision, change)`
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct InvoiceRevisedEvent {
+    /// The invoice's new revision number after this change.
+    pub revision: u32,
+    /// Short tag identifying which configuration changed, e.g.
+    /// `cosigners`, `orc_set`, `orc_clear`, `sched_set` or `sched_cnl`.
+    pub change: soroban_sdk::Symbol,
+}
+
+/// Emitted when the admin cancels an invoice before release, so off-chain
+/// indexers relaying webhooks can observe this terminal state transition.
+///
+/// Event topics: `(escrow, cancelled, id)`
+/// Event data: `(admin, ledger)`
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct InvoiceCancelledEvent {
+    /// The admin who cancelled the invoice.
+    pub admin: Address,
+    /// Ledger sequence at which cancellation occurred.
+    pub ledger: u32,
+}
+
+/// Contract-wide payment analytics, updated as invoices move through their
+/// lifecycle. Intended for a read-only analytics/dashboard query
+/// (`get_global_stats`) summarising payment volume and trends; all fields
+/// are derived purely from state this contract already tracks.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct GlobalStats {
+    /// Total number of invoices ever created.
+    pub invoices_created: u64,
+    /// Total number of invoices that reached `Released`.
+    pub invoices_released: u64,
+    /// Total number of invoices that reached `Refunded`.
+    pub invoices_refunded: u64,
+    /// Total number of invoices that reached `Cancelled`.
+    pub invoices_cancelled: u64,
+    /// Sum of `total_amount` transferred to creators across all releases.
+    pub total_released_volume: i128,
+    /// Sum of amounts returned to payers across all refunds.
+    pub total_refunded_volume: i128,
+}
+
+/// Read-only compliance/audit snapshot for a single invoice, aggregating
+/// state already stored by the contract into one call so off-chain
+/// reporting tools don't need to issue separate queries per sub-record.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct InvoiceAuditReport {
+    /// The invoice ID this report covers.
+    pub invoice_id: u64,
+    /// Current lifecycle status.
+    pub status: EscrowStatus,
+    /// Address that created the invoice.
+    pub creator: Address,
+    /// Token contract used for funding.
+    pub token: Address,
+    /// Total amount required to fully fund the invoice.
+    pub total_amount: i128,
+    /// Amount deposited so far.
+    pub funded_amount: i128,
+    /// Unix timestamp after which refunds are permitted if not fully funded.
+    pub deadline: u64,
+    /// Reason recorded for the most recent refund, if any.
+    pub refund_reason: OptionalRefundReason,
+    /// Current configuration revision (see [`EscrowInvoice::revision`]).
+    pub revision: u32,
+    /// Co-signer approval status, if co-signers are configured.
+    pub approval_status: Option<ApprovalStatus>,
+    /// Release schedule status, if a schedule is configured.
+    pub schedule_status: Option<ScheduleStatus>,
+    /// Whether an oracle release condition is configured.
+    pub has_oracle_condition: bool,
 }
 
 /// Emitted when funds are refunded to a payer.
@@ -321,6 +443,40 @@ pub struct ReleaseSchedule {
 }
 
 // ──────────────────────────────────────────────────────────────────────
+// Compliance reporting types
+// ──────────────────────────────────────────────────────────────────────
+
+/// Read-only aggregation of an invoice's compliance-relevant state.
+///
+/// Built from data the contract already tracks (invoice status/amounts,
+/// co-signer approval, and dispute records) so off-chain reporting tools
+/// can pull one consistent snapshot per invoice instead of stitching
+/// together several separate queries and events.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ComplianceSnapshot {
+    /// The invoice this snapshot describes.
+    pub invoice_id: u64,
+    /// Current lifecycle status.
+    pub status: EscrowStatus,
+    /// Total amount the invoice requires.
+    pub total_amount: i128,
+    /// Amount deposited so far.
+    pub funded_amount: i128,
+    /// Unix timestamp the invoice was created against as its deadline.
+    pub deadline: u64,
+    /// Reason recorded for the most recent refund, if any.
+    pub refund_reason: OptionalRefundReason,
+    /// Current co-signer approval status, if co-signers are configured.
+    pub approval_status: Option<ApprovalStatus>,
+    /// Current dispute status, if a dispute has ever been raised.
+    pub dispute_status: Option<DisputeStatus>,
+    /// Whether the invoice's creator address is currently blacklisted
+    /// (finalised and upheld) as a payer on this contract.
+    pub creator_blacklisted: bool,
+}
+
+// ──────────────────────────────────────────────────────────────────────
 // Refund grace period types
 // ──────────────────────────────────────────────────────────────────────
 
@@ -343,24 +499,46 @@ pub struct RefundGrace {
 }
 
 // ──────────────────────────────────────────────────────────────────────
-// Dispute lock types (issue #1063)
+// Arbitration / dispute resolution types
 // ──────────────────────────────────────────────────────────────────────
 
-/// Lock placed on an invoice while a dispute is being investigated.
-///
-/// While a lock is active, `deposit`, `release`, `refund`, and
-/// `cancel_invoice` are all blocked (`Error::InvoiceLocked`), so neither
-/// party can change the escrow's state out from under the dispute. Only the
-/// admin (acting as arbitrator) can open or force-resolve a lock.
+/// Outcome an arbiter can impose on a disputed invoice.
 #[contracttype]
-#[derive(Clone, Debug, PartialEq)]
-pub struct DisputeLock {
-    /// Ledger timestamp the dispute was opened.
-    pub locked_at: u64,
-    /// Admin/arbitrator address that opened the lock.
-    pub opened_by: Address,
-    /// Hash of the off-chain dispute reason/evidence.
-    pub reason_hash: BytesN<32>,
+#[derive(Clone, Debug, PartialEq, Eq, Copy)]
+pub enum DisputeOutcome {
+    /// The arbiter overrides the co-signer rejection and forces release
+    /// of the funded amount to the invoice creator.
+    ForceRelease,
+    /// The arbiter upholds the rejection and the payers are refunded.
+    ForceRefund,
+}
+
+/// Lifecycle state of a dispute raised over a co-signer deadlock.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DisputeStatus {
+    /// Awaiting the arbiter's decision.
+    Open,
+    /// The arbiter has issued a binding decision.
+    Resolved(DisputeOutcome),
+}
+
+/// Dispute record attached to an invoice whose co-signers rejected release.
+///
+/// Raised by the creator or any configured co-signer once
+/// [`ApprovalStatus::Rejected`] is reached, and decided by the contract's
+/// single configured arbiter via `arbitrate_dispute`. This gives deadlocked
+/// invoices a deterministic resolution path instead of funds being stuck
+/// until the deadline / refund grace period passes.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Dispute {
+    /// Address that raised the dispute (creator or a co-signer).
+    pub raised_by: Address,
+    /// Unix timestamp at which the dispute was raised.
+    pub raised_at: u64,
+    /// Current status of the dispute.
+    pub status: DisputeStatus,
 }
 
 /// Where an invoice is in its refund grace timeline.
