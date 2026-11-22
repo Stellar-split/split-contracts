@@ -128,6 +128,7 @@ mod webhooks;
 mod insurance_pool;
 mod sustainability;
 mod cooperative;
+mod state_pruning;
 mod education_lockup;
 
 // Issue #1033: Analytics and monitoring for usage tracking and alerts.
