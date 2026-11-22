@@ -17532,10 +17532,38 @@ impl SplitContract {
         webhooks::list_deliveries(&env, webhook_id)
     }
 
+    /// Return the most recent deliveries for a webhook filtered by delivery status.
+    pub fn list_deliveries_by_status(
+        env: Env,
+        webhook_id: u64,
+        status: webhooks::DeliveryStatus,
+    ) -> Vec<webhooks::WebhookDelivery> {
+        webhooks::list_deliveries_by_status(&env, webhook_id, status)
+    }
+
+    /// Return the most recent webhook deliveries for an invoice (oldest first).
+    pub fn list_invoice_deliveries(
+        env: Env,
+        invoice_id: u64,
+    ) -> Vec<webhooks::WebhookDelivery> {
+        webhooks::list_invoice_deliveries(&env, invoice_id)
+    }
+
+    /// Return aggregated delivery tracking statistics for a webhook.
+    pub fn get_webhook_stats(env: Env, webhook_id: u64) -> Option<webhooks::WebhookStats> {
+        webhooks::get_webhook_stats(&env, webhook_id)
+    }
+
     /// Retry a pending delivery once its backoff has elapsed. Callable by anyone.
     pub fn retry_webhook_delivery(env: Env, delivery_id: u64) -> webhooks::DeliveryStatus {
         require_not_paused(&env);
         webhooks::retry(&env, delivery_id)
+    }
+
+    /// Retry all due pending deliveries for a webhook. Callable by anyone.
+    pub fn retry_pending_deliveries(env: Env, webhook_id: u64) -> u32 {
+        require_not_paused(&env);
+        webhooks::retry_pending_deliveries(&env, webhook_id)
     }
 
     /// Report the outcome of an off-chain endpoint delivery. Webhook owner only.
