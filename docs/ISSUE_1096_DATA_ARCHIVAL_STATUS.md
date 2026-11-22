@@ -21,9 +21,18 @@ Events: `invoice_archived`, `invoice_restored`, `archival_policy_updated`, `arch
 
 - Purging is permanent. With `auto_purge` on, a sweep can delete archived invoices that passed the
   retention period, so the policy value should be set with the compliance retention rules in mind.
-- Where the archived copy is stored is documented in
+- Archival is also lazy. `load_invoice` calls `maybe_archive_invoice`, which archives a `Released` or
+  `Refunded` invoice older than `ARCHIVE_AFTER_LEDGERS` (100,000, or the value from
+  `set_archive_after_ledgers`) the next time anything reads it, so a read can write storage. A
+  recently restored invoice is held out of this for `restore_hold_ledgers`.
+- `archive_invoice_storage` moves the invoice records, payment shards and audit log from persistent
+  storage into **instance** storage, and `restore_archived_invoice` moves them back. Instance storage is
+  loaded with the contract on every call and is a single ledger entry with a size limit, so a large
+  number of archived invoices grows what every call reads. ADR 0001 says authoritative per-entity state
+  belongs in persistent storage. The storage layout is described in
   [`../STORAGE_KEY_REGISTRY.md`](../STORAGE_KEY_REGISTRY.md) and
-  [`adr/0001-storage-tiers.md`](./adr/0001-storage-tiers.md).
+  [`adr/0001-storage-tiers.md`](./adr/0001-storage-tiers.md). Whether instance storage is the intended
+  archive tier should be confirmed against that ADR.
 
 ## What this change does
 
