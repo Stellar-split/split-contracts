@@ -136,6 +136,7 @@ mod monitoring;
 
 // Issue #1011: Enhanced emergency pause mechanism.
 pub mod emergency_pause;
+mod invoice_watermark;
 // Issue #1010: Enhanced contract upgrade mechanism with version management.
 pub mod contract_upgrade;
 // Issue #1009: Comprehensive audit logging for compliance.
