@@ -2573,6 +2573,10 @@ fn notify_invoice(
     }
 }
 
+/// Return the audit log of invoice `id`, oldest entry first.
+///
+/// Reads persistent storage first and falls back to instance storage, where an archived
+/// invoice's log is kept. Returns an empty list if nothing was logged.
 pub fn get_audit_log(env: &Env, id: u64) -> Vec<AuditEntry> {
     env.storage()
         .persistent()
@@ -4211,6 +4215,8 @@ impl SplitContract {
             .unwrap_or(0u64)
     }
 
+    /// Set how many ledgers a payment commitment stays valid before `reveal_payment` rejects it
+    /// with `CommitmentExpired`. Operator role or higher. Panics if `ledgers` is `0`.
     pub fn set_commitment_expiry(env: Env, admin: Address, ledgers: u32) {
         require_admin_role(&env, &admin, AdminRole::Operator);
         assert!(ledgers > 0, "commitment expiry must be positive");
@@ -5065,6 +5071,9 @@ impl SplitContract {
         events::trusted_caller_added(&env, &caller);
     }
 
+    /// Remove `caller` from the trusted callers list and emit an event. SuperAdmin only.
+    ///
+    /// Removing an address that is not in the list leaves the list unchanged.
     pub fn remove_trusted_caller(env: Env, admin: Address, caller: Address) {
         require_admin_role(&env, &admin, AdminRole::SuperAdmin);
         let trusted: Vec<Address> = env.storage().instance().get(&trusted_callers_key()).unwrap_or_else(|| Vec::new(&env));
@@ -5076,6 +5085,8 @@ impl SplitContract {
         events::trusted_caller_removed(&env, &caller);
     }
 
+    /// Set how many ledgers must pass after a failed payout before `sweep_unclaimed_funds` may
+    /// sweep it to the treasury. SuperAdmin only.
     pub fn set_sweep_timeout(env: Env, admin: Address, ledgers: u32) {
         require_admin_role(&env, &admin, AdminRole::SuperAdmin);
         env.storage().instance().set(&sweep_timeout_key(), &ledgers);
@@ -5198,6 +5209,9 @@ impl SplitContract {
         Ok(bps as u32)
     }
 
+    /// Return the deadline of the invoice, as a ledger timestamp in seconds.
+    ///
+    /// Panics with `InvoiceNotFound` for an unknown id, so the `None` case is not reached.
     pub fn get_invoice_deadline(env: Env, invoice_id: u64) -> Option<u64> {
         if let Some(core) = env.storage().persistent().get::<_, InvoiceCore>(&invoice_key(invoice_id)) {
             Some(core.deadline)
@@ -5208,6 +5222,9 @@ impl SplitContract {
         }
     }
 
+    /// Return the amount funded so far, reading the hot copy first.
+    ///
+    /// Panics with `InvoiceNotFound` for an unknown id, so the `None` case is not reached.
     pub fn get_invoice_funded(env: Env, invoice_id: u64) -> Option<i128> {
         if let Some(hot) = env.storage().instance().get::<_, InvoiceHot>(&invoice_hot_key(invoice_id)) {
             Some(hot.funded)
@@ -5220,6 +5237,9 @@ impl SplitContract {
         }
     }
 
+    /// Return the invoice status, reading the hot copy first.
+    ///
+    /// Panics with `InvoiceNotFound` for an unknown id, so the `None` case is not reached.
     pub fn get_invoice_status(env: Env, invoice_id: u64) -> Option<InvoiceStatus> {
         if let Some(hot) = env.storage().instance().get::<_, InvoiceHot>(&invoice_hot_key(invoice_id)) {
             Some(hot.status)
@@ -5541,6 +5561,11 @@ impl SplitContract {
             .unwrap_or(Vec::new(&env))
     }
 
+    /// Let `recipient` collect a payout that could not be sent when the invoice was released.
+    ///
+    /// Checks the failed-payout record and the older fallback escrow, pays the larger of the two in
+    /// the invoice's funding token, and clears both. Requires `recipient` auth. Panics with
+    /// `no payout balance to claim` when nothing is owed.
     pub fn claim_fallback(env: Env, recipient: Address, invoice_id: u64) {
         recipient.require_auth();
 
@@ -5587,11 +5612,18 @@ impl SplitContract {
         token_client.transfer(&env.current_contract_address(), &recipient, &amount);
     }
 
+    /// Return the older fallback escrow balance held for `recipient` on the invoice, or `0`.
+    ///
+    /// Failed-payout records are tracked separately and are not included here.
     pub fn get_fallback_balance(env: Env, invoice_id: u64, recipient: Address) -> i128 {
         let key = fallback_escrow_key(invoice_id, &recipient);
         env.storage().persistent().get(&key).unwrap_or(0)
     }
 
+    /// Store an instalment plan for `payer` on the invoice. Requires `payer` auth.
+    ///
+    /// The plan must have at least one tranche, every tranche amount must be positive, and tranche
+    /// ledgers must not decrease. Panics otherwise.
     pub fn register_instalment_plan(
         env: Env,
         payer: Address,
@@ -5614,6 +5646,9 @@ impl SplitContract {
         env.storage().persistent().set(&key, &plan);
     }
 
+    /// Return `(paid tranche index, total tranche count)` for the payer's plan on the invoice.
+    ///
+    /// Returns `(0, 0)` when the payer has no plan.
     pub fn get_instalment_status(env: Env, invoice_id: u64, payer: Address) -> (u32, u32) {
         let key = plan_key(invoice_id, &payer);
         if let Some(plan) = env.storage().persistent().get::<_, InstalmentPlan>(&key) {
@@ -5623,6 +5658,9 @@ impl SplitContract {
         }
     }
 
+    /// Lift the invoice's hold (`held_until`) and emit `escrow_resolved` with `resolution_hash`.
+    ///
+    /// Only the creator or a co-creator may call this. Requires `creator` auth.
     pub fn resolve_escrow(
         env: Env,
         creator: Address,
@@ -5640,6 +5678,10 @@ impl SplitContract {
         events::escrow_resolved(&env, invoice_id, &resolution_hash);
     }
 
+    /// Set the tiered fee brackets used by `compute_fee`. Admin only.
+    ///
+    /// Panics unless the list is non-empty, every `rate_bps` is at most `10_000`, `max_amount` strictly
+    /// increases, and the last bracket's `max_amount` is `i128::MAX`.
     pub fn set_fee_brackets(env: Env, admin: Address, brackets: Vec<FeeBracket>) {
         let _admin_addr = require_admin(&env);
         let _ = admin;
@@ -5663,6 +5705,10 @@ impl SplitContract {
         env.storage().instance().set(&fee_brackets_key(), &brackets);
     }
 
+    /// Compute the platform fee on `amount` from the fee brackets.
+    ///
+    /// Each slice of the amount is charged at the rate of the bracket it falls in. With no brackets
+    /// set, one flat bracket at the platform fee rate applies. Returns `0` for a non-positive amount.
     pub fn compute_fee(env: Env, amount: i128) -> i128 {
         if amount <= 0 {
             return 0;
@@ -7034,6 +7080,10 @@ impl SplitContract {
             .set(&rate_usage_key(creator), &usage);
     }
 
+    /// Create up to five invoices for `creator` in one call and return their ids in order.
+    ///
+    /// Requires `creator` auth and applies the creation rate limit to each invoice. Panics with
+    /// `batch limit exceeded` for more than five.
     pub fn create_batch(
         env: Env,
         creator: Address,
@@ -7772,6 +7822,10 @@ impl SplitContract {
     // Payment Channel (Issue #1)
     // -----------------------------------------------------------------------
 
+    /// Open a payment channel for `payer` on a pending, undisputed invoice.
+    ///
+    /// Moves `deposit` from the payer into the contract and records it as the channel balance.
+    /// Requires `payer` auth. Panics if `deposit` is not positive.
     pub fn open_channel(env: Env, payer: Address, invoice_id: u64, deposit: i128) {
         require_not_paused(&env);
         payer.require_auth();
@@ -7794,6 +7848,10 @@ impl SplitContract {
             .set(&channel_key(invoice_id, &payer), &state);
     }
 
+    /// Draw `amount` from the payer's channel balance.
+    ///
+    /// Only the channel balance changes. The drawn amount is applied to the invoice when the channel
+    /// is closed with `close_channel`. Panics if there is no channel or the balance is too low.
     pub fn channel_pay(env: Env, payer: Address, invoice_id: u64, amount: i128) {
         require_not_paused(&env);
         payer.require_auth();
@@ -7812,6 +7870,11 @@ impl SplitContract {
             .set(&channel_key(invoice_id, &payer), &state);
     }
 
+    /// Close the payer's channel and apply what was drawn to the invoice.
+    ///
+    /// The amount drawn is the deposit minus the remaining balance. If it is positive, the invoice
+    /// must be pending and undisputed, and the amount is recorded as a payment from `payer`.
+    /// Requires `payer` auth. Panics if there is no channel.
     pub fn close_channel(env: Env, payer: Address, invoice_id: u64) {
         require_not_paused(&env);
         payer.require_auth();
@@ -8088,6 +8151,11 @@ impl SplitContract {
         }
     }
 
+    /// First step of a commit-reveal payment: store `commitment_hash` for `payer` on the invoice.
+    ///
+    /// Requires `payer` auth. Panics with `ActiveCommitmentExists` if the payer already has a
+    /// commitment on this invoice. Pay with `reveal_payment` before the commitment expires, see
+    /// `set_commitment_expiry`.
     pub fn commit_payment(env: Env, payer: Address, invoice_id: u64, commitment_hash: BytesN<32>) {
         require_fn_not_paused(&env, &symbol_short!("pay"));
         payer.require_auth();
@@ -8118,6 +8186,11 @@ impl SplitContract {
         events::payment_committed(&env, invoice_id, &payer, commitment.commit_ledger);
     }
 
+    /// Second step of a commit-reveal payment: reveal `amount` and `salt` and pay.
+    ///
+    /// Panics with `CommitmentExpired` if the commitment is too old and with `CommitmentMismatch` if
+    /// the hash of the revealed values differs from the stored one. On success the commitment is
+    /// removed and the payment goes through the normal payment path. Requires `payer` auth.
     pub fn reveal_payment(
         env: Env,
         payer: Address,
@@ -10870,6 +10943,10 @@ impl SplitContract {
         events::recipient_paid(&env, invoice_id, &recipient, payout);
     }
 
+    /// Pay `recipient` the pending amount that was not sent when the invoice was released.
+    ///
+    /// Requires `recipient` auth. Panics unless the invoice is `Released` and a pending payout exists.
+    /// Transfers in the recipient's token, clears the pending record and emits an event.
     pub fn claim_pending_payout(env: Env, invoice_id: u64, recipient: Address) {
         recipient.require_auth();
 
@@ -10902,6 +10979,11 @@ impl SplitContract {
         events::pending_payout_claimed(&env, invoice_id, &recipient, pending);
     }
 
+    /// Let `payer` claim their share of the invoice's overfunded surplus.
+    ///
+    /// The share is the surplus times the payer's contribution divided by all contributions. Each
+    /// payer can claim once. Requires `payer` auth. Panics if there is no surplus, the payer has
+    /// no contributions, or the surplus was already claimed.
     pub fn claim_surplus(env: Env, invoice_id: u64, payer: Address) {
         require_not_paused(&env);
         payer.require_auth();
@@ -12881,6 +12963,10 @@ impl SplitContract {
         events::payer_refunded(&env, old_invoice_id, &payer, amount);
     }
 
+    /// Rate a released invoice from `1` to `5` as one of its payers.
+    ///
+    /// Requires `payer` auth. Each payer can rate an invoice once. Updates the invoice's rating
+    /// totals and the creator's rating totals, and emits an event.
     pub fn rate_invoice(env: Env, payer: Address, invoice_id: u64, score: u32) {
         require_not_paused(&env);
         payer.require_auth();
@@ -14051,11 +14137,13 @@ impl SplitContract {
     // Read-only
     // -----------------------------------------------------------------------
 
+    /// Return the core record of the invoice. Panics if the invoice is not found.
     pub fn get_invoice(env: Env, invoice_id: u64) -> InvoiceCore {
         let inv = load_invoice(&env, invoice_id);
         inv.split().0
     }
 
+    /// Return `true` if the invoice has an archive marker.
     pub fn is_archived(env: Env, invoice_id: u64) -> bool {
         env.storage()
             .instance()
@@ -14066,16 +14154,20 @@ impl SplitContract {
                 .has(&archive_marker_key(invoice_id))
     }
 
+    /// Return the extension record of the invoice (co-signers, approval and oracle condition).
     pub fn get_invoice_ext(env: Env, invoice_id: u64) -> InvoiceExt {
         let inv = load_invoice(&env, invoice_id);
         inv.split().1
     }
 
+    /// Return the second extension record of the invoice (notification contract, overflow behaviour,
+    /// arbiter, dispute and auction fields, and minimum amounts).
     pub fn get_invoice_ext2(env: Env, invoice_id: u64) -> InvoiceExt2 {
         let inv = load_invoice(&env, invoice_id);
         inv.split().2
     }
 
+    /// Return the audit log of the invoice, oldest entry first.
     pub fn get_audit_log(env: Env, invoice_id: u64) -> Vec<AuditEntry> {
         get_audit_log(&env, invoice_id)
     }
@@ -14126,6 +14218,10 @@ impl SplitContract {
             .sum()
     }
 
+    /// Return the time-weighted average funded amount since the invoice was created.
+    ///
+    /// Computed as the accumulated numerator divided by the ledgers elapsed since creation.
+    /// Returns `0` while no payment has been recorded.
     pub fn get_twafr(env: Env, invoice_id: u64) -> i128 {
         let invoice = load_invoice(&env, invoice_id);
         // Payments live in sharded storage (issue #177), so `invoice.payments`
@@ -14146,6 +14242,7 @@ impl SplitContract {
         invoice.twafr_numerator / elapsed
     }
 
+    /// Return `(sum of scores, number of ratings)` for the invoice.
     pub fn get_invoice_rating(env: Env, invoice_id: u64) -> (u32, u32) {
         (
             env.storage()
@@ -14262,6 +14359,7 @@ impl SplitContract {
         Ok(phase)
     }
 
+    /// Return `(sum of scores, number of ratings)` across all of `creator`'s rated invoices.
     pub fn get_creator_rating(env: Env, creator: Address) -> (u32, u32) {
         env.storage()
             .persistent()
@@ -15077,6 +15175,10 @@ impl SplitContract {
         active
     }
 
+    /// Issue the payment certificate for a released invoice, or return the one already issued.
+    ///
+    /// The certificate hash is SHA-256 over the invoice id, the total and the release timestamp.
+    /// Panics if the invoice is not released.
     pub fn issue_certificate(env: Env, invoice_id: u64) -> PaymentCertificate {
         let invoice = load_invoice(&env, invoice_id);
         assert!(
@@ -15120,6 +15222,7 @@ impl SplitContract {
         cert
     }
 
+    /// Return the stored payment certificate. Panics with `certificate not found` if none was issued.
     pub fn get_certificate(env: Env, invoice_id: u64) -> PaymentCertificate {
         env.storage()
             .persistent()
