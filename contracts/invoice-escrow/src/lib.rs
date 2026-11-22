@@ -72,6 +72,11 @@ fn default_grace_key() -> Symbol {
     symbol_short!("grace_def")
 }
 
+/// Instance storage: contract-wide payment analytics (see [`GlobalStats`]).
+fn global_stats_key() -> Symbol {
+    symbol_short!("g_stats")
+}
+
 /// Persistent storage: per-invoice record keyed by `(escrow, id)`.
 fn invoice_key(id: u64) -> (Symbol, u64) {
     (symbol_short!("escrow"), id)
@@ -404,6 +409,11 @@ fn execute_release(env: &Env, id: u64, invoice: &mut EscrowInvoice) -> (Address,
     token_client.transfer(&env.current_contract_address(), &creator, &total);
     emit_released(env, id, total);
 
+    let mut stats = get_global_stats(env);
+    stats.invoices_released = stats.invoices_released.saturating_add(1);
+    stats.total_released_volume = stats.total_released_volume.saturating_add(total);
+    save_global_stats(env, &stats);
+
     if let Some(mut schedule) = get_schedule(env, id) {
         if schedule.status == ScheduleStatus::Scheduled {
             schedule.status = ScheduleStatus::Executed;
@@ -576,6 +586,18 @@ fn emit_grace_changed(env: &Env, action: Symbol, id: u64, grace: &RefundGrace) {
     env.events().publish(
         (symbol_short!("escrow"), action, id),
         (grace.grace_secs, grace.extension_secs, grace.waived),
+    );
+}
+
+/// Topics: `(escrow, cancelled, id)` — Data: `(admin, ledger)`
+///
+/// Added so an off-chain indexer relaying webhook notifications can observe
+/// the `Cancelled` terminal transition; previously `cancel_invoice` made no
+/// state-change event available for this transition.
+fn emit_invoice_cancelled(env: &Env, id: u64, admin: &Address) {
+    env.events().publish(
+        (symbol_short!("escrow"), symbol_short!("cancelled"), id),
+        (admin.clone(), env.ledger().sequence()),
     );
 }
 
@@ -810,8 +832,13 @@ impl InvoiceEscrowContract {
             deadline,
             status: EscrowStatus::Pending,
             refund_reason: OptionalRefundReason::None,
+            revision: 0,
         };
         save_invoice(&env, id, &invoice);
+
+        let mut stats = get_global_stats(&env);
+        stats.invoices_created = stats.invoices_created.saturating_add(1);
+        save_global_stats(&env, &stats);
 
         // Snapshot the current default grace period so later changes to the
         // default never alter the terms of an existing invoice.
@@ -1014,6 +1041,7 @@ impl InvoiceEscrowContract {
 
         // --- Mutations begin here. ---
         let token_client = token::Client::new(&env, &invoice.token);
+        let mut total_refunded: i128 = 0;
         for payer in payers.iter() {
             let amount: i128 = env
                 .storage()
@@ -1026,12 +1054,19 @@ impl InvoiceEscrowContract {
                     .remove(&deposit_key(invoice_id, &payer));
                 token_client.transfer(&env.current_contract_address(), &payer, &amount);
                 emit_refunded(&env, invoice_id, &payer, amount, &reason);
+                total_refunded = total_refunded.saturating_add(amount);
             }
         }
 
         invoice.status = EscrowStatus::Refunded;
         invoice.refund_reason = OptionalRefundReason::Some(reason);
         save_invoice(&env, invoice_id, &invoice);
+
+        let mut stats = get_global_stats(&env);
+        stats.invoices_refunded = stats.invoices_refunded.saturating_add(1);
+        stats.total_refunded_volume = stats.total_refunded_volume.saturating_add(total_refunded);
+        save_global_stats(&env, &stats);
+
         Ok(())
     }
 
@@ -1053,7 +1088,7 @@ impl InvoiceEscrowContract {
         if !env.storage().instance().has(&admin_key()) {
             return Err(Error::NotInitialized);
         }
-        require_admin(&env);
+        let admin = require_admin(&env);
         let mut invoice = get_invoice(&env, invoice_id)?;
 
         // --- Validate all preconditions before any mutation. ---
@@ -1067,6 +1102,12 @@ impl InvoiceEscrowContract {
         // --- Mutations begin here. ---
         invoice.status = EscrowStatus::Cancelled;
         save_invoice(&env, invoice_id, &invoice);
+
+        let mut stats = get_global_stats(&env);
+        stats.invoices_cancelled = stats.invoices_cancelled.saturating_add(1);
+        save_global_stats(&env, &stats);
+
+        emit_invoice_cancelled(&env, invoice_id, &admin);
         Ok(())
     }
 
@@ -1099,7 +1140,7 @@ impl InvoiceEscrowContract {
         signers: Vec<Address>,
         threshold: u32,
     ) -> Result<(), Error> {
-        let invoice = get_invoice(&env, invoice_id)?;
+        let mut invoice = get_invoice(&env, invoice_id)?;
         invoice.creator.require_auth();
         if !is_open(&invoice) {
             return Err(Error::InvalidStatus);
@@ -1134,6 +1175,7 @@ impl InvoiceEscrowContract {
         };
         save_approval(&env, invoice_id, &approval);
         emit_cosigners_set(&env, invoice_id, &signers, threshold);
+        bump_revision(&env, invoice_id, &mut invoice, symbol_short!("cosigners"));
         Ok(())
     }
 
@@ -1390,7 +1432,7 @@ impl InvoiceEscrowContract {
     /// * [`Error::InvalidOracleConfig`] — Non-positive threshold, zero
     ///   staleness window, or fallback equal to the primary oracle.
     pub fn set_oracle_condition(env: Env, invoice_id: u64, condition: OracleCondition) -> Result<(), Error> {
-        let invoice = get_invoice(&env, invoice_id)?;
+        let mut invoice = get_invoice(&env, invoice_id)?;
         invoice.creator.require_auth();
         if invoice.status != EscrowStatus::Pending {
             return Err(Error::InvalidStatus);
@@ -1406,6 +1448,7 @@ impl InvoiceEscrowContract {
             .persistent()
             .set(&oracle_cond_key(invoice_id), &condition);
         emit_oracle_condition_set(&env, invoice_id, &condition);
+        bump_revision(&env, invoice_id, &mut invoice, symbol_short!("orc_set"));
         Ok(())
     }
 
@@ -1428,7 +1471,7 @@ impl InvoiceEscrowContract {
             return Err(Error::NotInitialized);
         }
         let admin = require_admin(&env);
-        let invoice = get_invoice(&env, invoice_id)?;
+        let mut invoice = get_invoice(&env, invoice_id)?;
         if !is_open(&invoice) {
             return Err(Error::InvalidStatus);
         }
@@ -1439,6 +1482,7 @@ impl InvoiceEscrowContract {
         env.storage().persistent().remove(&oracle_cond_key(invoice_id));
         env.storage().persistent().remove(&oracle_read_key(invoice_id));
         emit_oracle_condition_cleared(&env, invoice_id, &admin);
+        bump_revision(&env, invoice_id, &mut invoice, symbol_short!("orc_clear"));
         Ok(())
     }
 
@@ -1492,7 +1536,7 @@ impl InvoiceEscrowContract {
         release_at: u64,
         min_ledgers: u32,
     ) -> Result<ReleaseSchedule, Error> {
-        let invoice = get_invoice(&env, invoice_id)?;
+        let mut invoice = get_invoice(&env, invoice_id)?;
         invoice.creator.require_auth();
         if !is_open(&invoice) {
             return Err(Error::InvalidStatus);
@@ -1514,6 +1558,7 @@ impl InvoiceEscrowContract {
         };
         save_schedule(&env, invoice_id, &schedule);
         emit_schedule_set(&env, invoice_id, &schedule);
+        bump_revision(&env, invoice_id, &mut invoice, symbol_short!("sched_set"));
         Ok(schedule)
     }
 
@@ -1529,7 +1574,7 @@ impl InvoiceEscrowContract {
     /// * [`Error::InvalidStatus`]    — Invoice is no longer open.
     /// * [`Error::ScheduleNotFound`] — No active schedule.
     pub fn cancel_release_schedule(env: Env, invoice_id: u64) -> Result<(), Error> {
-        let invoice = get_invoice(&env, invoice_id)?;
+        let mut invoice = get_invoice(&env, invoice_id)?;
         invoice.creator.require_auth();
         if !is_open(&invoice) {
             return Err(Error::InvalidStatus);
@@ -1543,6 +1588,7 @@ impl InvoiceEscrowContract {
             .persistent()
             .set(&schedule_key(invoice_id), &schedule);
         emit_schedule_cancelled(&env, invoice_id);
+        bump_revision(&env, invoice_id, &mut invoice, symbol_short!("sched_cnl"));
         Ok(())
     }
 
@@ -2101,6 +2147,47 @@ impl InvoiceEscrowContract {
     }
 
     /// Return `true` if the payer is blacklisted with a finalised and upheld entry.
+    // -----------------------------------------------------------------------
+    // Analytics & compliance reporting
+    // -----------------------------------------------------------------------
+
+    /// Return contract-wide payment analytics: counts and volume for
+    /// created, released, refunded and cancelled invoices, derived purely
+    /// from state the contract already tracks as invoices move through
+    /// their lifecycle. Intended for off-chain dashboards / trend reports.
+    pub fn get_global_stats(env: Env) -> GlobalStats {
+        get_global_stats(&env)
+    }
+
+    /// Build a read-only compliance/audit snapshot for a single invoice,
+    /// aggregating its core record, configuration revision, co-signer
+    /// approval status, release schedule status and oracle condition
+    /// presence into one call for regulatory/audit reporting tools.
+    ///
+    /// # Errors
+    /// * [`Error::InvoiceNotFound`] — Unknown invoice ID.
+    pub fn get_invoice_audit_report(env: Env, invoice_id: u64) -> Result<InvoiceAuditReport, Error> {
+        let invoice = get_invoice(&env, invoice_id)?;
+        let approval_status = get_approval(&env, invoice_id).map(|a| a.status);
+        let schedule_status = get_schedule(&env, invoice_id).map(|s| s.status);
+        let has_oracle_condition = get_oracle_condition(&env, invoice_id).is_some();
+
+        Ok(InvoiceAuditReport {
+            invoice_id,
+            status: invoice.status,
+            creator: invoice.creator,
+            token: invoice.token,
+            total_amount: invoice.total_amount,
+            funded_amount: invoice.funded_amount,
+            deadline: invoice.deadline,
+            refund_reason: invoice.refund_reason,
+            revision: invoice.revision,
+            approval_status,
+            schedule_status,
+            has_oracle_condition,
+        })
+    }
+
     pub fn is_payer_blacklisted(env: Env, payer: Address) -> bool {
         env.storage()
             .persistent()

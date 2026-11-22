@@ -63,6 +63,95 @@ pub struct EscrowInvoice {
     pub status: EscrowStatus,
     /// Reason recorded for the most recent refund, if any.
     pub refund_reason: OptionalRefundReason,
+    /// Monotonic revision counter for this invoice's mutable configuration
+    /// (co-signer set, oracle condition, release schedule). Starts at `0`
+    /// when the invoice is created and increments by one each time one of
+    /// those configurations is set, replaced or cleared, so off-chain
+    /// consumers can detect and order configuration changes without
+    /// diffing full invoice snapshots.
+    pub revision: u32,
+}
+
+/// Emitted when an invoice's mutable configuration changes (co-signers,
+/// oracle condition, or release schedule), bumping its `revision`.
+///
+/// Event topics: `(escrow, revised, id)`
+/// Event data: `(revision, change)`
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct InvoiceRevisedEvent {
+    /// The invoice's new revision number after this change.
+    pub revision: u32,
+    /// Short tag identifying which configuration changed, e.g.
+    /// `cosigners`, `orc_set`, `orc_clear`, `sched_set` or `sched_cnl`.
+    pub change: soroban_sdk::Symbol,
+}
+
+/// Emitted when the admin cancels an invoice before release, so off-chain
+/// indexers relaying webhooks can observe this terminal state transition.
+///
+/// Event topics: `(escrow, cancelled, id)`
+/// Event data: `(admin, ledger)`
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct InvoiceCancelledEvent {
+    /// The admin who cancelled the invoice.
+    pub admin: Address,
+    /// Ledger sequence at which cancellation occurred.
+    pub ledger: u32,
+}
+
+/// Contract-wide payment analytics, updated as invoices move through their
+/// lifecycle. Intended for a read-only analytics/dashboard query
+/// (`get_global_stats`) summarising payment volume and trends; all fields
+/// are derived purely from state this contract already tracks.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct GlobalStats {
+    /// Total number of invoices ever created.
+    pub invoices_created: u64,
+    /// Total number of invoices that reached `Released`.
+    pub invoices_released: u64,
+    /// Total number of invoices that reached `Refunded`.
+    pub invoices_refunded: u64,
+    /// Total number of invoices that reached `Cancelled`.
+    pub invoices_cancelled: u64,
+    /// Sum of `total_amount` transferred to creators across all releases.
+    pub total_released_volume: i128,
+    /// Sum of amounts returned to payers across all refunds.
+    pub total_refunded_volume: i128,
+}
+
+/// Read-only compliance/audit snapshot for a single invoice, aggregating
+/// state already stored by the contract into one call so off-chain
+/// reporting tools don't need to issue separate queries per sub-record.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct InvoiceAuditReport {
+    /// The invoice ID this report covers.
+    pub invoice_id: u64,
+    /// Current lifecycle status.
+    pub status: EscrowStatus,
+    /// Address that created the invoice.
+    pub creator: Address,
+    /// Token contract used for funding.
+    pub token: Address,
+    /// Total amount required to fully fund the invoice.
+    pub total_amount: i128,
+    /// Amount deposited so far.
+    pub funded_amount: i128,
+    /// Unix timestamp after which refunds are permitted if not fully funded.
+    pub deadline: u64,
+    /// Reason recorded for the most recent refund, if any.
+    pub refund_reason: OptionalRefundReason,
+    /// Current configuration revision (see [`EscrowInvoice::revision`]).
+    pub revision: u32,
+    /// Co-signer approval status, if co-signers are configured.
+    pub approval_status: Option<ApprovalStatus>,
+    /// Release schedule status, if a schedule is configured.
+    pub schedule_status: Option<ScheduleStatus>,
+    /// Whether an oracle release condition is configured.
+    pub has_oracle_condition: bool,
 }
 
 /// Emitted when funds are refunded to a payer.
