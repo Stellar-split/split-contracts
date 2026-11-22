@@ -88,6 +88,7 @@ pub mod payment_tracking;
 pub mod velocity;
 pub mod split_rules;
 pub mod pool;
+mod batch_verify;
 pub mod compression;
 pub mod aggregation;
 
