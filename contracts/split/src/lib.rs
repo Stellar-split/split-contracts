@@ -117,6 +117,7 @@ mod boundary_tests;
 
 #[cfg(test)]
 mod storage_snapshot;
+mod multi_currency_invoice;
 
 mod storage;
 mod storage_keys;
