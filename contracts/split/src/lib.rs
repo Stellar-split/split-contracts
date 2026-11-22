@@ -86,6 +86,7 @@ mod stats;
 pub mod security_audit;
 pub mod payment_tracking;
 pub mod velocity;
+mod invoice_compliance_checklist;
 pub mod split_rules;
 pub mod pool;
 pub mod compression;
