@@ -121,6 +121,7 @@ mod storage;
 mod storage_keys;
 
 mod migrations;
+mod hw_wallet_registry;
 mod webhooks;
 
 mod insurance_pool;
