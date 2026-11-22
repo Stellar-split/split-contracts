@@ -92,6 +92,11 @@ fn blacklist_key(payer: &Address) -> (Symbol, Address) {
     (symbol_short!("blacklist"), payer.clone())
 }
 
+/// Persistent storage: active dispute lock for an invoice (issue #1063).
+fn dispute_lock_key(id: u64) -> (Symbol, u64) {
+    (symbol_short!("disp_lck"), id)
+}
+
 /// Persistent storage: co-signer approval record for an invoice.
 fn approval_key(id: u64) -> (Symbol, u64) {
     (symbol_short!("approval"), id)
@@ -161,6 +166,21 @@ fn require_admin(env: &Env) -> Address {
         .expect("not initialized");
     admin.require_auth();
     admin
+}
+
+/// Issue #1063: Fails with `Error::InvoiceLocked` while a dispute lock is
+/// active on `invoice_id`. Called before any mutation in `deposit`,
+/// `release`, `refund`, and `cancel_invoice` so a disputed invoice cannot be
+/// changed by any party while it is under investigation.
+fn require_not_disputed(env: &Env, invoice_id: u64) -> Result<(), Error> {
+    if env
+        .storage()
+        .persistent()
+        .has(&dispute_lock_key(invoice_id))
+    {
+        return Err(Error::InvoiceLocked);
+    }
+    Ok(())
 }
 
 /// Validates that a deadline is in the future and not too far away.
@@ -996,6 +1016,7 @@ impl InvoiceEscrowContract {
         let mut invoice = get_invoice(&env, invoice_id)?;
 
         // --- Validate all preconditions before any mutation. ---
+        require_not_disputed(&env, invoice_id)?;
         if invoice.status != EscrowStatus::Pending && invoice.status != EscrowStatus::Active {
             return Err(Error::InvalidStatus);
         }
@@ -1066,6 +1087,7 @@ impl InvoiceEscrowContract {
         let mut invoice = get_invoice(&env, invoice_id)?;
 
         // --- Validate all preconditions before any mutation. ---
+        require_not_disputed(&env, invoice_id)?;
         if invoice.status == EscrowStatus::Released
             || invoice.status == EscrowStatus::Refunded
             || invoice.status == EscrowStatus::Cancelled
@@ -1119,6 +1141,7 @@ impl InvoiceEscrowContract {
         let mut invoice = get_invoice(&env, invoice_id)?;
 
         // --- Validate all preconditions before any mutation. ---
+        require_not_disputed(&env, invoice_id)?;
         if invoice.status == EscrowStatus::Released
             || invoice.status == EscrowStatus::Refunded
             || invoice.status == EscrowStatus::Cancelled
@@ -1186,6 +1209,7 @@ impl InvoiceEscrowContract {
         let mut invoice = get_invoice(&env, invoice_id)?;
 
         // --- Validate all preconditions before any mutation. ---
+        require_not_disputed(&env, invoice_id)?;
         if invoice.status == EscrowStatus::Released
             || invoice.status == EscrowStatus::Refunded
             || invoice.status == EscrowStatus::Cancelled
@@ -1203,6 +1227,93 @@ impl InvoiceEscrowContract {
 
         emit_invoice_cancelled(&env, invoice_id, &admin);
         Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Dispute lock (issue #1063)
+    // -----------------------------------------------------------------------
+
+    /// Lock an invoice for an active dispute. Admin-only (acting as
+    /// arbitrator). While locked, `deposit`, `release`, `refund`, and
+    /// `cancel_invoice` all fail with [`Error::InvoiceLocked`], so neither
+    /// the creator nor payers can change the invoice's state while it is
+    /// under investigation. `reason_hash` lets the admin attach an off-chain
+    /// dispute record without exposing it on-chain.
+    ///
+    /// # Errors
+    /// * [`Error::NotAdmin`]        — Caller is not the admin.
+    /// * [`Error::InvoiceNotFound`] — Unknown invoice ID.
+    /// * [`Error::InvalidStatus`]   — Invoice already released/refunded/cancelled.
+    /// * [`Error::AlreadyDisputed`] — A lock is already active for this invoice.
+    pub fn open_dispute(env: Env, invoice_id: u64, reason_hash: BytesN<32>) -> Result<(), Error> {
+        let admin = require_admin(&env);
+        let invoice = get_invoice(&env, invoice_id)?;
+        if invoice.status == EscrowStatus::Released
+            || invoice.status == EscrowStatus::Refunded
+            || invoice.status == EscrowStatus::Cancelled
+        {
+            return Err(Error::InvalidStatus);
+        }
+        if env
+            .storage()
+            .persistent()
+            .has(&dispute_lock_key(invoice_id))
+        {
+            return Err(Error::AlreadyDisputed);
+        }
+
+        let lock = DisputeLock {
+            locked_at: env.ledger().timestamp(),
+            opened_by: admin,
+            reason_hash,
+        };
+        env.storage()
+            .persistent()
+            .set(&dispute_lock_key(invoice_id), &lock);
+        env.events().publish(
+            (symbol_short!("escrow"), symbol_short!("disp_open")),
+            (invoice_id, lock.opened_by.clone(), lock.locked_at),
+        );
+        Ok(())
+    }
+
+    /// Force-unlock a disputed invoice. Admin-only (acting as arbitrator).
+    /// Resolution does not itself change the invoice's status or move
+    /// funds — the admin follows up with `release`, `refund`, or
+    /// `cancel_invoice` as appropriate once the dispute outcome is decided.
+    ///
+    /// # Errors
+    /// * [`Error::NotAdmin`]     — Caller is not the admin.
+    /// * [`Error::NotDisputed`]  — No active dispute lock exists for this invoice.
+    pub fn resolve_dispute(env: Env, invoice_id: u64) -> Result<(), Error> {
+        require_admin(&env);
+        if !env
+            .storage()
+            .persistent()
+            .has(&dispute_lock_key(invoice_id))
+        {
+            return Err(Error::NotDisputed);
+        }
+        env.storage()
+            .persistent()
+            .remove(&dispute_lock_key(invoice_id));
+        env.events().publish(
+            (symbol_short!("escrow"), symbol_short!("disp_rslv")),
+            (invoice_id, env.ledger().timestamp()),
+        );
+        Ok(())
+    }
+
+    /// The active dispute lock for an invoice, if any.
+    pub fn get_dispute_lock(env: Env, invoice_id: u64) -> Option<DisputeLock> {
+        env.storage().persistent().get(&dispute_lock_key(invoice_id))
+    }
+
+    /// Whether an invoice currently has an active dispute lock.
+    pub fn is_disputed(env: Env, invoice_id: u64) -> bool {
+        env.storage()
+            .persistent()
+            .has(&dispute_lock_key(invoice_id))
     }
 
     // -----------------------------------------------------------------------

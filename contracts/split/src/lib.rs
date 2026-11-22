@@ -1655,13 +1655,27 @@ fn update_creator_stats_on_creation(env: &Env, creator: &Address) {
     env.storage().persistent().set(&count_key, &(count + 1));
 }
 
-/// Issue #299: Update creator stats on payment received.
-fn update_creator_stats_on_payment(env: &Env, creator: &Address, amount: i128) {
+/// Issue #299 / #1064: Update creator stats on payment received.
+///
+/// `amount` is a raw amount in `funding_token`'s own smallest unit. Issue
+/// #1064 (multi-token invoices) means two payments of equal "amount" can
+/// represent very different real value once tokens have different decimal
+/// counts (e.g. 6-decimal USDC vs 7-decimal XLM vs an 18-decimal token) —
+/// `math::normalize_amount` already existed to convert a raw amount to the
+/// canonical 7-decimal scale but was never actually called anywhere, so
+/// lifetime creator volume (and therefore every volume-based fee tier
+/// decision, issue #1065/#919) silently mixed incompatible units whenever a
+/// creator was paid in more than one token. Normalise before accumulating so
+/// volume — and the fee tier it drives — is accurate across tokens.
+fn update_creator_stats_on_payment(env: &Env, creator: &Address, funding_token: &Address, amount: i128) {
+    let decimals = token::Client::new(env, funding_token).decimals();
+    let normalized = math::normalize_amount(amount, decimals).unwrap_or(amount);
     let volume_key = creator_stats_volume_key(creator);
     let volume: u64 = env.storage().persistent().get(&volume_key).unwrap_or(0u64);
     env.storage()
         .persistent()
-        .set(&volume_key, &(volume + amount as u64));
+        .set(&volume_key, &(volume + normalized as u64));
+    SplitContract::sync_creator_fee_tier(env.clone(), creator.clone());
 }
 
 /// Issue #299: Update creator stats on release.
@@ -8695,7 +8709,7 @@ impl SplitContract {
             );
         }
         check_and_emit_funding_checkpoints(env, invoice_id, invoice.funded, total);
-        update_creator_stats_on_payment(env, &invoice.creator, credited_amount);
+        update_creator_stats_on_payment(env, &invoice.creator, &funding_token_for(&invoice), credited_amount);
         update_creator_payers(env, &invoice.creator, payer);
         notify_invoice(
             env,
@@ -15992,7 +16006,7 @@ impl SplitContract {
         check_and_emit_funding_checkpoints(&env, invoice_id, invoice.funded, total);
         Self::record_invoice_rate_limit(&env, invoice_id, &on_behalf_of);
         append_audit_entry(&env, invoice_id, symbol_short!("dlgt_pay"), &executor);
-        update_creator_stats_on_payment(&env, &invoice.creator, amount);
+        update_creator_stats_on_payment(&env, &invoice.creator, &funding_token_for(&invoice), amount);
 
         if invoice.funded >= total {
             let in_group = env
