@@ -120,6 +120,7 @@ mod storage_snapshot;
 
 mod storage;
 mod storage_keys;
+mod consensus_validation;
 
 mod migrations;
 mod hw_wallet_registry;
