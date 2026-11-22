@@ -43,6 +43,39 @@ pub enum EscrowStatus {
     Refunded,
     /// Admin explicitly cancelled the invoice before release.
     Cancelled,
+    /// A stakeholder has raised a dispute; deposits/release are frozen
+    /// pending admin arbitration or automatic timeout resolution.
+    Disputed,
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Dispute resolution automation
+// ──────────────────────────────────────────────────────────────────────
+
+/// Record of an active (or most recently resolved) dispute on an invoice.
+///
+/// Created by [`crate::InvoiceEscrowContract::raise_dispute`]. The admin may
+/// arbitrate manually at any time via
+/// [`crate::InvoiceEscrowContract::arbitrate_dispute`]. If the admin does not
+/// act within `timeout_secs` of `raised_at`, anyone may call
+/// [`crate::InvoiceEscrowContract::auto_resolve_dispute`] to automatically
+/// refund depositors — protecting the disputing party from an unresponsive
+/// creator/admin by default.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct DisputeRecord {
+    /// The invoice this dispute belongs to.
+    pub invoice_id: u64,
+    /// Address that raised the dispute (must have a deposit on the invoice).
+    pub raised_by: Address,
+    /// Commitment hash of the dispute reason/evidence (revealed off-chain).
+    pub reason_hash: BytesN<32>,
+    /// Unix timestamp the dispute was raised at.
+    pub raised_at: u64,
+    /// Seconds after `raised_at` before automatic resolution becomes callable.
+    pub timeout_secs: u64,
+    /// Whether the dispute has already been resolved (manually or automatically).
+    pub resolved: bool,
 }
 
 /// Core escrow invoice record.

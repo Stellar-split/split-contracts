@@ -404,6 +404,18 @@ fn get_payment_close_at_internal(env: &Env, id: u64) -> Option<u64> {
     env.storage().persistent().get(&payment_close_at_key(id))
 }
 
+/// Invoice collaboration workspace: pending change proposal for an invoice
+/// awaiting unanimous creator/co-creator sign-off — persistent storage.
+fn change_proposal_key(id: u64) -> (Symbol, u64) {
+    (symbol_short!("chg_prop"), id)
+}
+
+/// Smart split rules: history of previously-active `split_rules` configs for
+/// an invoice, appended to whenever the creator adjusts the rules before any
+/// contribution is recorded — persistent storage.
+fn split_rule_history_key(id: u64) -> (Symbol, u64) {
+    (symbol_short!("splt_hst"), id)
+}
 /// Issue #332: contiguous Vec<Address> of all recipients — persistent storage.
 fn recipients_list_key(id: u64) -> (Symbol, u64) {
     (symbol_short!("rec_lst"), id)
@@ -4412,6 +4424,177 @@ impl SplitContract {
         save_invoice(&env, invoice_id, &invoice);
         events::co_creator_removed(&env, invoice_id, &caller, &co_creator);
         append_audit_entry(&env, invoice_id, symbol_short!("rem_co_cr"), &caller);
+    }
+
+    /// Invoice collaboration workspace: propose a change to an invoice's
+    /// deadline and/or off-chain metadata hash. Only the primary creator or
+    /// a listed co-creator may propose, and only while the invoice is still
+    /// `Pending`. The proposer is auto-approved; every other
+    /// creator/co-creator must call [`Self::approve_invoice_change`] before
+    /// the change is applied. Replaces any prior (necessarily already-applied
+    /// or abandoned) proposal for this invoice.
+    pub fn propose_invoice_change(
+        env: Env,
+        caller: Address,
+        invoice_id: u64,
+        new_deadline: Option<u64>,
+        new_metadata_hash: Option<BytesN<32>>,
+    ) {
+        require_not_paused(&env);
+        caller.require_auth();
+        let invoice = load_invoice(&env, invoice_id);
+        assert!(invoice.status == InvoiceStatus::Pending, "invoice is not pending");
+        let is_authorized = invoice.creator == caller || invoice.co_creators.iter().any(|c| c == caller);
+        assert!(is_authorized, "{}", ContractError::NotAuthorizedCollaborator as u32);
+
+        let mut approvals: Vec<Address> = Vec::new(&env);
+        approvals.push_back(caller.clone());
+
+        let proposal = InvoiceChangeProposal {
+            proposer: caller.clone(),
+            new_deadline,
+            new_metadata_hash,
+            approvals,
+            proposed_at: env.ledger().timestamp(),
+            executed: false,
+        };
+        env.storage().persistent().set(&change_proposal_key(invoice_id), &proposal);
+        append_audit_entry(&env, invoice_id, symbol_short!("prop_chg"), &caller);
+    }
+
+    /// Approve the pending collaboration-workspace change proposal for an
+    /// invoice. Once every current creator/co-creator has approved, the
+    /// proposed deadline/metadata changes are applied automatically and the
+    /// proposal is marked executed.
+    pub fn approve_invoice_change(env: Env, caller: Address, invoice_id: u64) {
+        require_not_paused(&env);
+        caller.require_auth();
+        let mut invoice = load_invoice(&env, invoice_id);
+        let is_authorized = invoice.creator == caller || invoice.co_creators.iter().any(|c| c == caller);
+        assert!(is_authorized, "{}", ContractError::NotAuthorizedCollaborator as u32);
+
+        let mut proposal: InvoiceChangeProposal = env
+            .storage()
+            .persistent()
+            .get(&change_proposal_key(invoice_id))
+            .expect("no pending proposal");
+        assert!(!proposal.executed, "{}", ContractError::NoPendingProposal as u32);
+        assert!(
+            !proposal.approvals.iter().any(|a| a == caller),
+            "{}",
+            ContractError::ProposalAlreadyApproved as u32
+        );
+        proposal.approvals.push_back(caller.clone());
+
+        // Required signers: primary creator + every co-creator.
+        let mut required: Vec<Address> = Vec::new(&env);
+        required.push_back(invoice.creator.clone());
+        for c in invoice.co_creators.iter() {
+            required.push_back(c.clone());
+        }
+        let unanimous = required.iter().all(|r| proposal.approvals.iter().any(|a| a == r));
+
+        if unanimous {
+            if let Some(deadline) = proposal.new_deadline {
+                invoice.deadline = deadline;
+            }
+            if let Some(hash) = proposal.new_metadata_hash.clone() {
+                invoice.metadata_hash = Some(hash);
+            }
+            proposal.executed = true;
+            save_invoice(&env, invoice_id, &invoice);
+            append_audit_entry(&env, invoice_id, symbol_short!("chg_appl"), &caller);
+        } else {
+            append_audit_entry(&env, invoice_id, symbol_short!("chg_appr"), &caller);
+        }
+        env.storage().persistent().set(&change_proposal_key(invoice_id), &proposal);
+    }
+
+    /// Return the pending (or most recently executed) collaboration-workspace
+    /// change proposal for an invoice, if any has ever been submitted.
+    pub fn get_invoice_change_proposal(env: Env, invoice_id: u64) -> Option<InvoiceChangeProposal> {
+        env.storage().persistent().get(&change_proposal_key(invoice_id))
+    }
+
+    /// Dynamically adjust an invoice's smart split rules before any funds
+    /// have been contributed. Only the primary creator may call this, and
+    /// only while `funded == 0` — once a contribution lands, split rules are
+    /// locked (`SplitRatioLocked`) to protect payers from a bait-and-switch
+    /// on the payout formula they funded under. The previous rule set is
+    /// appended to the invoice's split-rule history for audit purposes.
+    ///
+    /// `new_rules` must either be empty (fall back to plain `amounts[]`
+    /// payout) or have exactly one rule per recipient summing to 100%
+    /// (10_000 bps) of the funded amount, mirroring the validation performed
+    /// at invoice creation.
+    pub fn update_split_rules(
+        env: Env,
+        caller: Address,
+        invoice_id: u64,
+        new_rules: Vec<SplitRule>,
+    ) {
+        require_not_paused(&env);
+        caller.require_auth();
+        let mut invoice = load_invoice(&env, invoice_id);
+        assert!(invoice.creator == caller, "only the primary creator can update split rules");
+        assert!(
+            invoice.funded == 0,
+            "{}",
+            ContractError::SplitRatioLocked as u32
+        );
+
+        if !new_rules.is_empty() {
+            assert!(
+                new_rules.len() == invoice.recipients.len(),
+                "split_rules length must match recipients"
+            );
+            let total_amounts: i128 = invoice.amounts.iter().sum();
+            assert!(total_amounts > 0, "total amounts must be positive");
+            let mut total_bps: u32 = 0;
+            for rule in new_rules.iter() {
+                match rule {
+                    SplitRule::Fixed(amt) => {
+                        total_bps += (amt as u128 * 10_000u128 / total_amounts as u128) as u32;
+                    }
+                    SplitRule::Percentage(bps) => {
+                        total_bps += bps;
+                    }
+                    SplitRule::Tiered(_, bps) => {
+                        total_bps += bps;
+                    }
+                }
+            }
+            assert!(
+                total_bps == 10_000,
+                "split_rules must sum to 100% of funded amount"
+            );
+        }
+
+        // Archive the outgoing rule set before overwriting it.
+        let mut history: Vec<Vec<SplitRule>> = env
+            .storage()
+            .persistent()
+            .get(&split_rule_history_key(invoice_id))
+            .unwrap_or_else(|| Vec::new(&env));
+        history.push_back(invoice.split_rules.clone());
+        env.storage()
+            .persistent()
+            .set(&split_rule_history_key(invoice_id), &history);
+
+        invoice.split_rules = new_rules;
+        save_invoice(&env, invoice_id, &invoice);
+        append_audit_entry(&env, invoice_id, symbol_short!("upd_splt"), &caller);
+    }
+
+    /// Return the history of previously-active split rule sets for an
+    /// invoice (most recent last), not including the currently active set.
+    /// Empty if the split rules have never been adjusted via
+    /// [`Self::update_split_rules`].
+    pub fn get_split_rule_history(env: Env, invoice_id: u64) -> Vec<Vec<SplitRule>> {
+        env.storage()
+            .persistent()
+            .get(&split_rule_history_key(invoice_id))
+            .unwrap_or_else(|| Vec::new(&env))
     }
 
     /// Raise a dispute on an invoice as a contributor (payer).

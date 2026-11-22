@@ -2064,6 +2064,269 @@ impl InvoiceEscrowContract {
     }
 
     // -----------------------------------------------------------------------
+    // Dispute resolution automation
+    // -----------------------------------------------------------------------
+
+    /// Raise a dispute on an invoice. Callable by any address that has an
+    /// active deposit on the invoice. Freezes further deposits/release while
+    /// the dispute is open, pending either admin arbitration
+    /// ([`Self::arbitrate_dispute`]) or a permissionless automatic timeout
+    /// resolution ([`Self::auto_resolve_dispute`]) if the admin does not act.
+    ///
+    /// # Errors
+    /// * [`Error::InvoiceNotFound`]      — Unknown invoice ID.
+    /// * [`Error::InvalidStatus`]        — Invoice is not `Pending`/`Active`.
+    /// * [`Error::NotAStakeholder`]      — Caller has no deposit on this invoice.
+    /// * [`Error::DisputeAlreadyActive`] — A dispute is already open.
+    pub fn raise_dispute(
+        env: Env,
+        invoice_id: u64,
+        raiser: Address,
+        reason_hash: BytesN<32>,
+    ) -> Result<(), Error> {
+        raiser.require_auth();
+
+        let mut invoice = get_invoice(&env, invoice_id)?;
+        if invoice.status != EscrowStatus::Pending && invoice.status != EscrowStatus::Active {
+            return Err(Error::InvalidStatus);
+        }
+
+        let stake: i128 = env
+            .storage()
+            .persistent()
+            .get(&deposit_key(invoice_id, &raiser))
+            .unwrap_or(0);
+        if stake <= 0 {
+            return Err(Error::NotAStakeholder);
+        }
+
+        if env.storage().persistent().has(&dispute_key(invoice_id)) {
+            let existing: DisputeRecord = env.storage().persistent().get(&dispute_key(invoice_id)).unwrap();
+            if !existing.resolved {
+                return Err(Error::DisputeAlreadyActive);
+            }
+        }
+
+        let now = env.ledger().timestamp();
+        let record = DisputeRecord {
+            invoice_id,
+            raised_by: raiser.clone(),
+            reason_hash: reason_hash.clone(),
+            raised_at: now,
+            timeout_secs: DEFAULT_DISPUTE_TIMEOUT_SECS,
+            resolved: false,
+        };
+        env.storage().persistent().set(&dispute_key(invoice_id), &record);
+
+        invoice.status = EscrowStatus::Disputed;
+        save_invoice(&env, invoice_id, &invoice);
+
+        emit_dispute_raised(&env, invoice_id, &raiser, &reason_hash, now);
+        Ok(())
+    }
+
+    /// Admin arbitration of an active dispute, before the automatic timeout
+    /// elapses. If `refund` is `true`, all recorded deposits for this invoice
+    /// (restricted to `payers`) are returned to their depositors and the
+    /// invoice is marked `Refunded`. If `false`, the dispute is dismissed and
+    /// the invoice returns to `Active`, resuming the normal deposit/release
+    /// flow (including a subsequent manual [`Self::release`] once fully funded).
+    ///
+    /// # Errors
+    /// * [`Error::InvoiceNotFound`]  — Unknown invoice ID.
+    /// * [`Error::NotAdmin`]         — Caller is not the contract admin.
+    /// * [`Error::NoActiveDispute`]  — No open dispute on this invoice.
+    pub fn arbitrate_dispute(
+        env: Env,
+        invoice_id: u64,
+        refund: bool,
+        payers: Vec<Address>,
+    ) -> Result<(), Error> {
+        require_admin(&env);
+
+        let mut invoice = get_invoice(&env, invoice_id)?;
+        let mut record: DisputeRecord = env
+            .storage()
+            .persistent()
+            .get(&dispute_key(invoice_id))
+            .ok_or(Error::NoActiveDispute)?;
+        if record.resolved {
+            return Err(Error::NoActiveDispute);
+        }
+
+        record.resolved = true;
+        env.storage().persistent().set(&dispute_key(invoice_id), &record);
+
+        if refund {
+            let token_client = token::Client::new(&env, &invoice.token);
+            for payer in payers.iter() {
+                let amount: i128 = env
+                    .storage()
+                    .persistent()
+                    .get(&deposit_key(invoice_id, &payer))
+                    .unwrap_or(0);
+                if amount > 0 {
+                    env.storage()
+                        .persistent()
+                        .remove(&deposit_key(invoice_id, &payer));
+                    token_client.transfer(&env.current_contract_address(), &payer, &amount);
+                    emit_refunded(&env, invoice_id, &payer, amount);
+                }
+            }
+            invoice.status = EscrowStatus::Refunded;
+        } else {
+            invoice.status = EscrowStatus::Active;
+        }
+        save_invoice(&env, invoice_id, &invoice);
+
+        emit_dispute_arbitrated(&env, invoice_id, &invoice.creator, refund);
+        Ok(())
+    }
+
+    /// Automate dispute resolution: once `timeout_secs` has elapsed since the
+    /// dispute was raised without admin arbitration, anyone may call this to
+    /// force resolution. This protects the disputing party from an
+    /// unresponsive admin/creator by refunding all recorded deposits
+    /// (restricted to `payers`), mirroring [`Self::refund`].
+    ///
+    /// # Errors
+    /// * [`Error::InvoiceNotFound`]          — Unknown invoice ID.
+    /// * [`Error::NoActiveDispute`]          — No open dispute on this invoice.
+    /// * [`Error::DisputeTimeoutNotElapsed`] — The timeout window has not passed.
+    pub fn auto_resolve_dispute(env: Env, invoice_id: u64, payers: Vec<Address>) -> Result<(), Error> {
+        let mut invoice = get_invoice(&env, invoice_id)?;
+        let mut record: DisputeRecord = env
+            .storage()
+            .persistent()
+            .get(&dispute_key(invoice_id))
+            .ok_or(Error::NoActiveDispute)?;
+        if record.resolved {
+            return Err(Error::NoActiveDispute);
+        }
+
+        let now = env.ledger().timestamp();
+        let eligible_at = record.raised_at.saturating_add(record.timeout_secs);
+        if now < eligible_at {
+            return Err(Error::DisputeTimeoutNotElapsed);
+        }
+
+        record.resolved = true;
+        env.storage().persistent().set(&dispute_key(invoice_id), &record);
+
+        let token_client = token::Client::new(&env, &invoice.token);
+        for payer in payers.iter() {
+            let amount: i128 = env
+                .storage()
+                .persistent()
+                .get(&deposit_key(invoice_id, &payer))
+                .unwrap_or(0);
+            if amount > 0 {
+                env.storage()
+                    .persistent()
+                    .remove(&deposit_key(invoice_id, &payer));
+                token_client.transfer(&env.current_contract_address(), &payer, &amount);
+                emit_refunded(&env, invoice_id, &payer, amount);
+            }
+        }
+        invoice.status = EscrowStatus::Refunded;
+        save_invoice(&env, invoice_id, &invoice);
+
+        emit_dispute_auto_resolved(&env, invoice_id);
+        Ok(())
+    }
+
+    /// Return the dispute record for an invoice, if one has ever been raised.
+    pub fn get_dispute(env: Env, invoice_id: u64) -> Option<DisputeRecord> {
+        env.storage().persistent().get(&dispute_key(invoice_id))
+    }
+
+    // -----------------------------------------------------------------------
+    // Payment reminders
+    // -----------------------------------------------------------------------
+    //
+    // Soroban contracts cannot push notifications off-chain, so reminders are
+    // implemented as an on-chain queryable "is a reminder due" check, grounded
+    // in the invoice's real `deadline`/`status` fields, that an off-chain
+    // poller/indexer service calls on a schedule. Delivery is tracked
+    // on-chain so the same reminder window is never reported as newly due
+    // more than once.
+
+    /// Return `true` if invoice `invoice_id` is within `lead_time_secs` of its
+    /// payment deadline, is still open for deposits (`Pending`/`Active`), and
+    /// no reminder has been recorded for this window yet. An off-chain
+    /// service polls this (with whatever `lead_time_secs` interval it is
+    /// configured for) to decide whether to notify the creator/payers, then
+    /// calls [`Self::mark_reminder_sent`] to prevent duplicate notifications.
+    ///
+    /// # Errors
+    /// * [`Error::InvoiceNotFound`] — Unknown invoice ID.
+    pub fn is_reminder_due(env: Env, invoice_id: u64, lead_time_secs: u64) -> Result<bool, Error> {
+        let invoice = get_invoice(&env, invoice_id)?;
+        if invoice.status != EscrowStatus::Pending && invoice.status != EscrowStatus::Active {
+            return Ok(false);
+        }
+
+        let now = env.ledger().timestamp();
+        if now > invoice.deadline {
+            return Ok(false);
+        }
+        let due_at = invoice.deadline.saturating_sub(lead_time_secs);
+        if now < due_at {
+            return Ok(false);
+        }
+
+        // Already notified within this reminder window?
+        if let Some(last_sent) = env
+            .storage()
+            .persistent()
+            .get::<_, u64>(&reminder_key(invoice_id))
+        {
+            if last_sent >= due_at {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    /// Record that a payment-deadline reminder was delivered for an invoice,
+    /// preventing [`Self::is_reminder_due`] from reporting the same window as
+    /// due again. Callable by the contract admin, which is expected to be
+    /// (or to authorize) the off-chain reminder-delivery service.
+    ///
+    /// # Errors
+    /// * [`Error::InvoiceNotFound`]      — Unknown invoice ID.
+    /// * [`Error::NotAdmin`]             — Caller is not the contract admin.
+    /// * [`Error::ReminderAlreadySent`]  — A reminder was already recorded
+    ///   more recently than the current ledger timestamp.
+    pub fn mark_reminder_sent(env: Env, invoice_id: u64) -> Result<(), Error> {
+        require_admin(&env);
+        let _ = get_invoice(&env, invoice_id)?;
+
+        let now = env.ledger().timestamp();
+        if let Some(last_sent) = env
+            .storage()
+            .persistent()
+            .get::<_, u64>(&reminder_key(invoice_id))
+        {
+            if last_sent >= now {
+                return Err(Error::ReminderAlreadySent);
+            }
+        }
+        env.storage().persistent().set(&reminder_key(invoice_id), &now);
+        env.events().publish(
+            (symbol_short!("escrow"), symbol_short!("reminded"), invoice_id),
+            now,
+        );
+        Ok(())
+    }
+
+    /// Return the ledger timestamp a reminder was last recorded as delivered
+    /// for an invoice, or `None` if no reminder has ever been sent.
+    pub fn get_last_reminder_sent(env: Env, invoice_id: u64) -> Option<u64> {
+        env.storage().persistent().get(&reminder_key(invoice_id))
+    }
+
+    // -----------------------------------------------------------------------
     // Read-only queries
     // -----------------------------------------------------------------------
 
