@@ -121,12 +121,14 @@ mod storage;
 mod storage_keys;
 
 mod migrations;
+pub mod notifications;
 mod webhooks;
 
 mod insurance_pool;
 mod sustainability;
 mod cooperative;
 mod education_lockup;
+pub mod advance_deposits;
 
 // Issue #1033: Analytics and monitoring for usage tracking and alerts.
 mod analytics;
@@ -8716,6 +8718,14 @@ impl SplitContract {
             invoice_id,
             symbol_short!("pay"),
             &invoice.notification_contract,
+        );
+        notifications::dispatch_payment_confirmation(
+            env,
+            invoice_id,
+            payer,
+            credited_amount,
+            &funding_token_for(&invoice),
+            nonce,
         );
         Self::maybe_release_milestones(env, invoice_id, &mut invoice, payer);
 
@@ -17546,6 +17556,124 @@ impl SplitContract {
         success: bool,
     ) -> webhooks::DeliveryStatus {
         webhooks::ack(&env, owner, delivery_id, success)
+    }
+
+    // -----------------------------------------------------------------------
+    // Configurable payment confirmation notifications
+    // -----------------------------------------------------------------------
+
+    /// Register a configurable multi-channel payment confirmation notification.
+    pub fn register_notif_config(
+        env: Env,
+        owner: Address,
+        input: notifications::NotificationConfigInput,
+    ) -> u64 {
+        require_not_frozen(&env);
+        require_not_paused(&env);
+        if let Some(id) = input.invoice_id {
+            let _ = load_invoice(&env, id);
+        }
+        notifications::register_config(&env, owner, input)
+    }
+
+    /// Update an existing payment confirmation notification config. Owner only.
+    pub fn update_notif_config(
+        env: Env,
+        owner: Address,
+        config_id: u64,
+        input: notifications::NotificationConfigInput,
+    ) {
+        require_not_frozen(&env);
+        if let Some(id) = input.invoice_id {
+            let _ = load_invoice(&env, id);
+        }
+        notifications::update_config(&env, owner, config_id, input);
+    }
+
+    /// Enable or disable a payment confirmation notification config. Owner only.
+    pub fn set_notif_enabled(
+        env: Env,
+        owner: Address,
+        config_id: u64,
+        enabled: bool,
+    ) {
+        require_not_frozen(&env);
+        notifications::set_config_enabled(&env, owner, config_id, enabled);
+    }
+
+    /// Remove a payment confirmation notification config. Owner only.
+    pub fn remove_notif_config(env: Env, owner: Address, config_id: u64) {
+        notifications::remove_config(&env, owner, config_id, false);
+    }
+
+    /// Admin: forcibly remove a payment confirmation notification config.
+    pub fn admin_remove_notif_config(env: Env, admin: Address, config_id: u64) {
+        require_admin_role(&env, &admin, AdminRole::Operator);
+        notifications::remove_config(&env, admin, config_id, true);
+    }
+
+    /// Return a payment confirmation notification config by id.
+    pub fn get_notif_config(
+        env: Env,
+        config_id: u64,
+    ) -> Option<notifications::NotificationConfig> {
+        notifications::get_config(&env, config_id)
+    }
+
+    /// Return all registered payment confirmation notification configs.
+    pub fn list_notif_configs(env: Env) -> Vec<notifications::NotificationConfig> {
+        notifications::list_configs(&env)
+    }
+
+    /// Return all payment confirmation notification configs owned by `owner`.
+    pub fn list_owner_notif_configs(
+        env: Env,
+        owner: Address,
+    ) -> Vec<notifications::NotificationConfig> {
+        notifications::list_owner_configs(&env, &owner)
+    }
+
+    /// Return a payment confirmation notification record by id.
+    pub fn get_payment_notification(
+        env: Env,
+        notification_id: u64,
+    ) -> Option<notifications::NotificationRecord> {
+        notifications::get_notification(&env, notification_id)
+    }
+
+    /// Return recent payment confirmation notifications for a config.
+    pub fn list_config_notifications(
+        env: Env,
+        config_id: u64,
+    ) -> Vec<notifications::NotificationRecord> {
+        notifications::list_notifications_by_config(&env, config_id)
+    }
+
+    /// Return recent payment confirmation notifications for an invoice.
+    pub fn list_invoice_notifications(
+        env: Env,
+        invoice_id: u64,
+    ) -> Vec<notifications::NotificationRecord> {
+        notifications::list_notifications_by_invoice(&env, invoice_id)
+    }
+
+    /// Acknowledge delivery outcome for an off-chain channel on a notification.
+    pub fn ack_payment_notification(
+        env: Env,
+        owner: Address,
+        notification_id: u64,
+        channel: u32,
+        success: bool,
+    ) -> notifications::NotificationStatus {
+        notifications::ack_notification(&env, owner, notification_id, channel, success)
+    }
+
+    /// Return delivery tracking statistics for a notification config.
+    pub fn get_notif_stats(
+        env: Env,
+        config_id: u64,
+    ) -> notifications::NotificationStats {
+        notifications::get_config_stats(&env, config_id)
     }
 
     // -----------------------------------------------------------------------
