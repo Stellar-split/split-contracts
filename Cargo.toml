@@ -1,9 +1,9 @@
 [workspace]
-members = ["contracts/split", "contracts/dashboard", "contracts/invoice-escrow", "contracts/factory", "contracts/registry"]
+members = ["contracts/split", "contracts/dashboard", "contracts/invoice-escrow", "contracts/factory", "contracts/registry", "contracts/mentorship", "contracts/skill-verification", "contracts/charity-split", "contracts/tax-strategy"]
 resolver = "2"
 
 [workspace.dependencies]
-soroban-sdk = { version = "22.0.0" }
+soroban-sdk = "28"
 
 [profile.release]
 opt-level = "z"

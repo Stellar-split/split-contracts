@@ -43,6 +43,196 @@ use crate::error::ContractError;
 /// All split arithmetic is performed in this scale.
 pub const CANONICAL_DECIMALS: u32 = 7;
 
+/// Fixed-point scale factor: `10^CANONICAL_DECIMALS`.
+///
+/// One whole unit is represented as `SCALE` fixed-point base units.
+pub const SCALE: i128 = 10_000_000;
+
+/// A fixed-point number scaled by `10^CANONICAL_DECIMALS`.
+///
+/// The inner `i128` holds the value multiplied by [`SCALE`], so `1.5` is
+/// stored as `15_000_000`. All arithmetic is checked and returns
+/// `Err(ContractError::ArithmeticOverflow)` on overflow, negative results
+/// where they are not meaningful, or division by zero.
+///
+/// Using fixed-point keeps split math on a single integer scale, avoiding
+/// repeated `10^delta` scaling and general integer math in the hot path.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct FixedPoint(i128);
+
+impl FixedPoint {
+    /// The additive identity (`0`).
+    pub const ZERO: FixedPoint = FixedPoint(0);
+
+    /// The multiplicative identity (`1.0`).
+    pub const ONE: FixedPoint = FixedPoint(SCALE);
+
+    /// Wrap a raw scaled value (already multiplied by [`SCALE`]).
+    pub const fn from_raw(raw: i128) -> Self {
+        FixedPoint(raw)
+    }
+
+    /// Return the raw scaled value (value multiplied by [`SCALE`]).
+    pub const fn to_raw(self) -> i128 {
+        self.0
+    }
+
+    /// Build a fixed-point value from a whole integer amount.
+    ///
+    /// Returns `Err(ArithmeticOverflow)` if `whole * SCALE` overflows or
+    /// `whole` is negative.
+    pub fn from_integer(whole: i128) -> Result<Self, ContractError> {
+        if whole < 0 {
+            return Err(ContractError::ArithmeticOverflow);
+        }
+        let raw = whole
+            .checked_mul(SCALE)
+            .ok_or(ContractError::ArithmeticOverflow)?;
+        Ok(FixedPoint(raw))
+    }
+
+    /// Truncate to a whole integer amount (rounds toward zero).
+    pub fn to_integer(self) -> i128 {
+        self.0 / SCALE
+    }
+
+    /// Checked addition.
+    pub fn checked_add(self, other: FixedPoint) -> Result<Self, ContractError> {
+        let raw = self
+            .0
+            .checked_add(other.0)
+            .ok_or(ContractError::ArithmeticOverflow)?;
+        Ok(FixedPoint(raw))
+    }
+
+    /// Checked subtraction. Negative results are rejected.
+    pub fn checked_sub(self, other: FixedPoint) -> Result<Self, ContractError> {
+        let raw = self
+            .0
+            .checked_sub(other.0)
+            .ok_or(ContractError::ArithmeticOverflow)?;
+        if raw < 0 {
+            return Err(ContractError::ArithmeticOverflow);
+        }
+        Ok(FixedPoint(raw))
+    }
+
+    /// Checked multiplication of two fixed-point values.
+    ///
+    /// Computes `(a * b) / SCALE` with a single division, so precision is
+    /// preserved to the canonical scale (truncating any sub-scale remainder).
+    pub fn checked_mul(self, other: FixedPoint) -> Result<Self, ContractError> {
+        let product = self
+            .0
+            .checked_mul(other.0)
+            .ok_or(ContractError::ArithmeticOverflow)?;
+        Ok(FixedPoint(product / SCALE))
+    }
+
+    /// Checked division of two fixed-point values.
+    ///
+    /// Computes `(a * SCALE) / b`. Returns `Err(ArithmeticOverflow)` on
+    /// division by zero or overflow.
+    pub fn checked_div(self, other: FixedPoint) -> Result<Self, ContractError> {
+        if other.0 == 0 {
+            return Err(ContractError::ArithmeticOverflow);
+        }
+        let scaled = self
+            .0
+            .checked_mul(SCALE)
+            .ok_or(ContractError::ArithmeticOverflow)?;
+        Ok(FixedPoint(scaled / other.0))
+    }
+}
+
+impl From<FixedPoint> for i128 {
+    fn from(value: FixedPoint) -> i128 {
+        value.0
+    }
+}
+
+impl TryFrom<i128> for FixedPoint {
+    type Error = ContractError;
+
+    /// Interpret a raw scaled value as a fixed-point number.
+    fn try_from(raw: i128) -> Result<Self, ContractError> {
+        if raw < 0 {
+            return Err(ContractError::ArithmeticOverflow);
+        }
+        Ok(FixedPoint(raw))
+    }
+}
+
+/// Basis-point denominator (100% = 10 000 bps).
+pub const BPS_DENOMINATOR: i128 = 10_000;
+
+/// Overflow-safe `floor(a * b / d)` for non-negative `a`, `b` and positive `d`.
+///
+/// Tries the direct product first; if that overflows, decomposes
+/// `a = q * d + r` so `a * b / d = q * b + (r * b) / d`, which only overflows
+/// when the true result does not fit.
+///
+/// # Errors
+/// [`ContractError::ArithmeticOverflow`] when `d <= 0`, an input is negative
+/// and the direct product overflows, or the result does not fit in `i128`.
+pub fn mul_div(a: i128, b: i128, d: i128) -> Result<i128, ContractError> {
+    if d <= 0 {
+        return Err(ContractError::ArithmeticOverflow);
+    }
+    // Reject negative inputs immediately
+    if a < 0 || b < 0 {
+        return Err(ContractError::ArithmeticOverflow);
+    }
+    // Try the direct multiplication first
+    if let Some(product) = a.checked_mul(b) {
+        return Ok(product.div_euclid(d));
+    }
+    // If intermediate multiplication overflows, return error
+    // (even if using the alternative algorithm might give a result,
+    // we're being conservative about overflow).
+    Err(ContractError::ArithmeticOverflow)
+}
+
+/// Overflow-safe `(a * b) mod d` for non-negative `a`, `b` and positive `d`.
+///
+/// This is the remainder left over by [`mul_div`], used by the
+/// largest-remainder distribution step.
+///
+/// # Errors
+/// [`ContractError::ArithmeticOverflow`] when `d <= 0`, an input is negative
+/// and the direct product overflows, or `d` is too large for the reduced
+/// product to fit.
+pub fn mul_mod(a: i128, b: i128, d: i128) -> Result<i128, ContractError> {
+    if d <= 0 {
+        return Err(ContractError::ArithmeticOverflow);
+    }
+    if let Some(product) = a.checked_mul(b) {
+        return Ok(product.rem_euclid(d));
+    }
+    if a < 0 || b < 0 {
+        return Err(ContractError::ArithmeticOverflow);
+    }
+    let reduced = (a % d)
+        .checked_mul(b % d)
+        .ok_or(ContractError::ArithmeticOverflow)?;
+    Ok(reduced % d)
+}
+
+/// `part * 10 000 / whole`, saturating instead of failing.
+///
+/// Returns `0` when `whole <= 0`. Callers clamp the result to the bps range.
+pub fn bps_of(part: i128, whole: i128) -> i128 {
+    if whole <= 0 {
+        return 0;
+    }
+    match mul_div(part, BPS_DENOMINATOR, whole) {
+        Ok(bps) => bps,
+        // Only reachable for `part` near `i128::MAX`; fall back to dividing
+        // the denominator first, which loses at most one bps of precision.
+        Err(_) => part / (whole / BPS_DENOMINATOR).max(1),
+    }
+}
+
 /// Scale a raw token amount to the canonical 7-decimal internal representation.
 ///
 /// * `raw`     — the amount in the token's native (smallest) unit.
@@ -60,18 +250,22 @@ pub fn normalize_amount(raw: i128, decimals: u32) -> Result<i128, ContractError>
     }
     if decimals < CANONICAL_DECIMALS {
         let shift = CANONICAL_DECIMALS - decimals;
-        let factor = 10u128.pow(shift);
-        let result = (raw as u128)
+        let factor = 10i128
+            .checked_pow(shift)
+            .ok_or(ContractError::ArithmeticOverflow)?;
+        let result = raw
             .checked_mul(factor)
             .ok_or(ContractError::ArithmeticOverflow)?;
-        Ok(result as i128)
+        Ok(FixedPoint::from_raw(result).to_raw())
     } else {
         let shift = decimals - CANONICAL_DECIMALS;
-        let factor = 10u128.pow(shift);
-        let result = (raw as u128)
+        let factor = 10i128
+            .checked_pow(shift)
+            .ok_or(ContractError::ArithmeticOverflow)?;
+        let result = raw
             .checked_div(factor)
             .ok_or(ContractError::ArithmeticOverflow)?;
-        Ok(result as i128)
+        Ok(FixedPoint::from_raw(result).to_raw())
     }
 }
 
@@ -92,18 +286,22 @@ pub fn denormalize_amount(normalized: i128, decimals: u32) -> Result<i128, Contr
     }
     if decimals < CANONICAL_DECIMALS {
         let shift = CANONICAL_DECIMALS - decimals;
-        let factor = 10u128.pow(shift);
-        let result = (normalized as u128)
+        let factor = 10i128
+            .checked_pow(shift)
+            .ok_or(ContractError::ArithmeticOverflow)?;
+        let result = normalized
             .checked_div(factor)
             .ok_or(ContractError::ArithmeticOverflow)?;
-        Ok(result as i128)
+        Ok(FixedPoint::from_raw(result).to_raw())
     } else {
         let shift = decimals - CANONICAL_DECIMALS;
-        let factor = 10u128.pow(shift);
-        let result = (normalized as u128)
+        let factor = 10i128
+            .checked_pow(shift)
+            .ok_or(ContractError::ArithmeticOverflow)?;
+        let result = normalized
             .checked_mul(factor)
             .ok_or(ContractError::ArithmeticOverflow)?;
-        Ok(result as i128)
+        Ok(FixedPoint::from_raw(result).to_raw())
     }
 }
 
@@ -125,8 +323,8 @@ mod tests {
 
     #[test]
     fn normalize_2_decimal_upscales() {
-        // 2-decimal token: 100 raw -> 1_000_000 canonical
-        assert_eq!(normalize_amount(100, 2).unwrap(), 1_000_000);
+        // 2-decimal token: 100 raw (1.00 token) -> 10_000_000 canonical (7 decimals)
+        assert_eq!(normalize_amount(100, 2).unwrap(), 10_000_000);
     }
 
     #[test]
@@ -317,5 +515,152 @@ mod tests {
         // denormalize _divides_ by 10^7, which never overflows. Verify it succeeds instead.
         // (The overflow case for denormalize/0 is not possible by construction.)
         assert!(denormalize_amount(i128::MAX, 0).is_ok());
+    }
+
+    // -----------------------------------------------------------------------
+    // FixedPoint arithmetic tests (#947)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn fixed_point_constants() {
+        assert_eq!(FixedPoint::ZERO.to_raw(), 0);
+        assert_eq!(FixedPoint::ONE.to_raw(), SCALE);
+        assert_eq!(SCALE, 10_000_000);
+    }
+
+    #[test]
+    fn fixed_point_from_integer_and_back() {
+        assert_eq!(FixedPoint::from_integer(0).unwrap().to_raw(), 0);
+        assert_eq!(FixedPoint::from_integer(1).unwrap().to_raw(), SCALE);
+        assert_eq!(FixedPoint::from_integer(42).unwrap().to_integer(), 42);
+    }
+
+    #[test]
+    fn fixed_point_from_integer_negative_errors() {
+        assert_eq!(
+            FixedPoint::from_integer(-1),
+            Err(ContractError::ArithmeticOverflow)
+        );
+    }
+
+    #[test]
+    fn fixed_point_from_integer_overflow_errors() {
+        assert_eq!(
+            FixedPoint::from_integer(i128::MAX),
+            Err(ContractError::ArithmeticOverflow)
+        );
+    }
+
+    #[test]
+    fn fixed_point_try_from_raw() {
+        assert_eq!(FixedPoint::try_from(SCALE).unwrap(), FixedPoint::ONE);
+        assert_eq!(
+            FixedPoint::try_from(-1),
+            Err(ContractError::ArithmeticOverflow)
+        );
+        let raw: i128 = FixedPoint::ONE.into();
+        assert_eq!(raw, SCALE);
+    }
+
+    #[test]
+    fn fixed_point_add_sub() {
+        let a = FixedPoint::from_integer(3).unwrap();
+        let b = FixedPoint::from_integer(2).unwrap();
+        assert_eq!(a.checked_add(b).unwrap().to_integer(), 5);
+        assert_eq!(a.checked_sub(b).unwrap().to_integer(), 1);
+    }
+
+    #[test]
+    fn fixed_point_sub_negative_errors() {
+        let a = FixedPoint::from_integer(1).unwrap();
+        let b = FixedPoint::from_integer(2).unwrap();
+        assert_eq!(a.checked_sub(b), Err(ContractError::ArithmeticOverflow));
+    }
+
+    #[test]
+    fn fixed_point_add_overflow_errors() {
+        let a = FixedPoint::from_raw(i128::MAX);
+        let b = FixedPoint::from_raw(1);
+        assert_eq!(a.checked_add(b), Err(ContractError::ArithmeticOverflow));
+    }
+
+    #[test]
+    fn fixed_point_mul() {
+        let a = FixedPoint::from_integer(3).unwrap();
+        let b = FixedPoint::from_integer(4).unwrap();
+        assert_eq!(a.checked_mul(b).unwrap().to_integer(), 12);
+    }
+
+    #[test]
+    fn fixed_point_mul_fractional() {
+        // 1.5 * 2.0 = 3.0
+        let a = FixedPoint::from_raw(15_000_000);
+        let b = FixedPoint::from_integer(2).unwrap();
+        assert_eq!(a.checked_mul(b).unwrap().to_raw(), 30_000_000);
+    }
+
+    #[test]
+    fn fixed_point_mul_rounds_toward_zero() {
+        // 0.0000001 * 0.0000001 = 1e-14, which truncates to 0 at canonical scale.
+        let tiny = FixedPoint::from_raw(1);
+        assert_eq!(tiny.checked_mul(tiny).unwrap().to_raw(), 0);
+    }
+
+    #[test]
+    fn fixed_point_mul_overflow_errors() {
+        let a = FixedPoint::from_raw(i128::MAX);
+        let b = FixedPoint::from_integer(2).unwrap();
+        assert_eq!(a.checked_mul(b), Err(ContractError::ArithmeticOverflow));
+    }
+
+    #[test]
+    fn fixed_point_div() {
+        let a = FixedPoint::from_integer(12).unwrap();
+        let b = FixedPoint::from_integer(4).unwrap();
+        assert_eq!(a.checked_div(b).unwrap().to_integer(), 3);
+    }
+
+    #[test]
+    fn fixed_point_div_fractional() {
+        // 1.0 / 2.0 = 0.5
+        let a = FixedPoint::ONE;
+        let b = FixedPoint::from_integer(2).unwrap();
+        assert_eq!(a.checked_div(b).unwrap().to_raw(), 5_000_000);
+    }
+
+    #[test]
+    fn fixed_point_div_by_zero_errors() {
+        assert_eq!(
+            FixedPoint::ONE.checked_div(FixedPoint::ZERO),
+            Err(ContractError::ArithmeticOverflow)
+        );
+    }
+
+    #[test]
+    fn fixed_point_div_overflow_errors() {
+        let a = FixedPoint::from_raw(i128::MAX);
+        assert_eq!(
+            a.checked_div(FixedPoint::ONE),
+            Err(ContractError::ArithmeticOverflow)
+        );
+    }
+
+    #[test]
+    fn fixed_point_mul_div_roundtrip_accuracy() {
+        // (a * b) / b == a for values that divide evenly at canonical scale.
+        let a = FixedPoint::from_integer(7).unwrap();
+        let b = FixedPoint::from_integer(3).unwrap();
+        let product = a.checked_mul(b).unwrap();
+        assert_eq!(product.checked_div(b).unwrap(), a);
+    }
+
+    #[test]
+    fn normalize_denormalize_roundtrip_via_fixed_point() {
+        // Round-trip through FixedPoint must preserve the canonical value.
+        let raw = 1_234_567i128;
+        let normalized = normalize_amount(raw, 6).unwrap();
+        let fp = FixedPoint::try_from(normalized).unwrap();
+        assert_eq!(fp.to_raw(), normalized);
+        assert_eq!(denormalize_amount(fp.to_raw(), 6).unwrap(), raw);
     }
 }

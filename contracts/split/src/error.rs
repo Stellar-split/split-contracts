@@ -1,7 +1,7 @@
 use soroban_sdk::contracterror;
 
 /// Unified error taxonomy (issue #273). Discriminants are stable — never reorder, only append.
-#[contracterror(export = false)]
+#[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 #[repr(u32)]
 pub enum ContractError {
@@ -145,4 +145,312 @@ pub enum ContractError {
     AlreadyPaid = 65,
     /// Recipient list is shorter than the configured minimum recipient count.
     TooFewRecipients = 66,
+    /// Issue #937: A co-signer signature failed cryptographic verification against
+    /// the expected signer set (wrong signer, malformed payload, or bad signature bytes).
+    InvalidSignature = 67,
+    /// Issue #937: A required co-signer signature was not supplied for the operation.
+    MissingSignature = 68,
+    /// Issue #937: The supplied signature (or its nonce/ledger window) has already
+    /// been consumed; replaying it is rejected.
+    SignatureReplayed = 69,
+    /// Issue #937: The signature's validity window has expired (e.g. signed ledger
+    /// bound is in the past) and it can no longer be accepted.
+    SignatureExpired = 70,
+    /// Issue #938: The configured oracle address is malformed or not a valid
+    /// contract address for the expected network.
+    InvalidOracleAddress = 71,
+    /// Issue #938: The oracle's reported condition (e.g. price threshold or
+    /// resolution outcome) was not satisfied, so the operation cannot proceed.
+    OracleConditionNotMet = 72,
+    /// Issue #938: No oracle feed is configured for the requested asset/pair.
+    OracleFeedNotFound = 73,
+    /// Issue #951: A supplied argument failed a generic range/format validation
+    /// check that has no more specific variant.
+    InvalidArgument = 74,
+    /// Issue #951: A required storage entry was absent when the operation needed it.
+    MissingStorageEntry = 75,
+    /// Issue #951: The requested operation is not supported by this contract version.
+    UnsupportedOperation = 76,
+    /// Issue #1011: Emergency pause recovery plan is not yet complete; unpause is blocked.
+    RecoveryIncomplete = 77,
+    /// A supplied deadline value is invalid (past or far in future).
+    InvalidDeadline = 78,
+    /// A supplied recipient address is invalid or missing.
+    InvalidRecipientAddress = 79,
+    /// The oracle condition provided is invalid.
+    InvalidOracleCondition = 80,
+    /// An invalid shard index was provided.
+    InvalidShardIndex = 81,
+    /// The shard capacity has been exceeded.
+    ShardCapacityExceeded = 82,
+}
+
+/// Issue #952: Human-readable, actionable recovery suggestions for every
+/// `ContractError` variant. Each suggestion tells the caller what to change
+/// before retrying so that failures never require guesswork.
+pub mod recovery {
+    use super::ContractError;
+    use soroban_sdk::{Env, String};
+
+    /// Returns a short, actionable recovery suggestion for `error`.
+    ///
+    /// The mapping is exhaustive: every `ContractError` variant has a
+    /// dedicated suggestion. Unknown discriminants fall back to a generic
+    /// "retry after checking inputs" message.
+    pub fn suggestion_for(error: ContractError) -> &'static str {
+        match error {
+            ContractError::NotAuthorized => {
+                "Ensure the caller is the admin, owner, or holds the required role/signer, then retry."
+            }
+            ContractError::InvoiceNotFound => {
+                "Verify the invoice id exists (it may have been deleted); create the invoice first."
+            }
+            ContractError::DeadlinePassed => {
+                "The funding deadline has passed; ask the creator to extend the deadline or open a new invoice."
+            }
+            ContractError::AlreadyFunded => {
+                "The invoice is already fully funded; no further funding is accepted."
+            }
+            ContractError::InvalidAmount => {
+                "Supply a positive amount that fits within the invoice's remaining capacity and i128 bounds."
+            }
+            ContractError::InvoiceFrozen => {
+                "The invoice is frozen; wait for an admin to unfreeze it before retrying."
+            }
+            ContractError::InvalidStatus => {
+                "Check the invoice status; perform the required prior transition (e.g. fund before release)."
+            }
+            ContractError::PayerNotAllowed => {
+                "Use an address on the invoice's allowed-payer list, or ask the creator to add it."
+            }
+            ContractError::FundingInsufficient => {
+                "Increase the payment to at least the remaining amount required to fully fund the invoice."
+            }
+            ContractError::OracleCallFailed => {
+                "The oracle call failed; retry later or ask the admin to verify the oracle configuration."
+            }
+            ContractError::NotArbiter => {
+                "Only the designated arbiter may perform this action; call from the arbiter address."
+            }
+            ContractError::NotDisputed => {
+                "Open a dispute first; this action is only valid while a dispute is active."
+            }
+            ContractError::AlreadyExecuted => {
+                "This action already completed and is not idempotent; do not retry it."
+            }
+            ContractError::TimelockPending => {
+                "Wait until the time-lock/vesting window elapses, then retry."
+            }
+            ContractError::ContractPaused => {
+                "The contract is paused; wait for an admin to unpause it before retrying."
+            }
+            ContractError::InvalidRecipients => {
+                "Ensure recipients, amounts, and tokens lists have matching, non-empty lengths."
+            }
+            ContractError::PrerequisiteNotMet => {
+                "Satisfy the prerequisite (invoice, milestone, or dependency) before retrying."
+            }
+            ContractError::BatchLimitExceeded => {
+                "Split the batch into smaller chunks within the per-call item limit."
+            }
+            ContractError::RecipientAlreadyPaid => {
+                "This recipient was already paid; skip them or use the payout-recovery path."
+            }
+            ContractError::FundsLockedUntil => {
+                "Funds are still time-locked; wait until the lock expires, then release."
+            }
+            ContractError::StatsOverflow => {
+                "Aggregate statistics would overflow; retry with a smaller amount or contact the admin."
+            }
+            ContractError::OracleUnavailable => {
+                "The price oracle is unreachable or returned an invalid rate; retry later."
+            }
+            ContractError::InvalidRating => {
+                "Supply a rating within the allowed range (1..=max score)."
+            }
+            ContractError::AlreadyRated => {
+                "This target has already been rated by the caller; ratings are one-per-target."
+            }
+            ContractError::RateLimitExceeded => {
+                "Wait for the current rate-limit window to reset before retrying."
+            }
+            ContractError::RecipientRevealMismatch => {
+                "Verify the reveal preimage matches the stored commitment hash, then retry."
+            }
+            ContractError::PayoutNotYetClaimable => {
+                "Wait until the claimable ledger is reached, then claim the payout."
+            }
+            ContractError::ContractFrozen => {
+                "The contract is frozen for upgrade; wait for the upgrade to complete."
+            }
+            ContractError::DuplicatePayment => {
+                "A matching payment was already recorded within the duplicate window; do not resubmit."
+            }
+            ContractError::GroupMemberExpired => {
+                "A group member expired unfunded and the group rolled back; re-create the group."
+            }
+            ContractError::SlippageExceeded => {
+                "Price moved beyond tolerance; retry with an updated quote or wider slippage tolerance."
+            }
+            ContractError::InvalidPhaseTransition => {
+                "Check the current phase; only permitted phase transitions are allowed."
+            }
+            ContractError::MemoMismatch => {
+                "Ensure the supplied memo hashes to the required memo hash."
+            }
+            ContractError::CreatorCooldownActive => {
+                "The creator is in cooldown after a cancellation; wait for the cooldown to elapse."
+            }
+            ContractError::InvoiceFullyFunded => {
+                "The invoice is fully funded under its Cap policy; no further funding is accepted."
+            }
+            ContractError::InvalidRatioSum => {
+                "Adjust split ratios so they sum to exactly 10 000 basis points."
+            }
+            ContractError::EmptyRecipientList => {
+                "Provide at least one recipient/ratio entry."
+            }
+            ContractError::ReentrantCall => {
+                "A reentrant call was detected; retry the operation in a fresh transaction."
+            }
+            ContractError::RoleNotHeld => {
+                "Grant the caller the required RBAC role, then retry."
+            }
+            ContractError::ArithmeticOverflow => {
+                "Reduce the amount so intermediate arithmetic stays within i128 bounds."
+            }
+            ContractError::ZeroAmountNotAllowed => {
+                "Supply a strictly positive amount."
+            }
+            ContractError::ContributorNotAllowed => {
+                "Use an address on the invoice contributor allowlist, or ask the creator to add it."
+            }
+            ContractError::UnauthorisedToken => {
+                "Use a token from the allowed tokens list, or ask the admin to allow it."
+            }
+            ContractError::DependencyNotMet => {
+                "Wait for the predecessor invoice to reach Released before retrying."
+            }
+            ContractError::CircularDependency => {
+                "Remove the circular reference from the invoice dependency chain."
+            }
+            ContractError::SourceContractRateLimited => {
+                "The source contract exceeded its call rate limit; wait for the window to reset."
+            }
+            ContractError::FeeSumExceedsCap => {
+                "Reduce creator + platform fee bps so their sum is at most 10 000."
+            }
+            ContractError::InvoiceDeleted => {
+                "The invoice is soft-deleted; restore it or operate on a different invoice."
+            }
+            ContractError::FundsUnclaimed => {
+                "Claim all outstanding funds before soft-deleting the invoice."
+            }
+            ContractError::NotDeleted => {
+                "The invoice is not deleted; no tombstone exists to read."
+            }
+            ContractError::InvalidStateTransition => {
+                "Check the invoice state machine; only permitted transitions are allowed."
+            }
+            ContractError::InvalidRatio => {
+                "Ensure each split ratio is below the denominator and the set is consistent."
+            }
+            ContractError::MigrationRequired => {
+                "Call `migrate` to bring storage to the expected schema version, then retry."
+            }
+            ContractError::DuplicateRecipient => {
+                "Remove duplicate recipient addresses from the list."
+            }
+            ContractError::SplitRatioLocked => {
+                "Split ratios are locked after the first contribution and cannot be changed."
+            }
+            ContractError::RecipientMissingTrustline => {
+                "Ask the recipient to establish a trustline for the payment token, then retry."
+            }
+            ContractError::CreatorInvoiceLimitReached => {
+                "Close or cancel an existing invoice before creating a new one."
+            }
+            ContractError::CoCreatorLimitReached => {
+                "Reduce the number of co-creators to within the allowed maximum."
+            }
+            ContractError::InvoiceDisputed => {
+                "Resolve the active dispute before attempting to release funds."
+            }
+            ContractError::PayerSpendLimitExceeded => {
+                "Reduce the payment amount to stay within the payer's spend limit."
+            }
+            ContractError::RecipientAccountMissing => {
+                "Ask the recipient to create their account on-ledger, then retry."
+            }
+            ContractError::RecipientNotFound => {
+                "Use an address present in the invoice recipient list."
+            }
+            ContractError::ParentChainTooDeep => {
+                "Shorten the parent chain to within the allowed maximum depth."
+            }
+            ContractError::CheckpointMismatch => {
+                "Restart the payout from the last consistent checkpoint index."
+            }
+            ContractError::AlreadyPaid => {
+                "This recipient was already paid; resume from the next unpaid index."
+            }
+            ContractError::TooFewRecipients => {
+                "Add more recipients to meet the configured minimum recipient count."
+            }
+            ContractError::RecoveryIncomplete => {
+                "Complete all recovery plan steps before unpausing the contract."
+            }
+            ContractError::InvalidSignature => {
+                "The provided signature is invalid; ensure the correct signer and signing key are used."
+            }
+            ContractError::MissingSignature => {
+                "A required co-signer signature is missing; collect all required signatures and retry."
+            }
+            ContractError::SignatureReplayed => {
+                "This signature has already been used; provide a fresh signature for this transaction."
+            }
+            ContractError::SignatureExpired => {
+                "The signature has expired; generate a new signature with a future expiry time."
+            }
+            ContractError::InvalidOracleAddress => {
+                "The oracle address is invalid or not registered; verify the oracle configuration."
+            }
+            ContractError::OracleConditionNotMet => {
+                "The oracle's reported condition was not satisfied; wait for the condition to be met and retry."
+            }
+            ContractError::OracleFeedNotFound => {
+                "No oracle feed is configured for the requested asset/pair; configure the oracle feed and retry."
+            }
+            ContractError::InvalidArgument => {
+                "A supplied argument failed validation; check the argument format and range before retrying."
+            }
+            ContractError::MissingStorageEntry => {
+                "A required storage entry is missing; ensure the contract is properly initialized."
+            }
+            ContractError::UnsupportedOperation => {
+                "This operation is not supported by this contract version; upgrade the contract or use a supported operation."
+            }
+            ContractError::InvalidDeadline => {
+                "Provide a deadline that is in the future and not beyond 10 years from now."
+            }
+            ContractError::InvalidRecipientAddress => {
+                "Provide a valid recipient address on the Stellar network."
+            }
+            ContractError::InvalidOracleCondition => {
+                "Ensure the oracle condition is properly formatted and valid."
+            }
+            ContractError::InvalidShardIndex => {
+                "Provide a shard index within the valid range for the contract."
+            }
+            ContractError::ShardCapacityExceeded => {
+                "Reduce the number of operations or increase the shard capacity."
+            }
+        }
+    }
+
+    /// Env-aware variant returning a `soroban_sdk::String` suitable for
+    /// returning from a contract entrypoint.
+    pub fn get_recovery_suggestion(env: &Env, error: ContractError) -> String {
+        String::from_str(env, suggestion_for(error))
+    }
 }

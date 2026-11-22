@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 6eb2ea546143b67b5c7c46631f20f5050deee08219cf36884bb76194104ef05b # shrinks to invoice_amount = 2, weights = [1870, 2749, 880]

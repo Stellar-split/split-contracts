@@ -346,8 +346,15 @@ mod test {
         // Verify the ContractDeployed event was emitted.
         let events = env.events().all();
         let mut found = false;
-        for event in events.iter() {
-            let topics = event.1;
+        for event in events.events().iter() {
+            let soroban_sdk::xdr::ContractEventBody::V0(body) = &event.body;
+            let mut topics = Vec::new(&env);
+            let topics_ref: &[soroban_sdk::xdr::ScVal] = body.topics.as_ref();
+            for v in topics_ref.iter() {
+                if let Ok(val) = Val::try_from_val(&env, v) {
+                    topics.push_back(val);
+                }
+            }
             // topics: (factory, deployed, creator)
             if topics.len() >= 3 {
                 if let Ok(t0) = <Symbol as TryFromVal<Env, Val>>::try_from_val(&env, &topics.get_unchecked(0)) {

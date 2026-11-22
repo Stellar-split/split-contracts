@@ -132,3 +132,19 @@ cargo-audit.toml
 __pycache__/
 *.pyc
 .pytest_cache/
+
+# ============================================================
+# Generated JSON / XDR artefacts (local dev only)
+# ============================================================
+*.xdr
+*.base64
+generated/
+.soroban/
+soroban_derived.json
+
+# ============================================================
+# Editor session / workspace state
+# ============================================================
+*.code-workspace
+.history/
+.direnv/
