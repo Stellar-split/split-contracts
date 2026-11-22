@@ -22,19 +22,28 @@ fn percentages() -> impl Strategy<Value = Vec<u32>> {
     })
 }
 
-/// Allocates the complete invoice amount using the largest-remainder method.
-/// This mirrors an integer-safe split where rounding leftovers are distributed
-/// without losing any part of the invoice amount.
+/// Fixed-point scale used by the allocation path. Percentages are expressed in
+/// basis points (1/10_000), so the fixed-point representation keeps the same
+/// denominator to avoid any loss of precision.
+const FIXED_POINT_SCALE: u128 = TOTAL_BPS as u128;
+
+/// Allocates the complete invoice amount using fixed-point arithmetic with the
+/// largest-remainder method. This mirrors an integer-safe split where rounding
+/// leftovers are distributed without losing any part of the invoice amount.
 fn allocate_invoice(total: u128, percentages: &[u32]) -> Vec<u128> {
     let mut payouts = Vec::with_capacity(percentages.len());
     let mut remainders = Vec::with_capacity(percentages.len());
     let mut allocated = 0u128;
 
     for &percentage in percentages {
-        let numerator = total * percentage as u128;
-        let payout = numerator / TOTAL_BPS as u128;
+        // Fixed-point multiply: total * (percentage / TOTAL_BPS) computed with
+        // an explicit scale so the integer division is exact in the quotient
+        // and the fractional part is captured in the remainder.
+        let fixed_percentage = percentage as u128;
+        let numerator = total * fixed_percentage;
+        let payout = numerator / FIXED_POINT_SCALE;
         payouts.push(payout);
-        remainders.push(numerator % TOTAL_BPS as u128);
+        remainders.push(numerator % FIXED_POINT_SCALE);
         allocated += payout;
     }
 
@@ -84,6 +93,38 @@ proptest! {
     }
 
     #[test]
+    fn fixed_point_allocation_matches_exact_rational_split(
+        total in 0u128..=1_000_000_000_000u128,
+        percentages in percentages(),
+    ) {
+        let payouts = allocate_invoice(total, &percentages);
+
+        // Each payout must be within one unit of the exact rational share,
+        // which is the tightest bound achievable with integer fixed-point.
+        for (payout, percentage) in payouts.iter().zip(percentages.iter()) {
+            let numerator = total * *percentage as u128;
+            let exact_floor = numerator / FIXED_POINT_SCALE;
+            let exact_ceil = numerator.div_ceil(FIXED_POINT_SCALE);
+            prop_assert!(*payout >= exact_floor);
+            prop_assert!(*payout <= exact_ceil);
+        }
+    }
+
+    #[test]
+    fn fixed_point_allocation_preserves_zero_percentages(
+        total in 0u128..=1_000_000_000_000u128,
+        percentages in percentages(),
+    ) {
+        let payouts = allocate_invoice(total, &percentages);
+
+        for (payout, percentage) in payouts.iter().zip(percentages.iter()) {
+            if *percentage == 0 {
+                prop_assert_eq!(*payout, 0);
+            }
+        }
+    }
+
+    #[test]
     fn no_recipient_exceeds_their_percentage_entitlement(
         total in 0u128..=1_000_000_000_000u128,
         percentages in percentages(),
@@ -127,6 +168,14 @@ proptest! {
     fn recipient_percentages_sum_to_exactly_one_hundred_percent(
         percentages in percentages(),
     ) {
+        prop_assert_eq!(percentages.iter().copied().sum::<u32>(), TOTAL_BPS);
+    }
+
+    #[test]
+    fn fixed_point_scale_matches_basis_points(
+        percentages in percentages(),
+    ) {
+        prop_assert_eq!(FIXED_POINT_SCALE, TOTAL_BPS as u128);
         prop_assert_eq!(percentages.iter().copied().sum::<u32>(), TOTAL_BPS);
     }
 }

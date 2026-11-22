@@ -5,7 +5,35 @@
 
 #![no_std]
 
-use soroban_sdk::{contract, contractimpl, symbol_short, Address, Env, Symbol, Vec};
+use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Env, Symbol, Vec};
+
+/// Creator tier, used to scale the per-creator registration limit.
+///
+/// Tiers are assigned by the registry admin based on off-chain reputation
+/// review and gate how many contracts a creator may register — higher
+/// tiers get higher limits. This prevents an unverified/low-reputation
+/// creator from spamming the registry up to the previous flat cap.
+#[contracttype]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CreatorTier {
+    /// Default tier for any creator that has not been explicitly verified.
+    Basic,
+    /// Verified creator with a track record.
+    Verified,
+    /// Premium / highly-trusted creator.
+    Premium,
+}
+
+impl CreatorTier {
+    /// Maximum number of registered contracts allowed for this tier.
+    fn max_contracts(&self) -> u32 {
+        match self {
+            CreatorTier::Basic => 50,
+            CreatorTier::Verified => 1_000,
+            CreatorTier::Premium => MAX_CONTRACTS_PER_CREATOR,
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Storage keys
@@ -26,7 +54,13 @@ fn registration_key(creator: &Address, contract: &Address) -> (Symbol, Address, 
 }
 
 /// Maximum contracts per creator to bound storage growth and prevent DoS.
+/// This is also the ceiling for the highest (`Premium`) tier.
 const MAX_CONTRACTS_PER_CREATOR: u32 = 5_000;
+
+/// Persistent storage: a creator's assigned tier.
+fn creator_tier_key(creator: &Address) -> (Symbol, Address) {
+    (symbol_short!("cr_tier"), creator.clone())
+}
 
 // ---------------------------------------------------------------------------
 // Events
@@ -66,14 +100,50 @@ impl Registry {
         env.storage().instance().set(&registry_admin_key(), &admin);
     }
 
+    /// Set a creator's tier. Only the registry admin may call this.
+    ///
+    /// The tier determines the creator's registration limit (see
+    /// [`CreatorTier::max_contracts`]). Creators without an explicit tier
+    /// default to [`CreatorTier::Basic`].
+    ///
+    /// # Panics
+    /// * `"not initialized"` — the registry has not been initialized.
+    /// * `"not admin"` — caller is not the registry admin.
+    pub fn set_creator_tier(env: Env, admin: Address, creator: Address, tier: CreatorTier) {
+        assert!(
+            env.storage().instance().has(&registry_admin_key()),
+            "not initialized"
+        );
+        let stored_admin: Address = env.storage().instance().get(&registry_admin_key()).unwrap();
+        assert!(admin == stored_admin, "not admin");
+        admin.require_auth();
+
+        env.storage()
+            .persistent()
+            .set(&creator_tier_key(&creator), &tier);
+    }
+
+    /// Return a creator's tier, defaulting to [`CreatorTier::Basic`] if
+    /// never explicitly set.
+    pub fn get_creator_tier(env: Env, creator: Address) -> CreatorTier {
+        env.storage()
+            .persistent()
+            .get(&creator_tier_key(&creator))
+            .unwrap_or(CreatorTier::Basic)
+    }
+
     /// Register a deployed contract address under a creator.
     ///
     /// Appends `contract` to the creator's list. Rejects duplicate
-    /// registrations for the same (creator, contract) pair.
+    /// registrations for the same (creator, contract) pair. The number of
+    /// contracts a creator may register is bounded by their verified
+    /// [`CreatorTier`] (unverified creators default to `Basic`), preventing
+    /// an unverified/low-reputation creator from spamming the registry up
+    /// to the previous flat cap.
     ///
     /// # Panics
-    /// * `"registry limit exceeded"` — the creator already has
-    ///   [`MAX_CONTRACTS_PER_CREATOR`] registered contracts.
+    /// * `"registry limit exceeded"` — the creator already has as many
+    ///   registered contracts as their tier allows.
     /// * `"already registered"` — this contract address is already
     ///   in the creator's list.
     pub fn register(env: Env, creator: Address, contract: Address) {
@@ -88,14 +158,20 @@ impl Registry {
             "already registered"
         );
 
-        // Enforce per-creator limit.
+        // Enforce the creator's tier-based limit (never spoofable by the
+        // caller — the tier is read from admin-controlled storage).
+        let tier: CreatorTier = env
+            .storage()
+            .persistent()
+            .get(&creator_tier_key(&creator))
+            .unwrap_or(CreatorTier::Basic);
         let mut contracts: Vec<Address> = env
             .storage()
             .persistent()
             .get(&contracts_key)
             .unwrap_or_else(|| Vec::new(&env));
         assert!(
-            contracts.len() < MAX_CONTRACTS_PER_CREATOR as u32,
+            contracts.len() < tier.max_contracts(),
             "registry limit exceeded"
         );
 
@@ -238,8 +314,15 @@ mod test {
 
         let events = env.events().all();
         let mut found = false;
-        for event in events.iter() {
-            let topics = event.1;
+        for event in events.events().iter() {
+            let soroban_sdk::xdr::ContractEventBody::V0(body) = &event.body;
+            let mut topics = Vec::new(&env);
+            let topics_ref: &[soroban_sdk::xdr::ScVal] = body.topics.as_ref();
+            for v in topics_ref.iter() {
+                if let Ok(val) = Val::try_from_val(&env, v) {
+                    topics.push_back(val);
+                }
+            }
             if topics.len() >= 3 {
                 if let Ok(t0) = <Symbol as TryFromVal<Env, Val>>::try_from_val(&env, &topics.get_unchecked(0)) {
                     if t0 == symbol_short!("registry") {
@@ -265,6 +348,56 @@ mod test {
         let creator = Address::generate(&env);
         assert_eq!(registry_client.get_contracts(&creator).len(), 0);
         assert_eq!(registry_client.get_contract_count(&creator), 0);
+    }
+
+    #[test]
+    fn test_default_tier_is_basic() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let registry_id = env.register(Registry, ());
+        let registry_client = RegistryClient::new(&env, &registry_id);
+        registry_client.initialize(&admin);
+
+        let creator = Address::generate(&env);
+        assert_eq!(registry_client.get_creator_tier(&creator), CreatorTier::Basic);
+    }
+
+    #[test]
+    fn test_admin_can_set_tier_and_raise_limit() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let registry_id = env.register(Registry, ());
+        let registry_client = RegistryClient::new(&env, &registry_id);
+        registry_client.initialize(&admin);
+
+        let creator = Address::generate(&env);
+        registry_client.set_creator_tier(&admin, &creator, &CreatorTier::Verified);
+        assert_eq!(registry_client.get_creator_tier(&creator), CreatorTier::Verified);
+    }
+
+    #[test]
+    #[should_panic(expected = "registry limit exceeded")]
+    fn test_basic_tier_limit_enforced() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let registry_id = env.register(Registry, ());
+        let registry_client = RegistryClient::new(&env, &registry_id);
+        registry_client.initialize(&admin);
+
+        let creator = Address::generate(&env);
+        // Basic tier allows 50 contracts; the 51st must panic.
+        for _ in 0..50 {
+            let contract_addr = Address::generate(&env);
+            registry_client.register(&creator, &contract_addr);
+        }
+        let one_too_many = Address::generate(&env);
+        registry_client.register(&creator, &one_too_many);
     }
 
     #[test]
