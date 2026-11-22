@@ -9,7 +9,7 @@ helpers, and offers filtering through webhook event masks.
 |---|---|
 | Event system | `contracts/split/src/events.rs` holds one helper per event (about 180). Entry points call the helper and do not publish directly, see [`adr/0003-observability-from-event-helpers.md`](./adr/0003-observability-from-event-helpers.md). |
 | Emitter | `events::invoice_state_changed(env, invoice_id, from_status, to_status, actor)` publishes topics `(split, st_chg, invoice_id)` and data `(from_status, to_status, actor, ledger)`. It is called from 24 places in `lib.rs`. |
-| Event types | One topic per event, for example `created`, `PayoutFailed`, `InstalmentTranchePaid`, `st_chg`, `wh_stat`, `cost_rec`. The status values reported by `st_chg` are `none`, `pending`, `released`, `refunded`, `expired`, `cancld`, `disputed` and `part_rel`. |
+| Event types | One topic per event, for example `created`, `PayoutFailed`, `InstalmentTranchePaid`, `st_chg`, `wh_stat`, `cost_rec`. The status values reported by `st_chg` are `pending`, `released`, `refunded`, `expired`, `cancld`, `disputed`, `part_rel`, `finald`, `deleted` and `pay_prg`, one for each `InvoiceStatus`. The `from` value can also be `none`, for a new invoice. |
 | Event filtering | Because the invoice id is the last topic of `st_chg`, an indexer can filter on it. For subscribers, `register_webhook` takes an `event_mask` built from `EVENT_CREATED`, `EVENT_PAID`, `EVENT_RELEASED`, `EVENT_REFUNDED` and `EVENT_CANCELLED`, plus an optional invoice id. |
 | Event stats | Usage totals through `get_usage_totals` and `get_usage_report` (counted from the event helpers), and webhook delivery records |
 
