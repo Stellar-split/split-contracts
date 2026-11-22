@@ -127,6 +127,7 @@ mod insurance_pool;
 mod sustainability;
 mod cooperative;
 mod education_lockup;
+pub mod advance_deposits;
 
 // Issue #1033: Analytics and monitoring for usage tracking and alerts.
 mod analytics;
