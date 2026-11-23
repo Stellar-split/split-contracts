@@ -91,6 +91,7 @@ pub mod payment_tracking;
 pub mod velocity;
 mod invoice_compliance_checklist;
 pub mod split_rules;
+mod split_strategies;
 pub mod pool;
 mod batch_verify;
 pub mod compression;
