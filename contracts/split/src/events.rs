@@ -1027,6 +1027,7 @@ pub fn invoice_state_changed(
         (symbol_short!("split"), symbol_short!("st_chg"), invoice_id),
         (from_sym, to_sym, actor.clone(), env.ledger().sequence()),
     );
+    crate::webhooks::dispatch_status_change(env, invoice_id, from_status, to_status);
 }
 
 /// Issue #309: Emitted when a payer is added/removed from an invoice's allowlist.
