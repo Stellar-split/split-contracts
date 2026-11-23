@@ -82,11 +82,13 @@ mod validation;
 mod calc;
 mod math;
 mod stats;
+mod storage_layout_opt;
 pub mod security_audit;
 pub mod payment_tracking;
 pub mod velocity;
 pub mod split_rules;
 pub mod pool;
+mod batch_verify;
 pub mod compression;
 pub mod aggregation;
 pub mod template_library;
@@ -130,12 +132,14 @@ mod insurance_pool;
 pub mod shard_messaging;
 mod sustainability;
 mod cooperative;
+mod state_pruning;
 mod education_lockup;
 pub mod advance_deposits;
 
 // Issue #1033: Analytics and monitoring for usage tracking and alerts.
 mod analytics;
 mod monitoring;
+mod memory_bound_pow;
 
 // Issue #1011: Enhanced emergency pause mechanism.
 pub mod emergency_pause;
