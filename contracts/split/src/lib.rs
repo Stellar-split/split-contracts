@@ -124,8 +124,10 @@ mod storage_keys;
 mod migrations;
 pub mod notifications;
 mod webhooks;
+pub mod shard_routing;
 
 mod insurance_pool;
+pub mod shard_messaging;
 mod sustainability;
 mod cooperative;
 mod education_lockup;
