@@ -213,6 +213,39 @@ The same field is then added to `InvoiceExt2` (or `InvoiceExt3`), copied in
 `create_invoice`, defaulted in `InvoiceExt2::default`, and covered by a schema
 migration + tests.
 
+## Pull request checklist
+
+The PR template (`.github/PULL_REQUEST_TEMPLATE.md`) carries this list. Before you ask for a review:
+
+- [ ] The issue was assigned to you, and the PR is linked with `Closes #N`.
+- [ ] The branch is named `fix/issue-N-...` or `feat/issue-N-...`.
+- [ ] `cargo test --workspace` passes, and `cargo clippy` and `cargo fmt` are clean.
+- [ ] New public functions have `///` doc comments, and there is no `unwrap()` in production paths.
+- [ ] A new `ContractError` is appended with the next free number (see the section above).
+- [ ] A change to a stored struct bumps `CURRENT_SCHEMA_VERSION` and adds a migration.
+- [ ] A new storage key is in `STORAGE_KEY_REGISTRY.md`, and the storage key snapshot is updated if it changed.
+- [ ] User-visible behaviour is described in `README.md` or `docs/`.
+
+## FAQ
+
+**Do I need to be assigned before I start?** Yes. Comment on the issue, wait for a maintainer to assign it,
+then fork. This repo is part of the Drips Wave Program, and unassigned work may not be counted.
+
+**Where do I put my tests?** In `contracts/split/src/test.rs` for the `split` contract, or in the crate's own
+`test.rs`. [`docs/INTEGRATION_TESTING.md`](docs/INTEGRATION_TESTING.md) explains the helpers and the layout.
+
+**Why did `storage_snapshot` fail?** You added, renamed or removed a storage key, and the test is meant to
+catch that. Follow the update steps in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#34-storage-key-snapshot),
+and mention the change in your PR.
+
+**Can I renumber or reuse an error code?** No. Numbers are stable and new codes are only appended. See the
+`ContractError` section above, and [`docs/ERROR_CODES_SPLIT.md`](docs/ERROR_CODES_SPLIT.md).
+
+**Which contract does my change belong in?** Most protocol logic is in `split`. The system map in
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) lists the nine crates and what each one does.
+
+**My call fails and I do not know why.** Start with [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md).
+
 ## Questions?
 
 Open a [Discussion](../../discussions) or ask in the issue thread.
