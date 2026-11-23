@@ -82,15 +82,18 @@ mod validation;
 mod calc;
 mod tx_result_cache;
 mod math;
+mod invoice_routing_rules;
 mod stats;
 mod storage_layout_opt;
 pub mod security_audit;
 pub mod payment_tracking;
 pub mod velocity;
+mod invoice_compliance_checklist;
 pub mod split_rules;
 pub mod pool;
 mod batch_verify;
 pub mod compression;
+mod zk_commitment_verifier;
 pub mod aggregation;
 pub mod template_library;
 
