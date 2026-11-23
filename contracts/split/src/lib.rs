@@ -93,6 +93,7 @@ mod invoice_compliance_checklist;
 pub mod split_rules;
 mod split_strategies;
 mod escrow_arbitration;
+mod tiered_refund;
 pub mod pool;
 mod batch_verify;
 pub mod compression;
