@@ -559,10 +559,12 @@ impl CharitySplitContract {
     // Views
     // -----------------------------------------------------------------------
 
+    /// Return the registered charity record for `charity`, or `None` if it is not registered.
     pub fn get_charity(env: Env, charity: Address) -> Option<Charity> {
         env.storage().persistent().get(&charity_key(&charity))
     }
 
+    /// Return the charity invoice with `invoice_id`, or `None` if it does not exist.
     pub fn get_invoice(env: Env, invoice_id: u64) -> Option<CharityInvoice> {
         env.storage().persistent().get(&invoice_key(invoice_id))
     }
@@ -573,6 +575,7 @@ impl CharitySplitContract {
         compute_split(&env, &inv)
     }
 
+    /// Return the total `payer` has contributed to the invoice, or `0` if they have not paid.
     pub fn get_contribution(env: Env, invoice_id: u64, payer: Address) -> i128 {
         env.storage()
             .persistent()

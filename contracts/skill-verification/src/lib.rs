@@ -370,10 +370,12 @@ impl SkillVerificationContract {
     // Views
     // -----------------------------------------------------------------------
 
+    /// Return whether `verifier` is allowed to verify claims for `skill`.
     pub fn is_verifier(env: Env, verifier: Address, skill: Symbol) -> bool {
         is_verifier_for(&env, &verifier, &skill)
     }
 
+    /// Return the skill claim with `claim_id`, or `None` if it does not exist.
     pub fn get_claim(env: Env, claim_id: u64) -> Option<SkillClaim> {
         env.storage().persistent().get(&claim_key(claim_id))
     }

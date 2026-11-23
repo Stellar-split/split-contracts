@@ -28,6 +28,8 @@
 
 use soroban_sdk::{contracttype, symbol_short, Address, Env, IntoVal, String, Symbol, Val, Vec};
 
+use crate::types::InvoiceStatus;
+
 // ---------------------------------------------------------------------------
 // Event filter bits
 // ---------------------------------------------------------------------------
@@ -42,9 +44,38 @@ pub const EVENT_RELEASED: u32 = 1 << 2;
 pub const EVENT_REFUNDED: u32 = 1 << 3;
 /// Invoice cancelled before any payment.
 pub const EVENT_CANCELLED: u32 = 1 << 4;
+/// Any invoice status transition (`from_status -> to_status`).
+pub const EVENT_STATUS_CHANGED: u32 = 1 << 5;
+/// Invoice transitioned to `Pending`.
+pub const EVENT_STATUS_PENDING: u32 = 1 << 6;
+/// Invoice transitioned to `Expired`.
+pub const EVENT_STATUS_EXPIRED: u32 = 1 << 7;
+/// Invoice transitioned to `Disputed`.
+pub const EVENT_STATUS_DISPUTED: u32 = 1 << 8;
+/// Invoice transitioned to `PartiallyReleased`.
+pub const EVENT_STATUS_PARTIALLY_RELEASED: u32 = 1 << 9;
+/// Invoice transitioned to `Finalised`.
+pub const EVENT_STATUS_FINALISED: u32 = 1 << 10;
+/// Invoice transitioned to `Deleted`.
+pub const EVENT_STATUS_DELETED: u32 = 1 << 11;
+/// Invoice transitioned to `PayoutInProgress`.
+pub const EVENT_STATUS_PAYOUT_IN_PROGRESS: u32 = 1 << 12;
+/// Every status-change event bit.
+pub const EVENT_ALL_STATUS_CHANGES: u32 = EVENT_STATUS_CHANGED
+    | EVENT_STATUS_PENDING
+    | EVENT_STATUS_EXPIRED
+    | EVENT_STATUS_DISPUTED
+    | EVENT_STATUS_PARTIALLY_RELEASED
+    | EVENT_STATUS_FINALISED
+    | EVENT_STATUS_DELETED
+    | EVENT_STATUS_PAYOUT_IN_PROGRESS;
 /// Every supported event.
-pub const EVENT_ALL: u32 =
-    EVENT_CREATED | EVENT_PAID | EVENT_RELEASED | EVENT_REFUNDED | EVENT_CANCELLED;
+pub const EVENT_ALL: u32 = EVENT_CREATED
+    | EVENT_PAID
+    | EVENT_RELEASED
+    | EVENT_REFUNDED
+    | EVENT_CANCELLED
+    | EVENT_ALL_STATUS_CHANGES;
 
 // ---------------------------------------------------------------------------
 // Limits
@@ -107,19 +138,36 @@ pub enum DeliveryStatus {
 
 /// Record of one event delivery to one webhook.
 #[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct WebhookDelivery {
     pub id: u64,
     pub webhook_id: u64,
     pub invoice_id: u64,
-    /// The single `EVENT_*` bit that triggered this delivery.
+    /// The `EVENT_*` bit that triggered this delivery.
     pub event: u32,
+    /// Previous invoice status when triggered by a status transition.
+    pub from_status: Option<InvoiceStatus>,
+    /// New invoice status when triggered by a status transition.
+    pub to_status: Option<InvoiceStatus>,
     pub status: DeliveryStatus,
     pub attempts: u32,
     pub created_ledger: u32,
     pub last_attempt_ledger: u32,
     /// Ledger at or after which a retry may be attempted (0 when not scheduled).
     pub next_retry_ledger: u32,
+}
+
+/// Aggregated tracking statistics for a webhook.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WebhookStats {
+    pub webhook_id: u64,
+    pub active: bool,
+    pub total_deliveries: u64,
+    pub delivered_count: u64,
+    pub failed_count: u64,
+    pub pending_count: u64,
+    pub consecutive_failures: u32,
 }
 
 #[contracttype]
@@ -139,6 +187,8 @@ enum WebhookKey {
     Delivery(u64),
     /// Delivery ids for a webhook, most recent last (persistent).
     WebhookDeliveries(u64),
+    /// Delivery ids for an invoice, most recent last (persistent).
+    InvoiceDeliveries(u64),
 }
 
 /// Number of delivery ids retained per webhook for `list_deliveries`.
@@ -371,6 +421,61 @@ pub fn list_deliveries(env: &Env, webhook_id: u64) -> Vec<WebhookDelivery> {
     out
 }
 
+/// Most recent deliveries for a webhook filtered by [`DeliveryStatus`].
+pub fn list_deliveries_by_status(
+    env: &Env,
+    webhook_id: u64,
+    status: DeliveryStatus,
+) -> Vec<WebhookDelivery> {
+    let mut out = Vec::new(env);
+    for d in list_deliveries(env, webhook_id).iter() {
+        if d.status == status {
+            out.push_back(d);
+        }
+    }
+    out
+}
+
+/// Most recent deliveries for an invoice (oldest first, up to `MAX_TRACKED_DELIVERIES`).
+pub fn list_invoice_deliveries(env: &Env, invoice_id: u64) -> Vec<WebhookDelivery> {
+    let ids: Vec<u64> = env
+        .storage()
+        .persistent()
+        .get(&WebhookKey::InvoiceDeliveries(invoice_id))
+        .unwrap_or_else(|| Vec::new(env));
+    let mut out = Vec::new(env);
+    for id in ids.iter() {
+        if let Some(d) = get_delivery(env, id) {
+            out.push_back(d);
+        }
+    }
+    out
+}
+
+/// Aggregated tracking statistics for a webhook.
+pub fn get_webhook_stats(env: &Env, webhook_id: u64) -> Option<WebhookStats> {
+    let webhook = get_webhook(env, webhook_id)?;
+    let mut pending_count: u64 = 0;
+    for d in list_deliveries(env, webhook_id).iter() {
+        if d.status == DeliveryStatus::Pending {
+            pending_count += 1;
+        }
+    }
+    let total_deliveries = webhook
+        .delivered_count
+        .saturating_add(webhook.failed_count)
+        .saturating_add(pending_count);
+    Some(WebhookStats {
+        webhook_id,
+        active: webhook.active,
+        total_deliveries,
+        delivered_count: webhook.delivered_count,
+        failed_count: webhook.failed_count,
+        pending_count,
+        consecutive_failures: webhook.consecutive_failures,
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Delivery
 // ---------------------------------------------------------------------------
@@ -392,6 +497,24 @@ pub fn event_from_symbol(env: &Env, event: &Symbol) -> u32 {
     }
 }
 
+/// Map an [`InvoiceStatus`] to its specific status-change `EVENT_STATUS_*` bit.
+///
+/// `Released`, `Refunded`, and `Cancelled` return `0` here because those already
+/// have dedicated `EVENT_*` bits dispatched via `notify_invoice`; subscribers
+/// wanting all status transitions can subscribe to `EVENT_STATUS_CHANGED`.
+pub fn status_event_bit(status: &InvoiceStatus) -> u32 {
+    match status {
+        InvoiceStatus::Pending => EVENT_STATUS_PENDING,
+        InvoiceStatus::Expired => EVENT_STATUS_EXPIRED,
+        InvoiceStatus::Disputed => EVENT_STATUS_DISPUTED,
+        InvoiceStatus::PartiallyReleased => EVENT_STATUS_PARTIALLY_RELEASED,
+        InvoiceStatus::Finalised => EVENT_STATUS_FINALISED,
+        InvoiceStatus::Deleted => EVENT_STATUS_DELETED,
+        InvoiceStatus::PayoutInProgress => EVENT_STATUS_PAYOUT_IN_PROGRESS,
+        InvoiceStatus::Released | InvoiceStatus::Refunded | InvoiceStatus::Cancelled => 0,
+    }
+}
+
 fn is_match(webhook: &Webhook, invoice_id: u64, event: u32) -> bool {
     webhook.active
         && webhook.event_mask & event != 0
@@ -403,6 +526,37 @@ fn is_match(webhook: &Webhook, invoice_id: u64, event: u32) -> bool {
 /// Never panics on subscriber failure: failed target invocations are recorded
 /// and scheduled for retry.
 pub fn dispatch(env: &Env, invoice_id: u64, event: u32) {
+    dispatch_inner(env, invoice_id, event, None, None);
+}
+
+/// Fan an invoice status transition out to every webhook subscribed to
+/// `EVENT_STATUS_CHANGED` or the target status's specific `EVENT_STATUS_*` bit.
+///
+/// Never panics on subscriber failure: failed target invocations are recorded
+/// and scheduled for retry.
+pub fn dispatch_status_change(
+    env: &Env,
+    invoice_id: u64,
+    from_status: Option<&InvoiceStatus>,
+    to_status: &InvoiceStatus,
+) {
+    let event = EVENT_STATUS_CHANGED | status_event_bit(to_status);
+    dispatch_inner(
+        env,
+        invoice_id,
+        event,
+        from_status.cloned(),
+        Some(to_status.clone()),
+    );
+}
+
+fn dispatch_inner(
+    env: &Env,
+    invoice_id: u64,
+    event: u32,
+    from_status: Option<InvoiceStatus>,
+    to_status: Option<InvoiceStatus>,
+) {
     if event == 0 {
         return;
     }
@@ -424,20 +578,26 @@ pub fn dispatch(env: &Env, invoice_id: u64, event: u32) {
             id: next_id(env, WebhookKey::NextDeliveryId),
             webhook_id,
             invoice_id,
-            event,
+            event: webhook.event_mask & event,
+            from_status: from_status.clone(),
+            to_status: to_status.clone(),
             status: DeliveryStatus::Pending,
             attempts: 0,
             created_ledger: now,
             last_attempt_ledger: 0,
             next_retry_ledger: 0,
         };
-        track_delivery(env, webhook_id, delivery.id);
+        track_delivery(env, webhook_id, invoice_id, delivery.id);
         attempt(env, webhook, &mut delivery);
     }
 }
 
-fn track_delivery(env: &Env, webhook_id: u64, delivery_id: u64) {
-    let key = WebhookKey::WebhookDeliveries(webhook_id);
+fn track_delivery(env: &Env, webhook_id: u64, invoice_id: u64, delivery_id: u64) {
+    append_tracked_id(env, WebhookKey::WebhookDeliveries(webhook_id), delivery_id);
+    append_tracked_id(env, WebhookKey::InvoiceDeliveries(invoice_id), delivery_id);
+}
+
+fn append_tracked_id(env: &Env, key: WebhookKey, delivery_id: u64) {
     let mut ids: Vec<u64> = env
         .storage()
         .persistent()
@@ -565,4 +725,367 @@ pub fn ack(env: &Env, owner: Address, delivery_id: u64, success: bool) -> Delive
     }
     record_outcome(env, webhook, &mut delivery, success);
     delivery.status
+}
+
+/// Retry all due pending deliveries for `webhook_id`. Callable by anyone
+/// (keepers/relayers). Returns the number of deliveries retried.
+pub fn retry_pending_deliveries(env: &Env, webhook_id: u64) -> u32 {
+    let now = env.ledger().sequence();
+    let mut retried: u32 = 0;
+    for d in list_deliveries(env, webhook_id).iter() {
+        if d.status == DeliveryStatus::Pending && now >= d.next_retry_ledger {
+            retry(env, d.id);
+            retried += 1;
+        }
+    }
+    retried
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use soroban_sdk::{
+        contract, contractimpl,
+        testutils::{Address as _, Ledger},
+        Env, String,
+    };
+
+    /// Mock on-chain webhook receiver whose fail/succeed behavior is controlled via storage.
+    #[contract]
+    pub struct MockWebhookTarget;
+
+    #[contractimpl]
+    impl MockWebhookTarget {
+        pub fn set_should_fail(env: Env, fail: bool) {
+            env.storage().instance().set(&symbol_short!("fail"), &fail);
+        }
+
+        pub fn call_count(env: Env) -> u32 {
+            env.storage()
+                .instance()
+                .get(&symbol_short!("calls"))
+                .unwrap_or(0u32)
+        }
+
+        pub fn on_webhook(env: Env, _delivery_id: u64, _invoice_id: u64, _event: u32) {
+            let calls: u32 = env
+                .storage()
+                .instance()
+                .get(&symbol_short!("calls"))
+                .unwrap_or(0u32);
+            env.storage()
+                .instance()
+                .set(&symbol_short!("calls"), &(calls + 1));
+            let should_fail: bool = env
+                .storage()
+                .instance()
+                .get(&symbol_short!("fail"))
+                .unwrap_or(false);
+            if should_fail {
+                panic!("simulated target failure");
+            }
+        }
+    }
+
+    #[test]
+    fn test_status_change_webhook_delivery_and_tracking() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(crate::SplitContract, ());
+        let owner = Address::generate(&env);
+
+        env.as_contract(&contract_id, || {
+            let wh_id = register(
+                &env,
+                owner.clone(),
+                String::from_str(&env, "https://example.com/webhooks/status"),
+                None,
+                EVENT_STATUS_CHANGED,
+                None,
+            );
+
+            dispatch_status_change(
+                &env,
+                42,
+                Some(&InvoiceStatus::Pending),
+                &InvoiceStatus::Disputed,
+            );
+
+            let deliveries = list_deliveries(&env, wh_id);
+            assert_eq!(deliveries.len(), 1);
+            let d = deliveries.get(0).unwrap();
+            assert_eq!(d.invoice_id, 42);
+            assert_eq!(d.event, EVENT_STATUS_CHANGED);
+            assert_eq!(d.from_status, Some(InvoiceStatus::Pending));
+            assert_eq!(d.to_status, Some(InvoiceStatus::Disputed));
+            assert_eq!(d.status, DeliveryStatus::Pending);
+            assert_eq!(d.attempts, 1);
+
+            // Tracked per invoice as well
+            let inv_deliveries = list_invoice_deliveries(&env, 42);
+            assert_eq!(inv_deliveries.len(), 1);
+            assert_eq!(inv_deliveries.get(0).unwrap().id, d.id);
+
+            // Stats before ack
+            let stats = get_webhook_stats(&env, wh_id).unwrap();
+            assert_eq!(stats.total_deliveries, 1);
+            assert_eq!(stats.pending_count, 1);
+            assert_eq!(stats.delivered_count, 0);
+            assert_eq!(stats.failed_count, 0);
+
+            // Acknowledge success
+            let status = ack(&env, owner.clone(), d.id, true);
+            assert_eq!(status, DeliveryStatus::Delivered);
+
+            let delivered = list_deliveries_by_status(&env, wh_id, DeliveryStatus::Delivered);
+            assert_eq!(delivered.len(), 1);
+            assert_eq!(
+                list_deliveries_by_status(&env, wh_id, DeliveryStatus::Pending).len(),
+                0
+            );
+
+            let stats = get_webhook_stats(&env, wh_id).unwrap();
+            assert_eq!(stats.total_deliveries, 1);
+            assert_eq!(stats.pending_count, 0);
+            assert_eq!(stats.delivered_count, 1);
+        });
+    }
+
+    #[test]
+    fn test_status_change_filtering_by_event_mask_and_invoice() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(crate::SplitContract, ());
+        let owner = Address::generate(&env);
+
+        env.as_contract(&contract_id, || {
+            let wh_disputed_only = register(
+                &env,
+                owner.clone(),
+                String::from_str(&env, "https://example.com/disputed"),
+                None,
+                EVENT_STATUS_DISPUTED,
+                None,
+            );
+            let wh_invoice_10 = register(
+                &env,
+                owner.clone(),
+                String::from_str(&env, "https://example.com/inv10"),
+                None,
+                EVENT_STATUS_CHANGED,
+                Some(10),
+            );
+            let wh_inactive = register(
+                &env,
+                owner.clone(),
+                String::from_str(&env, "https://example.com/inactive"),
+                None,
+                EVENT_ALL,
+                None,
+            );
+            update(
+                &env,
+                owner.clone(),
+                wh_inactive,
+                String::from_str(&env, "https://example.com/inactive"),
+                None,
+                EVENT_ALL,
+                None,
+                false,
+            );
+
+            // Invoice 10 -> Expired: only wh_invoice_10 matches
+            dispatch_status_change(
+                &env,
+                10,
+                Some(&InvoiceStatus::Pending),
+                &InvoiceStatus::Expired,
+            );
+            assert_eq!(list_deliveries(&env, wh_disputed_only).len(), 0);
+            assert_eq!(list_deliveries(&env, wh_invoice_10).len(), 1);
+            assert_eq!(list_deliveries(&env, wh_inactive).len(), 0);
+
+            // Invoice 11 -> Disputed: only wh_disputed_only matches
+            dispatch_status_change(
+                &env,
+                11,
+                Some(&InvoiceStatus::Pending),
+                &InvoiceStatus::Disputed,
+            );
+            assert_eq!(list_deliveries(&env, wh_disputed_only).len(), 1);
+            assert_eq!(list_deliveries(&env, wh_invoice_10).len(), 1);
+            assert_eq!(list_deliveries(&env, wh_inactive).len(), 0);
+        });
+    }
+
+    #[test]
+    fn test_onchain_target_reliable_delivery_and_retry() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(crate::SplitContract, ());
+        let target_id = env.register(MockWebhookTarget, ());
+        let target_client = MockWebhookTargetClient::new(&env, &target_id);
+        let owner = Address::generate(&env);
+
+        target_client.set_should_fail(&true);
+
+        let delivery_id = env.as_contract(&contract_id, || {
+            let wh_id = register(
+                &env,
+                owner.clone(),
+                String::from_str(&env, ""),
+                Some(target_id.clone()),
+                EVENT_STATUS_CHANGED,
+                None,
+            );
+
+            // Must not panic even though target contract panics
+            dispatch_status_change(
+                &env,
+                7,
+                Some(&InvoiceStatus::Pending),
+                &InvoiceStatus::PartiallyReleased,
+            );
+
+            let d = list_deliveries(&env, wh_id).get(0).unwrap();
+            assert_eq!(d.status, DeliveryStatus::Pending);
+            assert_eq!(d.attempts, 1);
+            assert_eq!(
+                d.next_retry_ledger,
+                env.ledger().sequence() + backoff_ledgers(1)
+            );
+            d.id
+        });
+
+        // Target recovers; advance ledger past backoff and retry
+        target_client.set_should_fail(&false);
+        env.ledger()
+            .set_sequence_number(env.ledger().sequence() + backoff_ledgers(1));
+
+        env.as_contract(&contract_id, || {
+            let status = retry(&env, delivery_id);
+            assert_eq!(status, DeliveryStatus::Delivered);
+            let d = get_delivery(&env, delivery_id).unwrap();
+            assert_eq!(d.attempts, 2);
+            assert_eq!(d.next_retry_ledger, 0);
+        });
+    }
+
+    #[test]
+    fn test_retry_exhaustion_and_batch_retry_pending() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(crate::SplitContract, ());
+        let target_id = env.register(MockWebhookTarget, ());
+        let target_client = MockWebhookTargetClient::new(&env, &target_id);
+        let owner = Address::generate(&env);
+
+        target_client.set_should_fail(&true);
+
+        let (wh_id, delivery_id) = env.as_contract(&contract_id, || {
+            let wh_id = register(
+                &env,
+                owner.clone(),
+                String::from_str(&env, ""),
+                Some(target_id.clone()),
+                EVENT_STATUS_CHANGED,
+                None,
+            );
+            dispatch_status_change(
+                &env,
+                99,
+                Some(&InvoiceStatus::Pending),
+                &InvoiceStatus::Expired,
+            );
+            let d = list_deliveries(&env, wh_id).get(0).unwrap();
+            (wh_id, d.id)
+        });
+
+        // Exhaust remaining attempts via batch retry_pending_deliveries
+        for attempt_num in 1..MAX_DELIVERY_ATTEMPTS {
+            env.ledger()
+                .set_sequence_number(env.ledger().sequence() + backoff_ledgers(attempt_num));
+            env.as_contract(&contract_id, || {
+                let retried = retry_pending_deliveries(&env, wh_id);
+                assert_eq!(retried, 1);
+            });
+        }
+
+        env.as_contract(&contract_id, || {
+            let d = get_delivery(&env, delivery_id).unwrap();
+            assert_eq!(d.status, DeliveryStatus::Failed);
+            assert_eq!(d.attempts, MAX_DELIVERY_ATTEMPTS);
+
+            let failed = list_deliveries_by_status(&env, wh_id, DeliveryStatus::Failed);
+            assert_eq!(failed.len(), 1);
+
+            let stats = get_webhook_stats(&env, wh_id).unwrap();
+            assert_eq!(stats.failed_count, 1);
+            assert_eq!(stats.pending_count, 0);
+            assert_eq!(stats.consecutive_failures, 1);
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "retry not yet due")]
+    fn test_retry_before_backoff_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(crate::SplitContract, ());
+        let owner = Address::generate(&env);
+
+        env.as_contract(&contract_id, || {
+            let wh_id = register(
+                &env,
+                owner.clone(),
+                String::from_str(&env, "https://example.com/hook"),
+                None,
+                EVENT_STATUS_CHANGED,
+                None,
+            );
+            dispatch_status_change(
+                &env,
+                5,
+                Some(&InvoiceStatus::Pending),
+                &InvoiceStatus::Disputed,
+            );
+            let d = list_deliveries(&env, wh_id).get(0).unwrap();
+            retry(&env, d.id);
+        });
+    }
+
+    #[test]
+    fn test_invoice_state_changed_emits_status_webhook() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(crate::SplitContract, ());
+        let owner = Address::generate(&env);
+        let actor = Address::generate(&env);
+
+        env.as_contract(&contract_id, || {
+            let wh_id = register(
+                &env,
+                owner.clone(),
+                String::from_str(&env, "https://example.com/lifecycle"),
+                None,
+                EVENT_STATUS_CHANGED,
+                None,
+            );
+
+            crate::events::invoice_state_changed(
+                &env,
+                123,
+                Some(&InvoiceStatus::Pending),
+                &InvoiceStatus::Released,
+                &actor,
+            );
+
+            let deliveries = list_deliveries(&env, wh_id);
+            assert_eq!(deliveries.len(), 1);
+            let d = deliveries.get(0).unwrap();
+            assert_eq!(d.invoice_id, 123);
+            assert_eq!(d.from_status, Some(InvoiceStatus::Pending));
+            assert_eq!(d.to_status, Some(InvoiceStatus::Released));
+        });
+    }
 }
