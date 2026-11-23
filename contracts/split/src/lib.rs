@@ -13346,6 +13346,8 @@ impl SplitContract {
                 &caller,
                 0,
             );
+            // Issue #1118: notify webhook subscribers that the invoice was cancelled.
+            webhooks::dispatch(&env, invoice_id, webhooks::EVENT_CANCELLED);
         }
 
         // Issue #503: decrement per-creator open-invoice counter on cancel.
@@ -13950,8 +13952,25 @@ impl SplitContract {
     /// `majority` — when `false` (default), all members must be fully funded before
     /// any can release (AllOrNothing). When `true`, a strict majority (>50%) being
     /// fully funded is sufficient to unblock release (Issue #212).
+    ///
+    /// The creator of the invoices must authorise the call, and every invoice must have that
+    /// creator (Issue #1119). Without this check anyone could group another creator's invoice
+    /// with an unfunded one and hold up its release.
     pub fn create_invoice_group(env: Env, invoice_ids: Vec<u64>, majority: bool) -> u64 {
         assert!(invoice_ids.len() >= 2, "group needs at least 2 invoices");
+
+        let creator = load_invoice(
+            &env,
+            invoice_ids.get(0).expect("group needs at least 2 invoices"),
+        )
+        .creator;
+        creator.require_auth();
+        for id in invoice_ids.iter() {
+            assert!(
+                load_invoice(&env, id).creator == creator,
+                "group invoices must share a creator"
+            );
+        }
 
         let grp_cnt_key = symbol_short!("grp_cnt");
         let group_id: u64 = env.storage().persistent().get(&grp_cnt_key).unwrap_or(0u64) + 1;
@@ -17750,13 +17769,28 @@ impl SplitContract {
     // -----------------------------------------------------------------------
 
     /// Get all invoice IDs in a group (Issue #434 support).
+    ///
+    /// Groups made by `create_invoice_group` are stored as an `InvoiceGroup`, so that record is
+    /// read first (Issue #1119). The older members list is the fallback.
     pub fn get_group_members_list(env: Env, group_id: u64) -> Vec<u64> {
-        get_group_members(&env, group_id)
+        match env
+            .storage()
+            .persistent()
+            .get::<_, types::InvoiceGroup>(&group_key(group_id))
+        {
+            Some(group) => group.invoice_ids,
+            None => get_group_members(&env, group_id),
+        }
     }
 
     /// Get the group ID for an invoice, if it belongs to a group (Issue #434 support).
+    ///
+    /// Reads the key written by `create_invoice_group` first (Issue #1119).
     pub fn get_invoice_group_id_info(env: Env, invoice_id: u64) -> Option<u64> {
-        get_invoice_group_id(&env, invoice_id)
+        env.storage()
+            .persistent()
+            .get::<(Symbol, u64), u64>(&invoice_group_key(invoice_id))
+            .or_else(|| get_invoice_group_id(&env, invoice_id))
     }
 
     /// Rollback a group: set all members to Refunded and process refunds.
