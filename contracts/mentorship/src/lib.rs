@@ -531,14 +531,17 @@ impl MentorshipContract {
     // Views
     // -----------------------------------------------------------------------
 
+    /// Return the profile of `mentor`, or `None` if they have not registered.
     pub fn get_mentor(env: Env, mentor: Address) -> Option<MentorProfile> {
         env.storage().persistent().get(&mentor_key(&mentor))
     }
 
+    /// Return the mentorship program with `program_id`, or `None` if it does not exist.
     pub fn get_program(env: Env, program_id: u64) -> Option<MentorshipProgram> {
         env.storage().persistent().get(&program_key(program_id))
     }
 
+    /// Return the ids of the programs run by `mentor`, or an empty list if there are none.
     pub fn get_mentor_programs(env: Env, mentor: Address) -> Vec<u64> {
         env.storage()
             .persistent()
@@ -546,6 +549,7 @@ impl MentorshipContract {
             .unwrap_or_else(|| Vec::new(&env))
     }
 
+    /// Return the ids of the programs `mentee` takes part in, or an empty list if there are none.
     pub fn get_mentee_programs(env: Env, mentee: Address) -> Vec<u64> {
         env.storage()
             .persistent()

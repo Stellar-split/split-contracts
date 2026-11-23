@@ -85,6 +85,10 @@ pub struct DashboardContract;
 
 #[contractimpl]
 impl DashboardContract {
+    /// Authorise `split_contract` as the only contract allowed to record dashboard updates.
+    ///
+    /// The first call sets the address and takes no authorisation; later calls panic with
+    /// `already initialized`.
     pub fn initialize(env: Env, split_contract: Address) {
         assert!(
             !env.storage().instance().has(&authorized_contract_key()),
@@ -95,6 +99,10 @@ impl DashboardContract {
             .set(&authorized_contract_key(), &split_contract);
     }
 
+    /// Count a newly created invoice for `creator` and add `total` to their total volume.
+    ///
+    /// Only the authorised `split` contract may call this (its auth is required). Panics with
+    /// `not initialized` before `initialize`, and on counter overflow.
     pub fn record_created(env: Env, creator: Address, total: i128) {
         let authorized: Address = env
             .storage()
@@ -126,6 +134,10 @@ impl DashboardContract {
         env.storage().persistent().set(&key, &dashboard);
     }
 
+    /// Count a released invoice for `creator` and add `total` to their released volume.
+    ///
+    /// Only the authorised `split` contract may call this. Panics with `not initialized` before
+    /// `initialize`, and on counter overflow.
     pub fn record_released(env: Env, creator: Address, total: i128) {
         let authorized: Address = env
             .storage()
@@ -157,6 +169,10 @@ impl DashboardContract {
         env.storage().persistent().set(&key, &dashboard);
     }
 
+    /// Count a refunded invoice for `creator`.
+    ///
+    /// Only the authorised `split` contract may call this. Panics with `not initialized` before
+    /// `initialize`, and on counter overflow.
     pub fn record_refunded(env: Env, creator: Address) {
         let authorized: Address = env
             .storage()
@@ -184,6 +200,7 @@ impl DashboardContract {
         env.storage().persistent().set(&key, &dashboard);
     }
 
+    /// Return the dashboard counters for `creator`, or all zeros if nothing was recorded yet.
     pub fn get_creator_dashboard(env: Env, creator: Address) -> CreatorDashboard {
         let key = creator_dashboard_key(&creator);
         env.storage()

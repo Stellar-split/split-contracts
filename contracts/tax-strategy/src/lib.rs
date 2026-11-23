@@ -435,10 +435,12 @@ impl TaxStrategyContract {
         compute_breakdown(&env, &config, period.taxable_income, gross)
     }
 
+    /// Return the tax strategy configured by `creator`, or `None` if they have none.
     pub fn get_strategy(env: Env, creator: Address) -> Option<TaxStrategy> {
         env.storage().persistent().get(&strategy_key(&creator))
     }
 
+    /// Return the bracket table saved under the template `name`, or `None` if there is none.
     pub fn get_template(env: Env, name: Symbol) -> Option<Vec<TaxBracket>> {
         env.storage().persistent().get(&template_key(&name))
     }

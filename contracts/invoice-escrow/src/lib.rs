@@ -2665,6 +2665,9 @@ impl InvoiceEscrowContract {
         })
     }
 
+    /// Return `true` only if `payer` has a blacklist entry that was finalised and upheld.
+    ///
+    /// An entry that is still open to appeal, or whose appeal succeeded, returns `false`.
     pub fn is_payer_blacklisted(env: Env, payer: Address) -> bool {
         env.storage()
             .persistent()

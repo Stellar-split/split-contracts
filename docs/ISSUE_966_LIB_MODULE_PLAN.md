@@ -32,8 +32,10 @@ contract's public interface does not change.
 
 ## Risks
 
-- `#[contractimpl]` requires every public function in one impl block, so delegation adds a line per
-  method. Check that the generated client keeps its method names.
+- Functions do not need to stay in one impl block: `lib.rs` already has 11 `#[contractimpl]` blocks and four
+  modules define their own (see [`ISSUE_1113_MODULAR_REFACTOR_STATUS.md`](./ISSUE_1113_MODULAR_REFACTOR_STATUS.md)).
+  A group can move to a module as its own block, with no delegating method. Check that the generated client
+  keeps its method names.
 - Moving code can change the order of storage reads, which changes the instruction budget. Compare
   the budget before and after each step.
 

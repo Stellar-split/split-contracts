@@ -83,13 +83,16 @@ mod calc;
 mod tx_result_cache;
 mod math;
 mod stats;
+mod storage_layout_opt;
 pub mod security_audit;
 pub mod payment_tracking;
 pub mod velocity;
 pub mod split_rules;
 pub mod pool;
+mod batch_verify;
 pub mod compression;
 pub mod aggregation;
+pub mod template_library;
 
 #[cfg(test)]
 mod test;
@@ -123,18 +126,22 @@ mod storage_keys;
 mod consensus_validation;
 
 mod migrations;
-mod hw_wallet_registry;
+pub mod notifications;
 mod webhooks;
+pub mod shard_routing;
 
 mod insurance_pool;
+pub mod shard_messaging;
 mod sustainability;
 mod cooperative;
+mod state_pruning;
 mod education_lockup;
-mod constant_time_guard;
+pub mod advance_deposits;
 
 // Issue #1033: Analytics and monitoring for usage tracking and alerts.
 mod analytics;
 mod monitoring;
+mod memory_bound_pow;
 
 // Issue #1011: Enhanced emergency pause mechanism.
 pub mod emergency_pause;
@@ -2577,6 +2584,10 @@ fn notify_invoice(
     }
 }
 
+/// Return the audit log of invoice `id`, oldest entry first.
+///
+/// Reads persistent storage first and falls back to instance storage, where an archived
+/// invoice's log is kept. Returns an empty list if nothing was logged.
 pub fn get_audit_log(env: &Env, id: u64) -> Vec<AuditEntry> {
     env.storage()
         .persistent()
@@ -4215,6 +4226,8 @@ impl SplitContract {
             .unwrap_or(0u64)
     }
 
+    /// Set how many ledgers a payment commitment stays valid before `reveal_payment` rejects it
+    /// with `CommitmentExpired`. Operator role or higher. Panics if `ledgers` is `0`.
     pub fn set_commitment_expiry(env: Env, admin: Address, ledgers: u32) {
         require_admin_role(&env, &admin, AdminRole::Operator);
         assert!(ledgers > 0, "commitment expiry must be positive");
@@ -5069,6 +5082,9 @@ impl SplitContract {
         events::trusted_caller_added(&env, &caller);
     }
 
+    /// Remove `caller` from the trusted callers list and emit an event. SuperAdmin only.
+    ///
+    /// Removing an address that is not in the list leaves the list unchanged.
     pub fn remove_trusted_caller(env: Env, admin: Address, caller: Address) {
         require_admin_role(&env, &admin, AdminRole::SuperAdmin);
         let trusted: Vec<Address> = env.storage().instance().get(&trusted_callers_key()).unwrap_or_else(|| Vec::new(&env));
@@ -5080,6 +5096,8 @@ impl SplitContract {
         events::trusted_caller_removed(&env, &caller);
     }
 
+    /// Set how many ledgers must pass after a failed payout before `sweep_unclaimed_funds` may
+    /// sweep it to the treasury. SuperAdmin only.
     pub fn set_sweep_timeout(env: Env, admin: Address, ledgers: u32) {
         require_admin_role(&env, &admin, AdminRole::SuperAdmin);
         env.storage().instance().set(&sweep_timeout_key(), &ledgers);
@@ -5202,6 +5220,9 @@ impl SplitContract {
         Ok(bps as u32)
     }
 
+    /// Return the deadline of the invoice, as a ledger timestamp in seconds.
+    ///
+    /// Panics with `InvoiceNotFound` for an unknown id, so the `None` case is not reached.
     pub fn get_invoice_deadline(env: Env, invoice_id: u64) -> Option<u64> {
         if let Some(core) = env.storage().persistent().get::<_, InvoiceCore>(&invoice_key(invoice_id)) {
             Some(core.deadline)
@@ -5212,6 +5233,9 @@ impl SplitContract {
         }
     }
 
+    /// Return the amount funded so far, reading the hot copy first.
+    ///
+    /// Panics with `InvoiceNotFound` for an unknown id, so the `None` case is not reached.
     pub fn get_invoice_funded(env: Env, invoice_id: u64) -> Option<i128> {
         if let Some(hot) = env.storage().instance().get::<_, InvoiceHot>(&invoice_hot_key(invoice_id)) {
             Some(hot.funded)
@@ -5224,6 +5248,9 @@ impl SplitContract {
         }
     }
 
+    /// Return the invoice status, reading the hot copy first.
+    ///
+    /// Panics with `InvoiceNotFound` for an unknown id, so the `None` case is not reached.
     pub fn get_invoice_status(env: Env, invoice_id: u64) -> Option<InvoiceStatus> {
         if let Some(hot) = env.storage().instance().get::<_, InvoiceHot>(&invoice_hot_key(invoice_id)) {
             Some(hot.status)
@@ -5545,6 +5572,11 @@ impl SplitContract {
             .unwrap_or(Vec::new(&env))
     }
 
+    /// Let `recipient` collect a payout that could not be sent when the invoice was released.
+    ///
+    /// Checks the failed-payout record and the older fallback escrow, pays the larger of the two in
+    /// the invoice's funding token, and clears both. Requires `recipient` auth. Panics with
+    /// `no payout balance to claim` when nothing is owed.
     pub fn claim_fallback(env: Env, recipient: Address, invoice_id: u64) {
         recipient.require_auth();
 
@@ -5591,11 +5623,18 @@ impl SplitContract {
         token_client.transfer(&env.current_contract_address(), &recipient, &amount);
     }
 
+    /// Return the older fallback escrow balance held for `recipient` on the invoice, or `0`.
+    ///
+    /// Failed-payout records are tracked separately and are not included here.
     pub fn get_fallback_balance(env: Env, invoice_id: u64, recipient: Address) -> i128 {
         let key = fallback_escrow_key(invoice_id, &recipient);
         env.storage().persistent().get(&key).unwrap_or(0)
     }
 
+    /// Store an instalment plan for `payer` on the invoice. Requires `payer` auth.
+    ///
+    /// The plan must have at least one tranche, every tranche amount must be positive, and tranche
+    /// ledgers must not decrease. Panics otherwise.
     pub fn register_instalment_plan(
         env: Env,
         payer: Address,
@@ -5618,6 +5657,9 @@ impl SplitContract {
         env.storage().persistent().set(&key, &plan);
     }
 
+    /// Return `(paid tranche index, total tranche count)` for the payer's plan on the invoice.
+    ///
+    /// Returns `(0, 0)` when the payer has no plan.
     pub fn get_instalment_status(env: Env, invoice_id: u64, payer: Address) -> (u32, u32) {
         let key = plan_key(invoice_id, &payer);
         if let Some(plan) = env.storage().persistent().get::<_, InstalmentPlan>(&key) {
@@ -5627,6 +5669,9 @@ impl SplitContract {
         }
     }
 
+    /// Lift the invoice's hold (`held_until`) and emit `escrow_resolved` with `resolution_hash`.
+    ///
+    /// Only the creator or a co-creator may call this. Requires `creator` auth.
     pub fn resolve_escrow(
         env: Env,
         creator: Address,
@@ -5644,6 +5689,10 @@ impl SplitContract {
         events::escrow_resolved(&env, invoice_id, &resolution_hash);
     }
 
+    /// Set the tiered fee brackets used by `compute_fee`. Admin only.
+    ///
+    /// Panics unless the list is non-empty, every `rate_bps` is at most `10_000`, `max_amount` strictly
+    /// increases, and the last bracket's `max_amount` is `i128::MAX`.
     pub fn set_fee_brackets(env: Env, admin: Address, brackets: Vec<FeeBracket>) {
         let _admin_addr = require_admin(&env);
         let _ = admin;
@@ -5667,6 +5716,10 @@ impl SplitContract {
         env.storage().instance().set(&fee_brackets_key(), &brackets);
     }
 
+    /// Compute the platform fee on `amount` from the fee brackets.
+    ///
+    /// Each slice of the amount is charged at the rate of the bracket it falls in. With no brackets
+    /// set, one flat bracket at the platform fee rate applies. Returns `0` for a non-positive amount.
     pub fn compute_fee(env: Env, amount: i128) -> i128 {
         if amount <= 0 {
             return 0;
@@ -7038,6 +7091,10 @@ impl SplitContract {
             .set(&rate_usage_key(creator), &usage);
     }
 
+    /// Create up to five invoices for `creator` in one call and return their ids in order.
+    ///
+    /// Requires `creator` auth and applies the creation rate limit to each invoice. Panics with
+    /// `batch limit exceeded` for more than five.
     pub fn create_batch(
         env: Env,
         creator: Address,
@@ -7776,6 +7833,10 @@ impl SplitContract {
     // Payment Channel (Issue #1)
     // -----------------------------------------------------------------------
 
+    /// Open a payment channel for `payer` on a pending, undisputed invoice.
+    ///
+    /// Moves `deposit` from the payer into the contract and records it as the channel balance.
+    /// Requires `payer` auth. Panics if `deposit` is not positive.
     pub fn open_channel(env: Env, payer: Address, invoice_id: u64, deposit: i128) {
         require_not_paused(&env);
         payer.require_auth();
@@ -7798,6 +7859,10 @@ impl SplitContract {
             .set(&channel_key(invoice_id, &payer), &state);
     }
 
+    /// Draw `amount` from the payer's channel balance.
+    ///
+    /// Only the channel balance changes. The drawn amount is applied to the invoice when the channel
+    /// is closed with `close_channel`. Panics if there is no channel or the balance is too low.
     pub fn channel_pay(env: Env, payer: Address, invoice_id: u64, amount: i128) {
         require_not_paused(&env);
         payer.require_auth();
@@ -7816,6 +7881,11 @@ impl SplitContract {
             .set(&channel_key(invoice_id, &payer), &state);
     }
 
+    /// Close the payer's channel and apply what was drawn to the invoice.
+    ///
+    /// The amount drawn is the deposit minus the remaining balance. If it is positive, the invoice
+    /// must be pending and undisputed, and the amount is recorded as a payment from `payer`.
+    /// Requires `payer` auth. Panics if there is no channel.
     pub fn close_channel(env: Env, payer: Address, invoice_id: u64) {
         require_not_paused(&env);
         payer.require_auth();
@@ -8092,6 +8162,11 @@ impl SplitContract {
         }
     }
 
+    /// First step of a commit-reveal payment: store `commitment_hash` for `payer` on the invoice.
+    ///
+    /// Requires `payer` auth. Panics with `ActiveCommitmentExists` if the payer already has a
+    /// commitment on this invoice. Pay with `reveal_payment` before the commitment expires, see
+    /// `set_commitment_expiry`.
     pub fn commit_payment(env: Env, payer: Address, invoice_id: u64, commitment_hash: BytesN<32>) {
         require_fn_not_paused(&env, &symbol_short!("pay"));
         payer.require_auth();
@@ -8122,6 +8197,11 @@ impl SplitContract {
         events::payment_committed(&env, invoice_id, &payer, commitment.commit_ledger);
     }
 
+    /// Second step of a commit-reveal payment: reveal `amount` and `salt` and pay.
+    ///
+    /// Panics with `CommitmentExpired` if the commitment is too old and with `CommitmentMismatch` if
+    /// the hash of the revealed values differs from the stored one. On success the commitment is
+    /// removed and the payment goes through the normal payment path. Requires `payer` auth.
     pub fn reveal_payment(
         env: Env,
         payer: Address,
@@ -8720,6 +8800,14 @@ impl SplitContract {
             invoice_id,
             symbol_short!("pay"),
             &invoice.notification_contract,
+        );
+        notifications::dispatch_payment_confirmation(
+            env,
+            invoice_id,
+            payer,
+            credited_amount,
+            &funding_token_for(&invoice),
+            nonce,
         );
         Self::maybe_release_milestones(env, invoice_id, &mut invoice, payer);
 
@@ -10874,6 +10962,10 @@ impl SplitContract {
         events::recipient_paid(&env, invoice_id, &recipient, payout);
     }
 
+    /// Pay `recipient` the pending amount that was not sent when the invoice was released.
+    ///
+    /// Requires `recipient` auth. Panics unless the invoice is `Released` and a pending payout exists.
+    /// Transfers in the recipient's token, clears the pending record and emits an event.
     pub fn claim_pending_payout(env: Env, invoice_id: u64, recipient: Address) {
         recipient.require_auth();
 
@@ -10906,6 +10998,11 @@ impl SplitContract {
         events::pending_payout_claimed(&env, invoice_id, &recipient, pending);
     }
 
+    /// Let `payer` claim their share of the invoice's overfunded surplus.
+    ///
+    /// The share is the surplus times the payer's contribution divided by all contributions. Each
+    /// payer can claim once. Requires `payer` auth. Panics if there is no surplus, the payer has
+    /// no contributions, or the surplus was already claimed.
     pub fn claim_surplus(env: Env, invoice_id: u64, payer: Address) {
         require_not_paused(&env);
         payer.require_auth();
@@ -12885,6 +12982,10 @@ impl SplitContract {
         events::payer_refunded(&env, old_invoice_id, &payer, amount);
     }
 
+    /// Rate a released invoice from `1` to `5` as one of its payers.
+    ///
+    /// Requires `payer` auth. Each payer can rate an invoice once. Updates the invoice's rating
+    /// totals and the creator's rating totals, and emits an event.
     pub fn rate_invoice(env: Env, payer: Address, invoice_id: u64, score: u32) {
         require_not_paused(&env);
         payer.require_auth();
@@ -13264,6 +13365,8 @@ impl SplitContract {
                 &caller,
                 0,
             );
+            // Issue #1118: notify webhook subscribers that the invoice was cancelled.
+            webhooks::dispatch(&env, invoice_id, webhooks::EVENT_CANCELLED);
         }
 
         // Issue #503: decrement per-creator open-invoice counter on cancel.
@@ -13868,8 +13971,25 @@ impl SplitContract {
     /// `majority` — when `false` (default), all members must be fully funded before
     /// any can release (AllOrNothing). When `true`, a strict majority (>50%) being
     /// fully funded is sufficient to unblock release (Issue #212).
+    ///
+    /// The creator of the invoices must authorise the call, and every invoice must have that
+    /// creator (Issue #1119). Without this check anyone could group another creator's invoice
+    /// with an unfunded one and hold up its release.
     pub fn create_invoice_group(env: Env, invoice_ids: Vec<u64>, majority: bool) -> u64 {
         assert!(invoice_ids.len() >= 2, "group needs at least 2 invoices");
+
+        let creator = load_invoice(
+            &env,
+            invoice_ids.get(0).expect("group needs at least 2 invoices"),
+        )
+        .creator;
+        creator.require_auth();
+        for id in invoice_ids.iter() {
+            assert!(
+                load_invoice(&env, id).creator == creator,
+                "group invoices must share a creator"
+            );
+        }
 
         let grp_cnt_key = symbol_short!("grp_cnt");
         let group_id: u64 = env.storage().persistent().get(&grp_cnt_key).unwrap_or(0u64) + 1;
@@ -14055,11 +14175,13 @@ impl SplitContract {
     // Read-only
     // -----------------------------------------------------------------------
 
+    /// Return the core record of the invoice. Panics if the invoice is not found.
     pub fn get_invoice(env: Env, invoice_id: u64) -> InvoiceCore {
         let inv = load_invoice(&env, invoice_id);
         inv.split().0
     }
 
+    /// Return `true` if the invoice has an archive marker.
     pub fn is_archived(env: Env, invoice_id: u64) -> bool {
         env.storage()
             .instance()
@@ -14070,16 +14192,20 @@ impl SplitContract {
                 .has(&archive_marker_key(invoice_id))
     }
 
+    /// Return the extension record of the invoice (co-signers, approval and oracle condition).
     pub fn get_invoice_ext(env: Env, invoice_id: u64) -> InvoiceExt {
         let inv = load_invoice(&env, invoice_id);
         inv.split().1
     }
 
+    /// Return the second extension record of the invoice (notification contract, overflow behaviour,
+    /// arbiter, dispute and auction fields, and minimum amounts).
     pub fn get_invoice_ext2(env: Env, invoice_id: u64) -> InvoiceExt2 {
         let inv = load_invoice(&env, invoice_id);
         inv.split().2
     }
 
+    /// Return the audit log of the invoice, oldest entry first.
     pub fn get_audit_log(env: Env, invoice_id: u64) -> Vec<AuditEntry> {
         get_audit_log(&env, invoice_id)
     }
@@ -14130,6 +14256,10 @@ impl SplitContract {
             .sum()
     }
 
+    /// Return the time-weighted average funded amount since the invoice was created.
+    ///
+    /// Computed as the accumulated numerator divided by the ledgers elapsed since creation.
+    /// Returns `0` while no payment has been recorded.
     pub fn get_twafr(env: Env, invoice_id: u64) -> i128 {
         let invoice = load_invoice(&env, invoice_id);
         // Payments live in sharded storage (issue #177), so `invoice.payments`
@@ -14150,6 +14280,7 @@ impl SplitContract {
         invoice.twafr_numerator / elapsed
     }
 
+    /// Return `(sum of scores, number of ratings)` for the invoice.
     pub fn get_invoice_rating(env: Env, invoice_id: u64) -> (u32, u32) {
         (
             env.storage()
@@ -14266,6 +14397,7 @@ impl SplitContract {
         Ok(phase)
     }
 
+    /// Return `(sum of scores, number of ratings)` across all of `creator`'s rated invoices.
     pub fn get_creator_rating(env: Env, creator: Address) -> (u32, u32) {
         env.storage()
             .persistent()
@@ -15081,6 +15213,10 @@ impl SplitContract {
         active
     }
 
+    /// Issue the payment certificate for a released invoice, or return the one already issued.
+    ///
+    /// The certificate hash is SHA-256 over the invoice id, the total and the release timestamp.
+    /// Panics if the invoice is not released.
     pub fn issue_certificate(env: Env, invoice_id: u64) -> PaymentCertificate {
         let invoice = load_invoice(&env, invoice_id);
         assert!(
@@ -15124,6 +15260,7 @@ impl SplitContract {
         cert
     }
 
+    /// Return the stored payment certificate. Panics with `certificate not found` if none was issued.
     pub fn get_certificate(env: Env, invoice_id: u64) -> PaymentCertificate {
         env.storage()
             .persistent()
@@ -17536,10 +17673,38 @@ impl SplitContract {
         webhooks::list_deliveries(&env, webhook_id)
     }
 
+    /// Return the most recent deliveries for a webhook filtered by delivery status.
+    pub fn list_deliveries_by_status(
+        env: Env,
+        webhook_id: u64,
+        status: webhooks::DeliveryStatus,
+    ) -> Vec<webhooks::WebhookDelivery> {
+        webhooks::list_deliveries_by_status(&env, webhook_id, status)
+    }
+
+    /// Return the most recent webhook deliveries for an invoice (oldest first).
+    pub fn list_invoice_deliveries(
+        env: Env,
+        invoice_id: u64,
+    ) -> Vec<webhooks::WebhookDelivery> {
+        webhooks::list_invoice_deliveries(&env, invoice_id)
+    }
+
+    /// Return aggregated delivery tracking statistics for a webhook.
+    pub fn get_webhook_stats(env: Env, webhook_id: u64) -> Option<webhooks::WebhookStats> {
+        webhooks::get_webhook_stats(&env, webhook_id)
+    }
+
     /// Retry a pending delivery once its backoff has elapsed. Callable by anyone.
     pub fn retry_webhook_delivery(env: Env, delivery_id: u64) -> webhooks::DeliveryStatus {
         require_not_paused(&env);
         webhooks::retry(&env, delivery_id)
+    }
+
+    /// Retry all due pending deliveries for a webhook. Callable by anyone.
+    pub fn retry_pending_deliveries(env: Env, webhook_id: u64) -> u32 {
+        require_not_paused(&env);
+        webhooks::retry_pending_deliveries(&env, webhook_id)
     }
 
     /// Report the outcome of an off-chain endpoint delivery. Webhook owner only.
@@ -17550,6 +17715,124 @@ impl SplitContract {
         success: bool,
     ) -> webhooks::DeliveryStatus {
         webhooks::ack(&env, owner, delivery_id, success)
+    }
+
+    // -----------------------------------------------------------------------
+    // Configurable payment confirmation notifications
+    // -----------------------------------------------------------------------
+
+    /// Register a configurable multi-channel payment confirmation notification.
+    pub fn register_notif_config(
+        env: Env,
+        owner: Address,
+        input: notifications::NotificationConfigInput,
+    ) -> u64 {
+        require_not_frozen(&env);
+        require_not_paused(&env);
+        if let Some(id) = input.invoice_id {
+            let _ = load_invoice(&env, id);
+        }
+        notifications::register_config(&env, owner, input)
+    }
+
+    /// Update an existing payment confirmation notification config. Owner only.
+    pub fn update_notif_config(
+        env: Env,
+        owner: Address,
+        config_id: u64,
+        input: notifications::NotificationConfigInput,
+    ) {
+        require_not_frozen(&env);
+        if let Some(id) = input.invoice_id {
+            let _ = load_invoice(&env, id);
+        }
+        notifications::update_config(&env, owner, config_id, input);
+    }
+
+    /// Enable or disable a payment confirmation notification config. Owner only.
+    pub fn set_notif_enabled(
+        env: Env,
+        owner: Address,
+        config_id: u64,
+        enabled: bool,
+    ) {
+        require_not_frozen(&env);
+        notifications::set_config_enabled(&env, owner, config_id, enabled);
+    }
+
+    /// Remove a payment confirmation notification config. Owner only.
+    pub fn remove_notif_config(env: Env, owner: Address, config_id: u64) {
+        notifications::remove_config(&env, owner, config_id, false);
+    }
+
+    /// Admin: forcibly remove a payment confirmation notification config.
+    pub fn admin_remove_notif_config(env: Env, admin: Address, config_id: u64) {
+        require_admin_role(&env, &admin, AdminRole::Operator);
+        notifications::remove_config(&env, admin, config_id, true);
+    }
+
+    /// Return a payment confirmation notification config by id.
+    pub fn get_notif_config(
+        env: Env,
+        config_id: u64,
+    ) -> Option<notifications::NotificationConfig> {
+        notifications::get_config(&env, config_id)
+    }
+
+    /// Return all registered payment confirmation notification configs.
+    pub fn list_notif_configs(env: Env) -> Vec<notifications::NotificationConfig> {
+        notifications::list_configs(&env)
+    }
+
+    /// Return all payment confirmation notification configs owned by `owner`.
+    pub fn list_owner_notif_configs(
+        env: Env,
+        owner: Address,
+    ) -> Vec<notifications::NotificationConfig> {
+        notifications::list_owner_configs(&env, &owner)
+    }
+
+    /// Return a payment confirmation notification record by id.
+    pub fn get_payment_notification(
+        env: Env,
+        notification_id: u64,
+    ) -> Option<notifications::NotificationRecord> {
+        notifications::get_notification(&env, notification_id)
+    }
+
+    /// Return recent payment confirmation notifications for a config.
+    pub fn list_config_notifications(
+        env: Env,
+        config_id: u64,
+    ) -> Vec<notifications::NotificationRecord> {
+        notifications::list_notifications_by_config(&env, config_id)
+    }
+
+    /// Return recent payment confirmation notifications for an invoice.
+    pub fn list_invoice_notifications(
+        env: Env,
+        invoice_id: u64,
+    ) -> Vec<notifications::NotificationRecord> {
+        notifications::list_notifications_by_invoice(&env, invoice_id)
+    }
+
+    /// Acknowledge delivery outcome for an off-chain channel on a notification.
+    pub fn ack_payment_notification(
+        env: Env,
+        owner: Address,
+        notification_id: u64,
+        channel: u32,
+        success: bool,
+    ) -> notifications::NotificationStatus {
+        notifications::ack_notification(&env, owner, notification_id, channel, success)
+    }
+
+    /// Return delivery tracking statistics for a notification config.
+    pub fn get_notif_stats(
+        env: Env,
+        config_id: u64,
+    ) -> notifications::NotificationStats {
+        notifications::get_config_stats(&env, config_id)
     }
 
     // -----------------------------------------------------------------------
@@ -17651,13 +17934,28 @@ impl SplitContract {
     // -----------------------------------------------------------------------
 
     /// Get all invoice IDs in a group (Issue #434 support).
+    ///
+    /// Groups made by `create_invoice_group` are stored as an `InvoiceGroup`, so that record is
+    /// read first (Issue #1119). The older members list is the fallback.
     pub fn get_group_members_list(env: Env, group_id: u64) -> Vec<u64> {
-        get_group_members(&env, group_id)
+        match env
+            .storage()
+            .persistent()
+            .get::<_, types::InvoiceGroup>(&group_key(group_id))
+        {
+            Some(group) => group.invoice_ids,
+            None => get_group_members(&env, group_id),
+        }
     }
 
     /// Get the group ID for an invoice, if it belongs to a group (Issue #434 support).
+    ///
+    /// Reads the key written by `create_invoice_group` first (Issue #1119).
     pub fn get_invoice_group_id_info(env: Env, invoice_id: u64) -> Option<u64> {
-        get_invoice_group_id(&env, invoice_id)
+        env.storage()
+            .persistent()
+            .get::<(Symbol, u64), u64>(&invoice_group_key(invoice_id))
+            .or_else(|| get_invoice_group_id(&env, invoice_id))
     }
 
     /// Rollback a group: set all members to Refunded and process refunds.
@@ -18223,6 +18521,256 @@ impl SplitContract {
             .persistent()
             .get(&template_id_key(&creator, template_id))
             .expect("template not found")
+    }
+
+    // -----------------------------------------------------------------------
+    // Built-in Invoice Template Library
+    // -----------------------------------------------------------------------
+
+    /// Initialize (or verify) the built-in invoice template library.
+    ///
+    /// Idempotent: returns the number of built-in templates available.
+    pub fn init_template_library(env: Env) -> u32 {
+        template_library::init_library(&env)
+    }
+
+    /// Register a new custom template in the invoice template library.
+    pub fn register_library_template(
+        env: Env,
+        creator: Address,
+        id: Symbol,
+        name: String,
+        description: String,
+        category: template_library::TemplateCategory,
+        default_ratios: Vec<u32>,
+        default_deadline_secs: u64,
+        allow_early_withdrawal: bool,
+        min_funding_bps: u32,
+        creator_fee_bps: u32,
+    ) -> template_library::LibraryTemplate {
+        creator.require_auth();
+        template_library::register_template(
+            &env,
+            creator,
+            id,
+            name,
+            description,
+            category,
+            default_ratios,
+            default_deadline_secs,
+            allow_early_withdrawal,
+            min_funding_bps,
+            creator_fee_bps,
+        )
+    }
+
+    /// Update an existing template in the invoice template library.
+    ///
+    /// Built-in templates may only be updated by the contract admin; custom
+    /// templates may be updated by their creator or the contract admin.
+    pub fn update_library_template(
+        env: Env,
+        caller: Address,
+        id: Symbol,
+        name: String,
+        description: String,
+        category: template_library::TemplateCategory,
+        default_ratios: Vec<u32>,
+        default_deadline_secs: u64,
+        allow_early_withdrawal: bool,
+        min_funding_bps: u32,
+        creator_fee_bps: u32,
+    ) -> template_library::LibraryTemplate {
+        caller.require_auth();
+        let is_admin = env
+            .storage()
+            .instance()
+            .get::<_, Address>(&admin_key())
+            .map(|a| a == caller)
+            .unwrap_or(false);
+        template_library::update_template(
+            &env,
+            &caller,
+            is_admin,
+            id,
+            name,
+            description,
+            category,
+            default_ratios,
+            default_deadline_secs,
+            allow_early_withdrawal,
+            min_funding_bps,
+            creator_fee_bps,
+        )
+    }
+
+    /// Enable or disable a library template.
+    pub fn set_library_template_enabled(
+        env: Env,
+        caller: Address,
+        id: Symbol,
+        enabled: bool,
+    ) -> template_library::LibraryTemplate {
+        caller.require_auth();
+        let is_admin = env
+            .storage()
+            .instance()
+            .get::<_, Address>(&admin_key())
+            .map(|a| a == caller)
+            .unwrap_or(false);
+        template_library::set_template_enabled(&env, &caller, is_admin, id, enabled)
+    }
+
+    /// Remove a custom template from the library (built-in templates cannot be removed).
+    pub fn remove_library_template(env: Env, caller: Address, id: Symbol) {
+        caller.require_auth();
+        let is_admin = env
+            .storage()
+            .instance()
+            .get::<_, Address>(&admin_key())
+            .map(|a| a == caller)
+            .unwrap_or(false);
+        template_library::remove_template(&env, &caller, is_admin, id);
+    }
+
+    /// Retrieve a single library template by ID.
+    pub fn get_library_template(env: Env, id: Symbol) -> template_library::LibraryTemplate {
+        template_library::get_template(&env, id)
+    }
+
+    /// List library templates with optional category and enabled filters.
+    pub fn list_library_templates(
+        env: Env,
+        category: Option<template_library::TemplateCategory>,
+        only_enabled: bool,
+    ) -> Vec<template_library::LibraryTemplate> {
+        template_library::list_templates(&env, category, only_enabled)
+    }
+
+    /// Instantiate a new invoice from a library template with optional customization.
+    ///
+    /// Automatically tracks usage statistics for the template and creator.
+    pub fn create_from_library_template(
+        env: Env,
+        creator: Address,
+        template_id: Symbol,
+        recipients: Vec<Address>,
+        token: Address,
+        total_amount: i128,
+        customization: Option<template_library::TemplateCustomization>,
+    ) -> u64 {
+        creator.require_auth();
+
+        let resolved = template_library::resolve_template_for_invoice(
+            &env,
+            &template_id,
+            recipients.len(),
+            total_amount,
+            customization,
+        );
+
+        let invoice_id = Self::_create_invoice_inner(
+            &env,
+            creator.clone(),
+            recipients,
+            resolved.amounts,
+            Vec::new(&env),                  // recipient_tokens
+            token,                           // funding_token
+            resolved.deadline,               // deadline
+            Vec::new(&env),                  // co_creators
+            resolved.allow_early_withdrawal, // allow_early_withdrawal
+            0,                               // bonus_pool
+            0,                               // bonus_max_payers
+            None,                            // prerequisite_id
+            Vec::new(&env),                  // tranches
+            Vec::new(&env),                  // co_signers
+            0,                               // required_signatures
+            0,                               // penalty_bps
+            0,                               // penalty_deadline
+            resolved.min_funding_bps,        // min_funding_bps
+            Vec::new(&env),                  // release_stages
+            None,                            // price_oracle
+            Vec::new(&env),                  // swap_tokens
+            None,                            // condition_oracle
+            0,                               // tax_bps
+            None,                            // tax_authority
+            0,                               // insurance_premium_bps
+            false,                           // smart_route
+            None,                            // notification_contract
+            OverflowBehavior::Reject,        // overflow_behavior
+            false,                           // convert_to_stream
+            Vec::new(&env),                  // accepted_tokens
+            None,                            // forward_to
+            None,                            // forward_invoice_id
+            None,                            // creator_cosigner
+            0,                               // velocity_limit
+            0,                               // velocity_window
+            Vec::new(&env),                  // split_rules
+            Vec::new(&env),                  // auto_resolve_rules
+            None,                            // cross_chain_ref
+            None,                            // allowed_payers
+            None,                            // payment_cooldown_secs
+            None,                            // max_payments_per_window
+            None,                            // payment_window_secs
+            None,                            // refund_grace_secs
+            Vec::new(&env),                  // priorities
+            false,                           // require_kyc
+            None,                            // scheduled_release_at
+            None,                            // min_payer_rep
+            None,                            // release_delay_ledgers
+            None,                            // metadata_hash
+            None,                            // target_usd_cents
+            None,                            // oracle
+            None,                            // oracle_asset_pair_base
+            None,                            // oracle_asset_pair_quote
+            None,                            // escrow_hold_period
+            None,                            // payment_open_at
+            None,                            // payment_close_at
+            None,                            // milestones
+            None,                            // recipient_max_payouts
+            false,                           // recipient_whitelist_enabled
+            None,                            // release_condition_hash
+            0,                               // early_bird_window_ledgers
+            0,                               // early_bird_fee_bps
+            resolved.creator_fee_bps,        // creator_fee_bps
+            resolved.ratios,                 // ratios
+            template_library::BPS_DENOMINATOR as u64,
+        );
+
+        template_library::record_usage(&env, &template_id, &creator, total_amount);
+
+        env.events().publish(
+            (symbol_short!("tmpl_lib"), symbol_short!("used"), template_id),
+            (invoice_id, creator, total_amount),
+        );
+
+        invoice_id
+    }
+
+    /// Return usage statistics for a library template.
+    pub fn get_template_usage(
+        env: Env,
+        template_id: Symbol,
+    ) -> template_library::TemplateUsageStats {
+        template_library::get_usage(&env, template_id)
+    }
+
+    /// Return how many times a creator has used a specific library template.
+    pub fn get_creator_template_usage(env: Env, creator: Address, template_id: Symbol) -> u64 {
+        template_library::get_creator_usage(&env, &creator, template_id)
+    }
+
+    /// Return an aggregate summary of the template library and its usage.
+    pub fn get_template_library_summary(env: Env) -> template_library::LibrarySummary {
+        template_library::get_summary(&env)
+    }
+
+    /// Return the most popular templates sorted by usage count descending.
+    pub fn get_popular_templates(
+        env: Env,
+        limit: u32,
+    ) -> Vec<template_library::TemplateUsageStats> {
+        template_library::get_popular_templates(&env, limit)
     }
 
     /// Issue #563: Extend the TTL of a live invoice.
