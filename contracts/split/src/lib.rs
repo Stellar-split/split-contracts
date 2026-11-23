@@ -89,6 +89,7 @@ pub mod split_rules;
 pub mod pool;
 pub mod compression;
 pub mod aggregation;
+pub mod template_library;
 
 #[cfg(test)]
 mod test;
@@ -18356,6 +18357,256 @@ impl SplitContract {
             .persistent()
             .get(&template_id_key(&creator, template_id))
             .expect("template not found")
+    }
+
+    // -----------------------------------------------------------------------
+    // Built-in Invoice Template Library
+    // -----------------------------------------------------------------------
+
+    /// Initialize (or verify) the built-in invoice template library.
+    ///
+    /// Idempotent: returns the number of built-in templates available.
+    pub fn init_template_library(env: Env) -> u32 {
+        template_library::init_library(&env)
+    }
+
+    /// Register a new custom template in the invoice template library.
+    pub fn register_library_template(
+        env: Env,
+        creator: Address,
+        id: Symbol,
+        name: String,
+        description: String,
+        category: template_library::TemplateCategory,
+        default_ratios: Vec<u32>,
+        default_deadline_secs: u64,
+        allow_early_withdrawal: bool,
+        min_funding_bps: u32,
+        creator_fee_bps: u32,
+    ) -> template_library::LibraryTemplate {
+        creator.require_auth();
+        template_library::register_template(
+            &env,
+            creator,
+            id,
+            name,
+            description,
+            category,
+            default_ratios,
+            default_deadline_secs,
+            allow_early_withdrawal,
+            min_funding_bps,
+            creator_fee_bps,
+        )
+    }
+
+    /// Update an existing template in the invoice template library.
+    ///
+    /// Built-in templates may only be updated by the contract admin; custom
+    /// templates may be updated by their creator or the contract admin.
+    pub fn update_library_template(
+        env: Env,
+        caller: Address,
+        id: Symbol,
+        name: String,
+        description: String,
+        category: template_library::TemplateCategory,
+        default_ratios: Vec<u32>,
+        default_deadline_secs: u64,
+        allow_early_withdrawal: bool,
+        min_funding_bps: u32,
+        creator_fee_bps: u32,
+    ) -> template_library::LibraryTemplate {
+        caller.require_auth();
+        let is_admin = env
+            .storage()
+            .instance()
+            .get::<_, Address>(&admin_key())
+            .map(|a| a == caller)
+            .unwrap_or(false);
+        template_library::update_template(
+            &env,
+            &caller,
+            is_admin,
+            id,
+            name,
+            description,
+            category,
+            default_ratios,
+            default_deadline_secs,
+            allow_early_withdrawal,
+            min_funding_bps,
+            creator_fee_bps,
+        )
+    }
+
+    /// Enable or disable a library template.
+    pub fn set_library_template_enabled(
+        env: Env,
+        caller: Address,
+        id: Symbol,
+        enabled: bool,
+    ) -> template_library::LibraryTemplate {
+        caller.require_auth();
+        let is_admin = env
+            .storage()
+            .instance()
+            .get::<_, Address>(&admin_key())
+            .map(|a| a == caller)
+            .unwrap_or(false);
+        template_library::set_template_enabled(&env, &caller, is_admin, id, enabled)
+    }
+
+    /// Remove a custom template from the library (built-in templates cannot be removed).
+    pub fn remove_library_template(env: Env, caller: Address, id: Symbol) {
+        caller.require_auth();
+        let is_admin = env
+            .storage()
+            .instance()
+            .get::<_, Address>(&admin_key())
+            .map(|a| a == caller)
+            .unwrap_or(false);
+        template_library::remove_template(&env, &caller, is_admin, id);
+    }
+
+    /// Retrieve a single library template by ID.
+    pub fn get_library_template(env: Env, id: Symbol) -> template_library::LibraryTemplate {
+        template_library::get_template(&env, id)
+    }
+
+    /// List library templates with optional category and enabled filters.
+    pub fn list_library_templates(
+        env: Env,
+        category: Option<template_library::TemplateCategory>,
+        only_enabled: bool,
+    ) -> Vec<template_library::LibraryTemplate> {
+        template_library::list_templates(&env, category, only_enabled)
+    }
+
+    /// Instantiate a new invoice from a library template with optional customization.
+    ///
+    /// Automatically tracks usage statistics for the template and creator.
+    pub fn create_from_library_template(
+        env: Env,
+        creator: Address,
+        template_id: Symbol,
+        recipients: Vec<Address>,
+        token: Address,
+        total_amount: i128,
+        customization: Option<template_library::TemplateCustomization>,
+    ) -> u64 {
+        creator.require_auth();
+
+        let resolved = template_library::resolve_template_for_invoice(
+            &env,
+            &template_id,
+            recipients.len(),
+            total_amount,
+            customization,
+        );
+
+        let invoice_id = Self::_create_invoice_inner(
+            &env,
+            creator.clone(),
+            recipients,
+            resolved.amounts,
+            Vec::new(&env),                  // recipient_tokens
+            token,                           // funding_token
+            resolved.deadline,               // deadline
+            Vec::new(&env),                  // co_creators
+            resolved.allow_early_withdrawal, // allow_early_withdrawal
+            0,                               // bonus_pool
+            0,                               // bonus_max_payers
+            None,                            // prerequisite_id
+            Vec::new(&env),                  // tranches
+            Vec::new(&env),                  // co_signers
+            0,                               // required_signatures
+            0,                               // penalty_bps
+            0,                               // penalty_deadline
+            resolved.min_funding_bps,        // min_funding_bps
+            Vec::new(&env),                  // release_stages
+            None,                            // price_oracle
+            Vec::new(&env),                  // swap_tokens
+            None,                            // condition_oracle
+            0,                               // tax_bps
+            None,                            // tax_authority
+            0,                               // insurance_premium_bps
+            false,                           // smart_route
+            None,                            // notification_contract
+            OverflowBehavior::Reject,        // overflow_behavior
+            false,                           // convert_to_stream
+            Vec::new(&env),                  // accepted_tokens
+            None,                            // forward_to
+            None,                            // forward_invoice_id
+            None,                            // creator_cosigner
+            0,                               // velocity_limit
+            0,                               // velocity_window
+            Vec::new(&env),                  // split_rules
+            Vec::new(&env),                  // auto_resolve_rules
+            None,                            // cross_chain_ref
+            None,                            // allowed_payers
+            None,                            // payment_cooldown_secs
+            None,                            // max_payments_per_window
+            None,                            // payment_window_secs
+            None,                            // refund_grace_secs
+            Vec::new(&env),                  // priorities
+            false,                           // require_kyc
+            None,                            // scheduled_release_at
+            None,                            // min_payer_rep
+            None,                            // release_delay_ledgers
+            None,                            // metadata_hash
+            None,                            // target_usd_cents
+            None,                            // oracle
+            None,                            // oracle_asset_pair_base
+            None,                            // oracle_asset_pair_quote
+            None,                            // escrow_hold_period
+            None,                            // payment_open_at
+            None,                            // payment_close_at
+            None,                            // milestones
+            None,                            // recipient_max_payouts
+            false,                           // recipient_whitelist_enabled
+            None,                            // release_condition_hash
+            0,                               // early_bird_window_ledgers
+            0,                               // early_bird_fee_bps
+            resolved.creator_fee_bps,        // creator_fee_bps
+            resolved.ratios,                 // ratios
+            template_library::BPS_DENOMINATOR as u64,
+        );
+
+        template_library::record_usage(&env, &template_id, &creator, total_amount);
+
+        env.events().publish(
+            (symbol_short!("tmpl_lib"), symbol_short!("used"), template_id),
+            (invoice_id, creator, total_amount),
+        );
+
+        invoice_id
+    }
+
+    /// Return usage statistics for a library template.
+    pub fn get_template_usage(
+        env: Env,
+        template_id: Symbol,
+    ) -> template_library::TemplateUsageStats {
+        template_library::get_usage(&env, template_id)
+    }
+
+    /// Return how many times a creator has used a specific library template.
+    pub fn get_creator_template_usage(env: Env, creator: Address, template_id: Symbol) -> u64 {
+        template_library::get_creator_usage(&env, &creator, template_id)
+    }
+
+    /// Return an aggregate summary of the template library and its usage.
+    pub fn get_template_library_summary(env: Env) -> template_library::LibrarySummary {
+        template_library::get_summary(&env)
+    }
+
+    /// Return the most popular templates sorted by usage count descending.
+    pub fn get_popular_templates(
+        env: Env,
+        limit: u32,
+    ) -> Vec<template_library::TemplateUsageStats> {
+        template_library::get_popular_templates(&env, limit)
     }
 
     /// Issue #563: Extend the TTL of a live invoice.
