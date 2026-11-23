@@ -159,6 +159,8 @@ pub mod audit_logging;
 pub mod rate_limiting;
 // Issue #1190: Performance profiling report helpers.
 mod perf_profiling;
+// Issue #1187: Contract health assessment over monitoring stats.
+mod contract_health;
 
 use error::ContractError;
 use validation::assert_valid_bps;
