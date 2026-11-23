@@ -157,6 +157,8 @@ pub mod contract_upgrade;
 pub mod audit_logging;
 // Issue #1008: Enhanced per-user rate limiting and throttling.
 pub mod rate_limiting;
+// Issue #1192: Contract upgrade migration toolkit.
+mod upgrade_toolkit;
 
 use error::ContractError;
 use validation::assert_valid_bps;
