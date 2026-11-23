@@ -80,6 +80,7 @@ mod events;
 pub mod types;
 mod validation;
 mod calc;
+mod tx_result_cache;
 mod math;
 mod stats;
 mod storage_layout_opt;
@@ -122,6 +123,7 @@ mod storage_snapshot;
 
 mod storage;
 mod storage_keys;
+mod consensus_validation;
 
 mod migrations;
 pub mod notifications;
