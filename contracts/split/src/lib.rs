@@ -76,6 +76,7 @@ const DEFAULT_INVOICE_STORAGE_QUOTA: u64 = 65_536;
 
 mod constants;
 mod error;
+mod payment_schedule_optimizer;
 mod events;
 pub mod types;
 mod validation;
@@ -123,6 +124,7 @@ mod boundary_tests;
 
 #[cfg(test)]
 mod storage_snapshot;
+mod multi_currency_invoice;
 
 mod storage;
 mod storage_keys;
@@ -148,6 +150,7 @@ mod memory_bound_pow;
 
 // Issue #1011: Enhanced emergency pause mechanism.
 pub mod emergency_pause;
+mod invoice_watermark;
 // Issue #1010: Enhanced contract upgrade mechanism with version management.
 pub mod contract_upgrade;
 // Issue #1009: Comprehensive audit logging for compliance.
