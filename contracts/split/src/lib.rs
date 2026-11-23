@@ -159,6 +159,8 @@ pub mod audit_logging;
 pub mod rate_limiting;
 // Issue #1192: Contract upgrade migration toolkit.
 mod upgrade_toolkit;
+// Issue #1217: Multi-token payment distribution.
+mod multi_token_distribution;
 
 use error::ContractError;
 use validation::assert_valid_bps;
