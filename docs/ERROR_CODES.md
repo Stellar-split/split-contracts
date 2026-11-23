@@ -4,6 +4,8 @@ Every error the `invoice-escrow` contract returns, with its code, cause, and wha
 about it. The codes are in `contracts/invoice-escrow/src/errors.rs`. Their numbers are stable, so
 never reuse one.
 
+The `split` contract has its own codes, listed in [`ERROR_CODES_SPLIT.md`](./ERROR_CODES_SPLIT.md).
+
 ## Admin and setup
 
 | Code | Name | Cause | Recovery |
