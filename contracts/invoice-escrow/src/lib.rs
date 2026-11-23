@@ -24,6 +24,8 @@
 #![no_std]
 
 mod errors;
+// Issue #1218: Escrow timeout and auto-release.
+mod escrow_timeout;
 mod oracle;
 mod types;
 
