@@ -161,6 +161,8 @@ pub mod rate_limiting;
 mod perf_profiling;
 // Issue #1187: Contract health assessment over monitoring stats.
 mod contract_health;
+// Issue #1185: Invoice delegation with permission levels.
+mod invoice_delegation;
 
 use error::ContractError;
 use validation::assert_valid_bps;
