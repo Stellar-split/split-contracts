@@ -79,6 +79,8 @@ mod error;
 mod payment_schedule_optimizer;
 // Issue #1219: Event filtering and query capabilities for invoice events.
 mod invoice_event_filtering;
+// Issue #1220: Comprehensive contract state validation.
+mod contract_state_validation;
 mod events;
 pub mod types;
 mod validation;
