@@ -157,6 +157,12 @@ pub mod contract_upgrade;
 pub mod audit_logging;
 // Issue #1008: Enhanced per-user rate limiting and throttling.
 pub mod rate_limiting;
+// Issue #1190: Performance profiling report helpers.
+mod perf_profiling;
+// Issue #1187: Contract health assessment over monitoring stats.
+mod contract_health;
+// Issue #1185: Invoice delegation with permission levels.
+mod invoice_delegation;
 
 use error::ContractError;
 use validation::assert_valid_bps;
