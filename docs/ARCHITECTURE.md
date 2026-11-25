@@ -482,6 +482,7 @@ Feature-level design notes are in the `docs/ISSUE_*.md` files.
 
 Repository:
 
+- [`ADVANCED_ARCHITECTURE.md`](./ADVANCED_ARCHITECTURE.md): patterns, examples and optimization guide
 - [`API.md`](./API.md): entry point reference
 - [`ERROR_CODES.md`](./ERROR_CODES.md): `ContractError` codes
 - [`FEE_FLOW.md`](./FEE_FLOW.md): fee calculation
