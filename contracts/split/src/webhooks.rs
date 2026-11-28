@@ -28,7 +28,7 @@
 
 use soroban_sdk::{contracttype, symbol_short, Address, Env, IntoVal, String, Symbol, Val, Vec};
 
-use crate::types::InvoiceStatus;
+use crate::types::{InvoiceStatus, OptionalInvoiceStatus};
 
 // ---------------------------------------------------------------------------
 // Event filter bits
@@ -146,9 +146,9 @@ pub struct WebhookDelivery {
     /// The `EVENT_*` bit that triggered this delivery.
     pub event: u32,
     /// Previous invoice status when triggered by a status transition.
-    pub from_status: Option<InvoiceStatus>,
+    pub from_status: OptionalInvoiceStatus,
     /// New invoice status when triggered by a status transition.
-    pub to_status: Option<InvoiceStatus>,
+    pub to_status: OptionalInvoiceStatus,
     pub status: DeliveryStatus,
     pub attempts: u32,
     pub created_ledger: u32,
@@ -579,8 +579,8 @@ fn dispatch_inner(
             webhook_id,
             invoice_id,
             event: webhook.event_mask & event,
-            from_status: from_status.clone(),
-            to_status: to_status.clone(),
+            from_status: from_status.clone().into(),
+            to_status: to_status.clone().into(),
             status: DeliveryStatus::Pending,
             attempts: 0,
             created_ledger: now,
@@ -794,16 +794,18 @@ mod tests {
         let contract_id = env.register(crate::SplitContract, ());
         let owner = Address::generate(&env);
 
-        env.as_contract(&contract_id, || {
-            let wh_id = register(
+        let wh_id = env.as_contract(&contract_id, || {
+            register(
                 &env,
                 owner.clone(),
                 String::from_str(&env, "https://example.com/webhooks/status"),
                 None,
                 EVENT_STATUS_CHANGED,
                 None,
-            );
+            )
+        });
 
+        let d = env.as_contract(&contract_id, || {
             dispatch_status_change(
                 &env,
                 42,
@@ -816,8 +818,8 @@ mod tests {
             let d = deliveries.get(0).unwrap();
             assert_eq!(d.invoice_id, 42);
             assert_eq!(d.event, EVENT_STATUS_CHANGED);
-            assert_eq!(d.from_status, Some(InvoiceStatus::Pending));
-            assert_eq!(d.to_status, Some(InvoiceStatus::Disputed));
+            assert_eq!(d.from_status, OptionalInvoiceStatus::Some(InvoiceStatus::Pending));
+            assert_eq!(d.to_status, OptionalInvoiceStatus::Some(InvoiceStatus::Disputed));
             assert_eq!(d.status, DeliveryStatus::Pending);
             assert_eq!(d.attempts, 1);
 
@@ -833,10 +835,13 @@ mod tests {
             assert_eq!(stats.delivered_count, 0);
             assert_eq!(stats.failed_count, 0);
 
-            // Acknowledge success
-            let status = ack(&env, owner.clone(), d.id, true);
-            assert_eq!(status, DeliveryStatus::Delivered);
+            d
+        });
 
+        let status = env.as_contract(&contract_id, || ack(&env, owner.clone(), d.id, true));
+        assert_eq!(status, DeliveryStatus::Delivered);
+
+        env.as_contract(&contract_id, || {
             let delivered = list_deliveries_by_status(&env, wh_id, DeliveryStatus::Delivered);
             assert_eq!(delivered.len(), 1);
             assert_eq!(
@@ -858,31 +863,37 @@ mod tests {
         let contract_id = env.register(crate::SplitContract, ());
         let owner = Address::generate(&env);
 
-        env.as_contract(&contract_id, || {
-            let wh_disputed_only = register(
+        let wh_disputed_only = env.as_contract(&contract_id, || {
+            register(
                 &env,
                 owner.clone(),
                 String::from_str(&env, "https://example.com/disputed"),
                 None,
                 EVENT_STATUS_DISPUTED,
                 None,
-            );
-            let wh_invoice_10 = register(
+            )
+        });
+        let wh_invoice_10 = env.as_contract(&contract_id, || {
+            register(
                 &env,
                 owner.clone(),
                 String::from_str(&env, "https://example.com/inv10"),
                 None,
                 EVENT_STATUS_CHANGED,
                 Some(10),
-            );
-            let wh_inactive = register(
+            )
+        });
+        let wh_inactive = env.as_contract(&contract_id, || {
+            register(
                 &env,
                 owner.clone(),
                 String::from_str(&env, "https://example.com/inactive"),
                 None,
                 EVENT_ALL,
                 None,
-            );
+            )
+        });
+        env.as_contract(&contract_id, || {
             update(
                 &env,
                 owner.clone(),
@@ -893,7 +904,9 @@ mod tests {
                 None,
                 false,
             );
+        });
 
+        env.as_contract(&contract_id, || {
             // Invoice 10 -> Expired: only wh_invoice_10 matches
             dispatch_status_change(
                 &env,
@@ -1084,8 +1097,8 @@ mod tests {
             assert_eq!(deliveries.len(), 1);
             let d = deliveries.get(0).unwrap();
             assert_eq!(d.invoice_id, 123);
-            assert_eq!(d.from_status, Some(InvoiceStatus::Pending));
-            assert_eq!(d.to_status, Some(InvoiceStatus::Released));
+            assert_eq!(d.from_status, OptionalInvoiceStatus::Some(InvoiceStatus::Pending));
+            assert_eq!(d.to_status, OptionalInvoiceStatus::Some(InvoiceStatus::Released));
         });
     }
 }

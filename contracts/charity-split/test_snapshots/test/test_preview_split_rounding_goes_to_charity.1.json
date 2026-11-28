@@ -114,6 +114,9 @@
                 },
                 {
                   "u32": 250
+                },
+                {
+                  "u64": "0"
                 }
               ]
             }
@@ -288,6 +291,12 @@
                   },
                   {
                     "key": {
+                      "symbol": "cloned_from"
+                    },
+                    "val": "void"
+                  },
+                  {
+                    "key": {
                       "symbol": "created_at"
                     },
                     "val": {
@@ -300,6 +309,14 @@
                     },
                     "val": {
                       "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAOLZM"
+                    }
+                  },
+                  {
+                    "key": {
+                      "symbol": "deadline"
+                    },
+                    "val": {
+                      "u64": "0"
                     }
                   },
                   {

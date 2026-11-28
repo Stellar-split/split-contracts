@@ -211,6 +211,25 @@ pub enum InvoiceStatus {
     PayoutInProgress,
 }
 
+/// Wrapper for `Option<InvoiceStatus>` to work around a Soroban serialization
+/// limitation: `#[contracttype]` structs cannot have a field of type
+/// `Option<SomeEnum>` directly.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum OptionalInvoiceStatus {
+    None,
+    Some(InvoiceStatus),
+}
+
+impl From<Option<InvoiceStatus>> for OptionalInvoiceStatus {
+    fn from(value: Option<InvoiceStatus>) -> Self {
+        match value {
+            Some(status) => OptionalInvoiceStatus::Some(status),
+            None => OptionalInvoiceStatus::None,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Payment
 // ---------------------------------------------------------------------------

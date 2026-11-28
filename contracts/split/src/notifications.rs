@@ -868,33 +868,47 @@ mod tests {
         env.mock_all_auths();
         let contract_id = env.register(crate::SplitContract, ());
 
-        env.as_contract(&contract_id, || {
-            let owner = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let cfg_id = env.as_contract(&contract_id, || {
             let input = base_input(&env, CHANNEL_ON_CHAIN_EVENT | CHANNEL_EMAIL);
-            let cfg_id = register_config(&env, owner.clone(), input);
+            register_config(&env, owner.clone(), input)
+        });
 
+        env.as_contract(&contract_id, || {
             let cfg = get_config(&env, cfg_id).expect("config should exist");
             assert_eq!(cfg.owner, owner);
             assert_eq!(cfg.channels, CHANNEL_ON_CHAIN_EVENT | CHANNEL_EMAIL);
             assert!(cfg.enabled);
             assert_eq!(list_configs(&env).len(), 1);
             assert_eq!(list_owner_configs(&env, &owner).len(), 1);
+        });
 
+        env.as_contract(&contract_id, || {
             let mut updated = base_input(&env, CHANNEL_SMS);
             updated.min_amount = 500;
             updated.include_payer = false;
             updated.custom_template = String::from_str(&env, "Custom SMS");
             update_config(&env, owner.clone(), cfg_id, updated);
+        });
 
+        env.as_contract(&contract_id, || {
             let cfg2 = get_config(&env, cfg_id).unwrap();
             assert_eq!(cfg2.channels, CHANNEL_SMS);
             assert_eq!(cfg2.min_amount, 500);
             assert!(!cfg2.include_payer);
+        });
 
+        env.as_contract(&contract_id, || {
             set_config_enabled(&env, owner.clone(), cfg_id, false);
+        });
+        env.as_contract(&contract_id, || {
             assert!(!get_config(&env, cfg_id).unwrap().enabled);
+        });
 
+        env.as_contract(&contract_id, || {
             remove_config(&env, owner.clone(), cfg_id, false);
+        });
+        env.as_contract(&contract_id, || {
             assert!(get_config(&env, cfg_id).is_none());
             assert_eq!(list_configs(&env).len(), 0);
         });
@@ -936,17 +950,19 @@ mod tests {
         let contract_id = env.register(crate::SplitContract, ());
         let sub_id = env.register(MockSubscriber, ());
 
-        env.as_contract(&contract_id, || {
-            let owner = Address::generate(&env);
-            let payer = Address::generate(&env);
-            let token = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let payer = Address::generate(&env);
+        let token = Address::generate(&env);
 
+        let cfg_id = env.as_contract(&contract_id, || {
             let channels =
                 CHANNEL_ON_CHAIN_EVENT | CHANNEL_CONTRACT | CHANNEL_WEBHOOK | CHANNEL_EMAIL;
             let mut input = base_input(&env, channels);
             input.target_contract = Some(sub_id.clone());
-            let cfg_id = register_config(&env, owner.clone(), input);
+            register_config(&env, owner.clone(), input)
+        });
 
+        let rec = env.as_contract(&contract_id, || {
             let sent = dispatch_payment_confirmation(&env, 42, &payer, 1_000, &token, 1);
             assert_eq!(sent, 1);
 
@@ -967,14 +983,22 @@ mod tests {
             assert_eq!(stats.total_partially_delivered, 1);
             assert_eq!(stats.total_delivered, 0);
 
-            // Ack webhook -> still PartiallyDelivered (email pending)
-            let s1 = ack_notification(&env, owner.clone(), rec.id, CHANNEL_WEBHOOK, true);
-            assert_eq!(s1, NotificationStatus::PartiallyDelivered);
+            rec
+        });
 
-            // Ack email -> now Delivered
-            let s2 = ack_notification(&env, owner.clone(), rec.id, CHANNEL_EMAIL, true);
-            assert_eq!(s2, NotificationStatus::Delivered);
+        // Ack webhook -> still PartiallyDelivered (email pending)
+        let s1 = env.as_contract(&contract_id, || {
+            ack_notification(&env, owner.clone(), rec.id, CHANNEL_WEBHOOK, true)
+        });
+        assert_eq!(s1, NotificationStatus::PartiallyDelivered);
 
+        // Ack email -> now Delivered
+        let s2 = env.as_contract(&contract_id, || {
+            ack_notification(&env, owner.clone(), rec.id, CHANNEL_EMAIL, true)
+        });
+        assert_eq!(s2, NotificationStatus::Delivered);
+
+        env.as_contract(&contract_id, || {
             let stats2 = get_config_stats(&env, cfg_id);
             assert_eq!(stats2.total_sent, 1);
             assert_eq!(stats2.total_partially_delivered, 0);
@@ -1063,16 +1087,18 @@ mod tests {
         env.mock_all_auths();
         let contract_id = env.register(crate::SplitContract, ());
 
-        env.as_contract(&contract_id, || {
-            let owner = Address::generate(&env);
-            let payer = Address::generate(&env);
-            let token = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let payer = Address::generate(&env);
+        let token = Address::generate(&env);
 
+        let cfg_id = env.as_contract(&contract_id, || {
             let mut input = base_input(&env, CHANNEL_ON_CHAIN_EVENT);
             input.invoice_id = Some(5);
             input.min_amount = 1_000;
-            let cfg_id = register_config(&env, owner.clone(), input);
+            register_config(&env, owner.clone(), input)
+        });
 
+        env.as_contract(&contract_id, || {
             // Wrong invoice
             assert_eq!(
                 dispatch_payment_confirmation(&env, 6, &payer, 2_000, &token, 1),
@@ -1083,14 +1109,24 @@ mod tests {
                 dispatch_payment_confirmation(&env, 5, &payer, 999, &token, 2),
                 0
             );
-            // Disabled
+        });
+
+        // Disabled
+        env.as_contract(&contract_id, || {
             set_config_enabled(&env, owner.clone(), cfg_id, false);
+        });
+        env.as_contract(&contract_id, || {
             assert_eq!(
                 dispatch_payment_confirmation(&env, 5, &payer, 1_500, &token, 3),
                 0
             );
-            // Re-enabled and matching
+        });
+
+        // Re-enabled and matching
+        env.as_contract(&contract_id, || {
             set_config_enabled(&env, owner, cfg_id, true);
+        });
+        env.as_contract(&contract_id, || {
             assert_eq!(
                 dispatch_payment_confirmation(&env, 5, &payer, 1_500, &token, 4),
                 1
@@ -1106,18 +1142,24 @@ mod tests {
         env.mock_all_auths();
         let contract_id = env.register(crate::SplitContract, ());
 
-        env.as_contract(&contract_id, || {
-            let owner = Address::generate(&env);
-            let payer = Address::generate(&env);
-            let token = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let payer = Address::generate(&env);
+        let token = Address::generate(&env);
 
+        let cfg_id = env.as_contract(&contract_id, || {
             let input = base_input(&env, CHANNEL_WEBHOOK);
-            let cfg_id = register_config(&env, owner.clone(), input);
+            register_config(&env, owner.clone(), input)
+        });
 
+        let rec = env.as_contract(&contract_id, || {
             dispatch_payment_confirmation(&env, 1, &payer, 100, &token, 1);
-            let rec = list_notifications_by_config(&env, cfg_id).get(0).unwrap();
+            list_notifications_by_config(&env, cfg_id).get(0).unwrap()
+        });
 
+        env.as_contract(&contract_id, || {
             ack_notification(&env, owner.clone(), rec.id, CHANNEL_WEBHOOK, true);
+        });
+        env.as_contract(&contract_id, || {
             ack_notification(&env, owner, rec.id, CHANNEL_WEBHOOK, true);
         });
     }

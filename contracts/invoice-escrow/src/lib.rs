@@ -38,9 +38,11 @@ use soroban_sdk::{
 };
 use oracle::PriceOracleClient;
 use types::{
-    ApprovalStatus, BlacklistEntry, ComplianceSnapshot, CosignerApproval, Dispute, DisputeOutcome, DisputeStatus,
-    EscrowInvoice, EscrowReleased, EscrowStatus, OracleCondition, OracleReading, OracleSource, OptionalRefundReason,
-    PriceComparator, PriceData, RefundGrace, RefundGraceStatus, RefundReason, ReleaseSchedule, ScheduleStatus,
+    ApprovalStatus, BlacklistEntry, ComplianceSnapshot, CosignerApproval, Dispute, DisputeLock, DisputeOutcome,
+    DisputeStatus, EscrowInvoice, EscrowReleased, EscrowStatus, GlobalStats, InvoiceAuditReport, OracleCondition,
+    OracleReading, OracleSource, OptionalApprovalStatus, OptionalDisputeStatus, OptionalRefundReason,
+    OptionalScheduleStatus, PriceComparator, PriceData, RefundGrace, RefundGraceStatus,
+    RefundReason, ReleaseSchedule, ScheduleStatus,
 };
 
 // ---------------------------------------------------------------------------
@@ -129,6 +131,21 @@ fn arbiter_key() -> Symbol {
     symbol_short!("arbiter")
 }
 
+/// Persistent storage: whether a token is whitelisted for use as an escrow token.
+fn token_whitelist_key(token: &Address) -> (Symbol, Address) {
+    (symbol_short!("tok_wl"), token.clone())
+}
+
+/// Persistent storage: next expected deposit nonce for a `(payer, invoice_id)` pair.
+fn nonce_key(id: u64, payer: &Address) -> (Symbol, u64, Address) {
+    (symbol_short!("nonce"), id, payer.clone())
+}
+
+/// Persistent storage: timestamp a payment reminder was last sent for an invoice.
+fn reminder_key(id: u64) -> (Symbol, u64) {
+    (symbol_short!("reminder"), id)
+}
+
 /// Persistent storage: dispute record for an invoice.
 fn dispute_key(id: u64) -> (Symbol, u64) {
     (symbol_short!("dispute"), id)
@@ -206,6 +223,30 @@ fn get_invoice(env: &Env, id: u64) -> Result<EscrowInvoice, Error> {
 
 fn save_invoice(env: &Env, id: u64, invoice: &EscrowInvoice) {
     env.storage().persistent().set(&invoice_key(id), invoice);
+}
+
+/// Loads the contract-wide analytics snapshot, defaulting to all-zero
+/// if none has been recorded yet.
+fn get_global_stats(env: &Env) -> GlobalStats {
+    env.storage()
+        .instance()
+        .get(&global_stats_key())
+        .unwrap_or_default()
+}
+
+fn save_global_stats(env: &Env, stats: &GlobalStats) {
+    env.storage().instance().set(&global_stats_key(), stats);
+}
+
+/// Increments `invoice`'s configuration revision, persists it, and emits
+/// `(escrow, revised, id)` so off-chain consumers can detect the change.
+fn bump_revision(env: &Env, id: u64, invoice: &mut EscrowInvoice, change: Symbol) {
+    invoice.revision = invoice.revision.saturating_add(1);
+    save_invoice(env, id, invoice);
+    env.events().publish(
+        (symbol_short!("escrow"), symbol_short!("revised"), id),
+        (invoice.revision, change),
+    );
 }
 
 /// Returns `true` while the invoice can still accept configuration changes
@@ -2177,183 +2218,6 @@ impl InvoiceEscrowContract {
     }
 
     // -----------------------------------------------------------------------
-    // Dispute resolution automation
-    // -----------------------------------------------------------------------
-
-    /// Raise a dispute on an invoice. Callable by any address that has an
-    /// active deposit on the invoice. Freezes further deposits/release while
-    /// the dispute is open, pending either admin arbitration
-    /// ([`Self::arbitrate_dispute`]) or a permissionless automatic timeout
-    /// resolution ([`Self::auto_resolve_dispute`]) if the admin does not act.
-    ///
-    /// # Errors
-    /// * [`Error::InvoiceNotFound`]      — Unknown invoice ID.
-    /// * [`Error::InvalidStatus`]        — Invoice is not `Pending`/`Active`.
-    /// * [`Error::NotAStakeholder`]      — Caller has no deposit on this invoice.
-    /// * [`Error::DisputeAlreadyActive`] — A dispute is already open.
-    pub fn raise_dispute(
-        env: Env,
-        invoice_id: u64,
-        raiser: Address,
-        reason_hash: BytesN<32>,
-    ) -> Result<(), Error> {
-        raiser.require_auth();
-
-        let mut invoice = get_invoice(&env, invoice_id)?;
-        if invoice.status != EscrowStatus::Pending && invoice.status != EscrowStatus::Active {
-            return Err(Error::InvalidStatus);
-        }
-
-        let stake: i128 = env
-            .storage()
-            .persistent()
-            .get(&deposit_key(invoice_id, &raiser))
-            .unwrap_or(0);
-        if stake <= 0 {
-            return Err(Error::NotAStakeholder);
-        }
-
-        if env.storage().persistent().has(&dispute_key(invoice_id)) {
-            let existing: DisputeRecord = env.storage().persistent().get(&dispute_key(invoice_id)).unwrap();
-            if !existing.resolved {
-                return Err(Error::DisputeAlreadyActive);
-            }
-        }
-
-        let now = env.ledger().timestamp();
-        let record = DisputeRecord {
-            invoice_id,
-            raised_by: raiser.clone(),
-            reason_hash: reason_hash.clone(),
-            raised_at: now,
-            timeout_secs: DEFAULT_DISPUTE_TIMEOUT_SECS,
-            resolved: false,
-        };
-        env.storage().persistent().set(&dispute_key(invoice_id), &record);
-
-        invoice.status = EscrowStatus::Disputed;
-        save_invoice(&env, invoice_id, &invoice);
-
-        emit_dispute_raised(&env, invoice_id, &raiser, &reason_hash, now);
-        Ok(())
-    }
-
-    /// Admin arbitration of an active dispute, before the automatic timeout
-    /// elapses. If `refund` is `true`, all recorded deposits for this invoice
-    /// (restricted to `payers`) are returned to their depositors and the
-    /// invoice is marked `Refunded`. If `false`, the dispute is dismissed and
-    /// the invoice returns to `Active`, resuming the normal deposit/release
-    /// flow (including a subsequent manual [`Self::release`] once fully funded).
-    ///
-    /// # Errors
-    /// * [`Error::InvoiceNotFound`]  — Unknown invoice ID.
-    /// * [`Error::NotAdmin`]         — Caller is not the contract admin.
-    /// * [`Error::NoActiveDispute`]  — No open dispute on this invoice.
-    pub fn arbitrate_dispute(
-        env: Env,
-        invoice_id: u64,
-        refund: bool,
-        payers: Vec<Address>,
-    ) -> Result<(), Error> {
-        require_admin(&env);
-
-        let mut invoice = get_invoice(&env, invoice_id)?;
-        let mut record: DisputeRecord = env
-            .storage()
-            .persistent()
-            .get(&dispute_key(invoice_id))
-            .ok_or(Error::NoActiveDispute)?;
-        if record.resolved {
-            return Err(Error::NoActiveDispute);
-        }
-
-        record.resolved = true;
-        env.storage().persistent().set(&dispute_key(invoice_id), &record);
-
-        if refund {
-            let token_client = token::Client::new(&env, &invoice.token);
-            for payer in payers.iter() {
-                let amount: i128 = env
-                    .storage()
-                    .persistent()
-                    .get(&deposit_key(invoice_id, &payer))
-                    .unwrap_or(0);
-                if amount > 0 {
-                    env.storage()
-                        .persistent()
-                        .remove(&deposit_key(invoice_id, &payer));
-                    token_client.transfer(&env.current_contract_address(), &payer, &amount);
-                    emit_refunded(&env, invoice_id, &payer, amount);
-                }
-            }
-            invoice.status = EscrowStatus::Refunded;
-        } else {
-            invoice.status = EscrowStatus::Active;
-        }
-        save_invoice(&env, invoice_id, &invoice);
-
-        emit_dispute_arbitrated(&env, invoice_id, &invoice.creator, refund);
-        Ok(())
-    }
-
-    /// Automate dispute resolution: once `timeout_secs` has elapsed since the
-    /// dispute was raised without admin arbitration, anyone may call this to
-    /// force resolution. This protects the disputing party from an
-    /// unresponsive admin/creator by refunding all recorded deposits
-    /// (restricted to `payers`), mirroring [`Self::refund`].
-    ///
-    /// # Errors
-    /// * [`Error::InvoiceNotFound`]          — Unknown invoice ID.
-    /// * [`Error::NoActiveDispute`]          — No open dispute on this invoice.
-    /// * [`Error::DisputeTimeoutNotElapsed`] — The timeout window has not passed.
-    pub fn auto_resolve_dispute(env: Env, invoice_id: u64, payers: Vec<Address>) -> Result<(), Error> {
-        let mut invoice = get_invoice(&env, invoice_id)?;
-        let mut record: DisputeRecord = env
-            .storage()
-            .persistent()
-            .get(&dispute_key(invoice_id))
-            .ok_or(Error::NoActiveDispute)?;
-        if record.resolved {
-            return Err(Error::NoActiveDispute);
-        }
-
-        let now = env.ledger().timestamp();
-        let eligible_at = record.raised_at.saturating_add(record.timeout_secs);
-        if now < eligible_at {
-            return Err(Error::DisputeTimeoutNotElapsed);
-        }
-
-        record.resolved = true;
-        env.storage().persistent().set(&dispute_key(invoice_id), &record);
-
-        let token_client = token::Client::new(&env, &invoice.token);
-        for payer in payers.iter() {
-            let amount: i128 = env
-                .storage()
-                .persistent()
-                .get(&deposit_key(invoice_id, &payer))
-                .unwrap_or(0);
-            if amount > 0 {
-                env.storage()
-                    .persistent()
-                    .remove(&deposit_key(invoice_id, &payer));
-                token_client.transfer(&env.current_contract_address(), &payer, &amount);
-                emit_refunded(&env, invoice_id, &payer, amount);
-            }
-        }
-        invoice.status = EscrowStatus::Refunded;
-        save_invoice(&env, invoice_id, &invoice);
-
-        emit_dispute_auto_resolved(&env, invoice_id);
-        Ok(())
-    }
-
-    /// Return the dispute record for an invoice, if one has ever been raised.
-    pub fn get_dispute(env: Env, invoice_id: u64) -> Option<DisputeRecord> {
-        env.storage().persistent().get(&dispute_key(invoice_id))
-    }
-
-    // -----------------------------------------------------------------------
     // Payment reminders
     // -----------------------------------------------------------------------
     //
@@ -2465,8 +2329,8 @@ impl InvoiceEscrowContract {
     /// * [`Error::InvoiceNotFound`] — Unknown invoice ID.
     pub fn get_compliance_snapshot(env: Env, invoice_id: u64) -> Result<ComplianceSnapshot, Error> {
         let invoice = get_invoice(&env, invoice_id)?;
-        let approval_status = get_approval(&env, invoice_id).map(|a| a.status);
-        let dispute_status = get_dispute(&env, invoice_id).map(|d| d.status);
+        let approval_status: OptionalApprovalStatus = get_approval(&env, invoice_id).map(|a| a.status).into();
+        let dispute_status: OptionalDisputeStatus = get_dispute(&env, invoice_id).map(|d| d.status).into();
         let creator_blacklisted = env
             .storage()
             .persistent()
@@ -2647,8 +2511,8 @@ impl InvoiceEscrowContract {
     /// * [`Error::InvoiceNotFound`] — Unknown invoice ID.
     pub fn get_invoice_audit_report(env: Env, invoice_id: u64) -> Result<InvoiceAuditReport, Error> {
         let invoice = get_invoice(&env, invoice_id)?;
-        let approval_status = get_approval(&env, invoice_id).map(|a| a.status);
-        let schedule_status = get_schedule(&env, invoice_id).map(|s| s.status);
+        let approval_status: OptionalApprovalStatus = get_approval(&env, invoice_id).map(|a| a.status).into();
+        let schedule_status: OptionalScheduleStatus = get_schedule(&env, invoice_id).map(|s| s.status).into();
         let has_oracle_condition = get_oracle_condition(&env, invoice_id).is_some();
 
         Ok(InvoiceAuditReport {

@@ -35,6 +35,16 @@ impl CreatorTier {
     }
 }
 
+/// Access-control role required by a privileged registry operation.
+#[contracttype]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Role {
+    /// The single registry admin account.
+    Admin,
+    /// Admin, or any account granted the moderator flag.
+    Moderator,
+}
+
 // ---------------------------------------------------------------------------
 // Storage keys
 // ---------------------------------------------------------------------------

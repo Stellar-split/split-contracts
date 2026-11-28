@@ -823,149 +823,162 @@ mod tests {
     #[test]
     fn test_init_library_seeds_builtins_idempotently() {
         let env = Env::default();
-        let seeded = init_library(&env);
-        assert_eq!(seeded, 7);
+        let contract_id = env.register(crate::SplitContract, ());
+        env.as_contract(&contract_id, || {
+            let seeded = init_library(&env);
+            assert_eq!(seeded, 7);
 
-        // Second call is idempotent and does not duplicate.
-        let seeded_again = init_library(&env);
-        assert_eq!(seeded_again, 7);
+            // Second call is idempotent and does not duplicate.
+            let seeded_again = init_library(&env);
+            assert_eq!(seeded_again, 7);
 
-        let all = list_templates(&env, None, false);
-        assert_eq!(all.len(), 7);
+            let all = list_templates(&env, None, false);
+            assert_eq!(all.len(), 7);
 
-        let equal2 = get_template(&env, symbol_short!("equal2"));
-        assert!(equal2.is_builtin);
-        assert!(equal2.enabled);
-        assert_eq!(equal2.default_ratios.len(), 2);
-        assert_eq!(equal2.default_ratios.get(0).unwrap(), 5_000);
-        assert_eq!(equal2.default_ratios.get(1).unwrap(), 5_000);
+            let equal2 = get_template(&env, symbol_short!("equal2"));
+            assert!(equal2.is_builtin);
+            assert!(equal2.enabled);
+            assert_eq!(equal2.default_ratios.len(), 2);
+            assert_eq!(equal2.default_ratios.get(0).unwrap(), 5_000);
+            assert_eq!(equal2.default_ratios.get(1).unwrap(), 5_000);
+        });
     }
 
     #[test]
     fn test_register_update_toggle_and_remove_custom_template() {
         let env = Env::default();
+        let contract_id = env.register(crate::SplitContract, ());
         let creator = Address::generate(&env);
         let id = symbol_short!("my_split");
 
-        let mut ratios = Vec::new(&env);
-        ratios.push_back(6_000);
-        ratios.push_back(4_000);
+        env.as_contract(&contract_id, || {
+            let mut ratios = Vec::new(&env);
+            ratios.push_back(6_000);
+            ratios.push_back(4_000);
 
-        let created = register_template(
-            &env,
-            creator.clone(),
-            id.clone(),
-            String::from_str(&env, "My Custom Split"),
-            String::from_str(&env, "60/40 custom split"),
-            TemplateCategory::Custom,
-            ratios,
-            86_400,
-            true,
-            2_500,
-            100,
-        );
-        assert!(!created.is_builtin);
-        assert_eq!(created.version, 1);
-        assert!(created.enabled);
+            let created = register_template(
+                &env,
+                creator.clone(),
+                id.clone(),
+                String::from_str(&env, "My Custom Split"),
+                String::from_str(&env, "60/40 custom split"),
+                TemplateCategory::Custom,
+                ratios,
+                86_400,
+                true,
+                2_500,
+                100,
+            );
+            assert!(!created.is_builtin);
+            assert_eq!(created.version, 1);
+            assert!(created.enabled);
 
-        // Update by creator increments version.
-        let mut new_ratios = Vec::new(&env);
-        new_ratios.push_back(8_000);
-        new_ratios.push_back(2_000);
-        let updated = update_template(
-            &env,
-            &creator,
-            false,
-            id.clone(),
-            String::from_str(&env, "My Updated Split"),
-            String::from_str(&env, "80/20 custom split"),
-            TemplateCategory::RevenueShare,
-            new_ratios,
-            172_800,
-            false,
-            5_000,
-            200,
-        );
-        assert_eq!(updated.version, 2);
-        assert_eq!(updated.default_ratios.get(0).unwrap(), 8_000);
+            // Update by creator increments version.
+            let mut new_ratios = Vec::new(&env);
+            new_ratios.push_back(8_000);
+            new_ratios.push_back(2_000);
+            let updated = update_template(
+                &env,
+                &creator,
+                false,
+                id.clone(),
+                String::from_str(&env, "My Updated Split"),
+                String::from_str(&env, "80/20 custom split"),
+                TemplateCategory::RevenueShare,
+                new_ratios,
+                172_800,
+                false,
+                5_000,
+                200,
+            );
+            assert_eq!(updated.version, 2);
+            assert_eq!(updated.default_ratios.get(0).unwrap(), 8_000);
 
-        // Disable and verify filtering.
-        let disabled = set_template_enabled(&env, &creator, false, id.clone(), false);
-        assert!(!disabled.enabled);
+            // Disable and verify filtering.
+            let disabled = set_template_enabled(&env, &creator, false, id.clone(), false);
+            assert!(!disabled.enabled);
 
-        let enabled_only = list_templates(&env, None, true);
-        assert_eq!(enabled_only.len(), 7); // only built-ins enabled
+            let enabled_only = list_templates(&env, None, true);
+            assert_eq!(enabled_only.len(), 7); // only built-ins enabled
 
-        // Remove custom template.
-        remove_template(&env, &creator, false, id.clone());
-        let all = list_templates(&env, None, false);
-        assert_eq!(all.len(), 7);
+            // Remove custom template.
+            remove_template(&env, &creator, false, id.clone());
+            let all = list_templates(&env, None, false);
+            assert_eq!(all.len(), 7);
+        });
     }
 
     #[test]
     fn test_resolve_with_customization_and_remainder() {
         let env = Env::default();
+        let contract_id = env.register(crate::SplitContract, ());
         let id = symbol_short!("equal3");
 
-        // Default resolution with 100 stroops -> 33 + 33 + 33 + 1 remainder = 100.
-        let resolved = resolve_template_for_invoice(&env, &id, 3, 100, None);
-        let sum: i128 = resolved.amounts.iter().sum();
-        assert_eq!(sum, 100);
-        assert_eq!(resolved.amounts.len(), 3);
+        env.as_contract(&contract_id, || {
+            // Default resolution with 100 stroops -> 33 + 33 + 33 + 1 remainder = 100.
+            let resolved = resolve_template_for_invoice(&env, &id, 3, 100, None);
+            let sum: i128 = resolved.amounts.iter().sum();
+            assert_eq!(sum, 100);
+            assert_eq!(resolved.amounts.len(), 3);
 
-        // Customized overrides.
-        let mut custom_ratios = Vec::new(&env);
-        custom_ratios.push_back(5_000);
-        custom_ratios.push_back(3_000);
-        custom_ratios.push_back(2_000);
+            // Customized overrides.
+            let mut custom_ratios = Vec::new(&env);
+            custom_ratios.push_back(5_000);
+            custom_ratios.push_back(3_000);
+            custom_ratios.push_back(2_000);
 
-        let custom = TemplateCustomization {
-            ratios: Some(custom_ratios),
-            deadline: Some(999_999),
-            allow_early_withdrawal: Some(true),
-            min_funding_bps: Some(8_000),
-            creator_fee_bps: Some(150),
-        };
-        let resolved_custom = resolve_template_for_invoice(&env, &id, 3, 10_000, Some(custom));
-        assert_eq!(resolved_custom.amounts.get(0).unwrap(), 5_000);
-        assert_eq!(resolved_custom.amounts.get(1).unwrap(), 3_000);
-        assert_eq!(resolved_custom.amounts.get(2).unwrap(), 2_000);
-        assert_eq!(resolved_custom.deadline, 999_999);
-        assert!(resolved_custom.allow_early_withdrawal);
-        assert_eq!(resolved_custom.min_funding_bps, 8_000);
-        assert_eq!(resolved_custom.creator_fee_bps, 150);
+            let custom = TemplateCustomization {
+                ratios: Some(custom_ratios),
+                deadline: Some(999_999),
+                allow_early_withdrawal: Some(true),
+                min_funding_bps: Some(8_000),
+                creator_fee_bps: Some(150),
+            };
+            let resolved_custom = resolve_template_for_invoice(&env, &id, 3, 10_000, Some(custom));
+            assert_eq!(resolved_custom.amounts.get(0).unwrap(), 5_000);
+            assert_eq!(resolved_custom.amounts.get(1).unwrap(), 3_000);
+            assert_eq!(resolved_custom.amounts.get(2).unwrap(), 2_000);
+            assert_eq!(resolved_custom.deadline, 999_999);
+            assert!(resolved_custom.allow_early_withdrawal);
+            assert_eq!(resolved_custom.min_funding_bps, 8_000);
+            assert_eq!(resolved_custom.creator_fee_bps, 150);
+        });
     }
 
     #[test]
     fn test_usage_tracking_and_popularity() {
         let env = Env::default();
-        init_library(&env);
+        let contract_id = env.register(crate::SplitContract, ());
 
-        let alice = Address::generate(&env);
-        let bob = Address::generate(&env);
+        env.as_contract(&contract_id, || {
+            init_library(&env);
 
-        record_usage(&env, &symbol_short!("equal2"), &alice, 1_000);
-        record_usage(&env, &symbol_short!("equal2"), &bob, 2_500);
-        record_usage(&env, &symbol_short!("rev7030"), &alice, 5_000);
+            let alice = Address::generate(&env);
+            let bob = Address::generate(&env);
 
-        let eq2_stats = get_usage(&env, symbol_short!("equal2"));
-        assert_eq!(eq2_stats.use_count, 2);
-        assert_eq!(eq2_stats.total_volume, 3_500);
-        assert_eq!(eq2_stats.last_used_by, Some(bob.clone()));
+            record_usage(&env, &symbol_short!("equal2"), &alice, 1_000);
+            record_usage(&env, &symbol_short!("equal2"), &bob, 2_500);
+            record_usage(&env, &symbol_short!("rev7030"), &alice, 5_000);
 
-        assert_eq!(get_creator_usage(&env, &alice, symbol_short!("equal2")), 1);
-        assert_eq!(get_creator_usage(&env, &bob, symbol_short!("equal2")), 1);
+            let eq2_stats = get_usage(&env, symbol_short!("equal2"));
+            assert_eq!(eq2_stats.use_count, 2);
+            assert_eq!(eq2_stats.total_volume, 3_500);
+            assert_eq!(eq2_stats.last_used_by, Some(bob.clone()));
 
-        let popular = get_popular_templates(&env, 2);
-        assert_eq!(popular.len(), 2);
-        assert_eq!(popular.get(0).unwrap().template_id, symbol_short!("equal2"));
-        assert_eq!(popular.get(1).unwrap().template_id, symbol_short!("rev7030"));
+            assert_eq!(get_creator_usage(&env, &alice, symbol_short!("equal2")), 1);
+            assert_eq!(get_creator_usage(&env, &bob, symbol_short!("equal2")), 1);
 
-        let summary = get_summary(&env);
-        assert_eq!(summary.total_templates, 7);
-        assert_eq!(summary.builtin_count, 7);
-        assert_eq!(summary.custom_count, 0);
-        assert_eq!(summary.total_uses, 3);
-        assert_eq!(summary.total_volume, 8_500);
+            let popular = get_popular_templates(&env, 2);
+            assert_eq!(popular.len(), 2);
+            assert_eq!(popular.get(0).unwrap().template_id, symbol_short!("equal2"));
+            assert_eq!(popular.get(1).unwrap().template_id, symbol_short!("rev7030"));
+
+            let summary = get_summary(&env);
+            assert_eq!(summary.total_templates, 7);
+            assert_eq!(summary.builtin_count, 7);
+            assert_eq!(summary.custom_count, 0);
+            assert_eq!(summary.total_uses, 3);
+            assert_eq!(summary.total_volume, 8_500);
+        });
     }
 }

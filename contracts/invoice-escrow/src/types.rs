@@ -29,6 +29,66 @@ pub enum OptionalRefundReason {
     Some(RefundReason),
 }
 
+/// Wrapper for `Option<ApprovalStatus>` to work around Soroban serialization
+/// limitations (see [`OptionalRefundReason`]).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum OptionalApprovalStatus {
+    /// No co-signer approval is configured for this invoice.
+    None,
+    /// Co-signer approval is configured, with the given status.
+    Some(ApprovalStatus),
+}
+
+impl From<Option<ApprovalStatus>> for OptionalApprovalStatus {
+    fn from(value: Option<ApprovalStatus>) -> Self {
+        match value {
+            Some(status) => OptionalApprovalStatus::Some(status),
+            None => OptionalApprovalStatus::None,
+        }
+    }
+}
+
+/// Wrapper for `Option<ScheduleStatus>` to work around Soroban serialization
+/// limitations (see [`OptionalRefundReason`]).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum OptionalScheduleStatus {
+    /// No release schedule is configured for this invoice.
+    None,
+    /// A release schedule is configured, with the given status.
+    Some(ScheduleStatus),
+}
+
+impl From<Option<ScheduleStatus>> for OptionalScheduleStatus {
+    fn from(value: Option<ScheduleStatus>) -> Self {
+        match value {
+            Some(status) => OptionalScheduleStatus::Some(status),
+            None => OptionalScheduleStatus::None,
+        }
+    }
+}
+
+/// Wrapper for `Option<DisputeStatus>` to work around Soroban serialization
+/// limitations (see [`OptionalRefundReason`]).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum OptionalDisputeStatus {
+    /// No dispute has been raised for this invoice.
+    None,
+    /// A dispute exists, with the given status.
+    Some(DisputeStatus),
+}
+
+impl From<Option<DisputeStatus>> for OptionalDisputeStatus {
+    fn from(value: Option<DisputeStatus>) -> Self {
+        match value {
+            Some(status) => OptionalDisputeStatus::Some(status),
+            None => OptionalDisputeStatus::None,
+        }
+    }
+}
+
 /// Lifecycle state of an escrow invoice.
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
@@ -76,6 +136,21 @@ pub struct DisputeRecord {
     pub timeout_secs: u64,
     /// Whether the dispute has already been resolved (manually or automatically).
     pub resolved: bool,
+}
+
+/// An active dispute lock placed on an invoice via
+/// [`crate::InvoiceEscrowContract::open_dispute`], blocking `deposit`,
+/// `release`, `refund`, and `cancel_invoice` until it is removed via
+/// [`crate::InvoiceEscrowContract::resolve_dispute`].
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct DisputeLock {
+    /// Unix timestamp the lock was opened at.
+    pub locked_at: u64,
+    /// Admin address that opened the lock.
+    pub opened_by: Address,
+    /// Commitment hash of the dispute reason/evidence (revealed off-chain).
+    pub reason_hash: BytesN<32>,
 }
 
 /// Core escrow invoice record.
@@ -180,9 +255,9 @@ pub struct InvoiceAuditReport {
     /// Current configuration revision (see [`EscrowInvoice::revision`]).
     pub revision: u32,
     /// Co-signer approval status, if co-signers are configured.
-    pub approval_status: Option<ApprovalStatus>,
+    pub approval_status: OptionalApprovalStatus,
     /// Release schedule status, if a schedule is configured.
-    pub schedule_status: Option<ScheduleStatus>,
+    pub schedule_status: OptionalScheduleStatus,
     /// Whether an oracle release condition is configured.
     pub has_oracle_condition: bool,
 }
@@ -468,9 +543,9 @@ pub struct ComplianceSnapshot {
     /// Reason recorded for the most recent refund, if any.
     pub refund_reason: OptionalRefundReason,
     /// Current co-signer approval status, if co-signers are configured.
-    pub approval_status: Option<ApprovalStatus>,
+    pub approval_status: OptionalApprovalStatus,
     /// Current dispute status, if a dispute has ever been raised.
-    pub dispute_status: Option<DisputeStatus>,
+    pub dispute_status: OptionalDisputeStatus,
     /// Whether the invoice's creator address is currently blacklisted
     /// (finalised and upheld) as a payer on this contract.
     pub creator_blacklisted: bool,

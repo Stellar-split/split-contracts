@@ -183,6 +183,12 @@ pub enum ContractError {
     InvalidShardIndex = 81,
     /// The shard capacity has been exceeded.
     ShardCapacityExceeded = 82,
+    /// Caller is not an authorized collaborator (creator or co-creator) on this invoice.
+    NotAuthorizedCollaborator = 83,
+    /// No pending change proposal exists for this invoice.
+    NoPendingProposal = 84,
+    /// Caller has already approved the pending change proposal.
+    ProposalAlreadyApproved = 85,
 }
 
 /// Issue #952: Human-readable, actionable recovery suggestions for every
@@ -444,6 +450,15 @@ pub mod recovery {
             }
             ContractError::ShardCapacityExceeded => {
                 "Reduce the number of operations or increase the shard capacity."
+            }
+            ContractError::NotAuthorizedCollaborator => {
+                "Only the invoice creator or a configured co-creator may perform this action."
+            }
+            ContractError::NoPendingProposal => {
+                "No pending change proposal exists for this invoice; submit one first."
+            }
+            ContractError::ProposalAlreadyApproved => {
+                "Caller has already approved this proposal; wait for other collaborators to approve."
             }
         }
     }

@@ -1088,7 +1088,7 @@ mod cosigner_tests {
         let s = signers(&ctx.env, 2);
         client.set_cosigners(&ctx.id, &s, &2);
 
-        client.deposit(&ctx.payer, &ctx.id, &1_000);
+        client.deposit(&ctx.payer, &ctx.id, &1_000, &client.get_deposit_nonce(&ctx.id, &ctx.payer));
         let invoice = client.get_invoice(&ctx.id);
         assert_eq!(invoice.status, EscrowStatus::Active);
         assert_eq!(invoice.funded_amount, 1_000);
@@ -1102,7 +1102,7 @@ mod cosigner_tests {
         let client = ctx.client();
         let s = signers(&ctx.env, 3);
         client.set_cosigners(&ctx.id, &s, &2);
-        client.deposit(&ctx.payer, &ctx.id, &1_000);
+        client.deposit(&ctx.payer, &ctx.id, &1_000, &client.get_deposit_nonce(&ctx.id, &ctx.payer));
 
         assert_eq!(client.approve_release(&s.get(0).unwrap(), &ctx.id), ApprovalStatus::Pending);
         assert_eq!(client.approvals_remaining(&ctx.id), 1);
@@ -1127,7 +1127,7 @@ mod cosigner_tests {
         client.set_cosigners(&ctx.id, &s, &1);
         client.approve_release(&s.get(0).unwrap(), &ctx.id);
 
-        client.deposit(&ctx.payer, &ctx.id, &1_000);
+        client.deposit(&ctx.payer, &ctx.id, &1_000, &client.get_deposit_nonce(&ctx.id, &ctx.payer));
         assert_eq!(client.get_invoice(&ctx.id).status, EscrowStatus::Released);
     }
 
@@ -1201,7 +1201,7 @@ mod cosigner_tests {
         let client = ctx.client();
         let s = signers(&ctx.env, 3);
         client.set_cosigners(&ctx.id, &s, &2);
-        client.deposit(&ctx.payer, &ctx.id, &1_000);
+        client.deposit(&ctx.payer, &ctx.id, &1_000, &client.get_deposit_nonce(&ctx.id, &ctx.payer));
 
         assert_eq!(client.reject_release(&s.get(0).unwrap(), &ctx.id), ApprovalStatus::Pending);
         assert_eq!(client.reject_release(&s.get(1).unwrap(), &ctx.id), ApprovalStatus::Rejected);
@@ -1235,7 +1235,7 @@ mod cosigner_tests {
         let s = signers(&ctx.env, 2);
         client.set_cosigners(&ctx.id, &s, &1);
         client.approve_release(&s.get(0).unwrap(), &ctx.id);
-        client.deposit(&ctx.payer, &ctx.id, &1_000);
+        client.deposit(&ctx.payer, &ctx.id, &1_000, &client.get_deposit_nonce(&ctx.id, &ctx.payer));
         assert_eq!(client.get_invoice(&ctx.id).status, EscrowStatus::Released);
 
         assert_eq!(
@@ -1258,7 +1258,7 @@ mod cosigner_tests {
         let client = ctx.client();
         assert_eq!(client.get_approval_status(&ctx.id), None);
         assert_eq!(client.approvals_remaining(&ctx.id), 0);
-        client.deposit(&ctx.payer, &ctx.id, &1_000);
+        client.deposit(&ctx.payer, &ctx.id, &1_000, &client.get_deposit_nonce(&ctx.id, &ctx.payer));
         assert_eq!(client.get_invoice(&ctx.id).status, EscrowStatus::Released);
     }
 
@@ -1414,7 +1414,7 @@ mod oracle_tests {
         let ctx = setup_invoice();
         let oracle = mock_oracle(&ctx.env, price(150, NOW));
         let client = ctx.client();
-        client.deposit(&ctx.payer, &ctx.id, &100);
+        client.deposit(&ctx.payer, &ctx.id, &100, &client.get_deposit_nonce(&ctx.id, &ctx.payer));
         assert_eq!(
             client.try_set_oracle_condition(&ctx.id, &condition(&ctx, &oracle, None)),
             Err(Ok(Error::InvalidStatus))
@@ -1428,7 +1428,7 @@ mod oracle_tests {
         let client = ctx.client();
         client.set_oracle_condition(&ctx.id, &condition(&ctx, &oracle, None));
 
-        client.deposit(&ctx.payer, &ctx.id, &1_000);
+        client.deposit(&ctx.payer, &ctx.id, &1_000, &client.get_deposit_nonce(&ctx.id, &ctx.payer));
         assert_eq!(client.get_invoice(&ctx.id).status, EscrowStatus::Released);
 
         let reading = client.get_last_oracle_reading(&ctx.id).unwrap();
@@ -1444,7 +1444,7 @@ mod oracle_tests {
         let client = ctx.client();
         client.set_oracle_condition(&ctx.id, &condition(&ctx, &oracle, None));
 
-        client.deposit(&ctx.payer, &ctx.id, &1_000);
+        client.deposit(&ctx.payer, &ctx.id, &1_000, &client.get_deposit_nonce(&ctx.id, &ctx.payer));
         assert_eq!(client.get_invoice(&ctx.id).status, EscrowStatus::Active);
         assert!(!client.get_last_oracle_reading(&ctx.id).unwrap().condition_met);
         assert_eq!(client.try_release(&ctx.id), Err(Ok(Error::OracleConditionNotMet)));
@@ -1474,7 +1474,7 @@ mod oracle_tests {
         let oracle = mock_oracle(&ctx.env, price(150, NOW - 301));
         let client = ctx.client();
         client.set_oracle_condition(&ctx.id, &condition(&ctx, &oracle, None));
-        client.deposit(&ctx.payer, &ctx.id, &1_000);
+        client.deposit(&ctx.payer, &ctx.id, &1_000, &client.get_deposit_nonce(&ctx.id, &ctx.payer));
 
         assert_eq!(client.try_release(&ctx.id), Err(Ok(Error::OracleStalePrice)));
         assert_eq!(client.try_check_oracle_condition(&ctx.id), Err(Ok(Error::OracleStalePrice)));
@@ -1510,7 +1510,7 @@ mod oracle_tests {
         client.set_oracle_condition(&ctx.id, &condition(&ctx, &broken, None));
 
         // Deposit still succeeds; release is simply deferred.
-        client.deposit(&ctx.payer, &ctx.id, &1_000);
+        client.deposit(&ctx.payer, &ctx.id, &1_000, &client.get_deposit_nonce(&ctx.id, &ctx.payer));
         let invoice = client.get_invoice(&ctx.id);
         assert_eq!(invoice.status, EscrowStatus::Active);
         assert_eq!(invoice.funded_amount, 1_000);
@@ -1525,7 +1525,7 @@ mod oracle_tests {
         let client = ctx.client();
         client.set_oracle_condition(&ctx.id, &condition(&ctx, &broken, Some(fallback)));
 
-        client.deposit(&ctx.payer, &ctx.id, &1_000);
+        client.deposit(&ctx.payer, &ctx.id, &1_000, &client.get_deposit_nonce(&ctx.id, &ctx.payer));
         assert_eq!(client.get_invoice(&ctx.id).status, EscrowStatus::Released);
         let reading = client.get_last_oracle_reading(&ctx.id).unwrap();
         assert_eq!(reading.source, OracleSource::Fallback);
@@ -1564,7 +1564,7 @@ mod oracle_tests {
         let stale = mock_oracle(&ctx.env, price(150, NOW - 1_000));
         let client = ctx.client();
         client.set_oracle_condition(&ctx.id, &condition(&ctx, &broken, Some(stale)));
-        client.deposit(&ctx.payer, &ctx.id, &1_000);
+        client.deposit(&ctx.payer, &ctx.id, &1_000, &client.get_deposit_nonce(&ctx.id, &ctx.payer));
 
         // Error reported is the fallback's (last oracle tried).
         assert_eq!(client.try_release(&ctx.id), Err(Ok(Error::OracleStalePrice)));
@@ -1589,7 +1589,7 @@ mod oracle_tests {
         let broken = ctx.env.register_contract(None, BrokenOracle);
         let client = ctx.client();
         client.set_oracle_condition(&ctx.id, &condition(&ctx, &broken, None));
-        client.deposit(&ctx.payer, &ctx.id, &1_000);
+        client.deposit(&ctx.payer, &ctx.id, &1_000, &client.get_deposit_nonce(&ctx.id, &ctx.payer));
         assert_eq!(client.try_release(&ctx.id), Err(Ok(Error::OracleUnavailable)));
 
         client.clear_oracle_condition(&ctx.id);
@@ -1706,7 +1706,7 @@ mod schedule_tests {
         let client = ctx.client();
         client.schedule_release(&ctx.id, &(NOW + 3_600), &10);
 
-        client.deposit(&ctx.payer, &ctx.id, &1_000);
+        client.deposit(&ctx.payer, &ctx.id, &1_000, &client.get_deposit_nonce(&ctx.id, &ctx.payer));
         assert_eq!(client.get_invoice(&ctx.id).status, EscrowStatus::Active);
         assert_eq!(client.try_release(&ctx.id), Err(Ok(Error::ReleaseNotYetDue)));
         assert!(!client.is_release_due(&ctx.id));
@@ -1726,7 +1726,7 @@ mod schedule_tests {
         let ctx = setup_invoice();
         let client = ctx.client();
         client.schedule_release(&ctx.id, &(NOW + 60), &100);
-        client.deposit(&ctx.payer, &ctx.id, &1_000);
+        client.deposit(&ctx.payer, &ctx.id, &1_000, &client.get_deposit_nonce(&ctx.id, &ctx.payer));
 
         // Timestamp jumps ahead faster than ledgers close.
         ctx.advance(10_000, 99);
@@ -1744,7 +1744,7 @@ mod schedule_tests {
         let ctx = setup_invoice();
         let client = ctx.client();
         client.schedule_release(&ctx.id, &(NOW + 3_600), &10);
-        client.deposit(&ctx.payer, &ctx.id, &1_000);
+        client.deposit(&ctx.payer, &ctx.id, &1_000, &client.get_deposit_nonce(&ctx.id, &ctx.payer));
 
         ctx.advance(3_599, 1_000);
         assert_eq!(client.try_release(&ctx.id), Err(Ok(Error::ReleaseNotYetDue)));
@@ -1757,7 +1757,7 @@ mod schedule_tests {
         let ctx = setup_invoice();
         let client = ctx.client();
         client.schedule_release(&ctx.id, &(NOW + 500), &50);
-        client.deposit(&ctx.payer, &ctx.id, &1_000);
+        client.deposit(&ctx.payer, &ctx.id, &1_000, &client.get_deposit_nonce(&ctx.id, &ctx.payer));
 
         ctx.advance(500, 50);
         assert_eq!(client.seconds_until_release(&ctx.id), 0);
@@ -1786,7 +1786,7 @@ mod schedule_tests {
         client.schedule_release(&ctx.id, &(NOW + 10), &1);
         ctx.advance(10, 1);
 
-        client.deposit(&ctx.payer, &ctx.id, &1_000);
+        client.deposit(&ctx.payer, &ctx.id, &1_000, &client.get_deposit_nonce(&ctx.id, &ctx.payer));
         assert_eq!(client.get_invoice(&ctx.id).status, EscrowStatus::Released);
         assert_eq!(
             client.get_release_schedule(&ctx.id).unwrap().status,
@@ -1800,7 +1800,7 @@ mod schedule_tests {
         let client = ctx.client();
         client.schedule_release(&ctx.id, &(NOW + 10_000), &1_000);
         client.schedule_release(&ctx.id, &(NOW + 10), &0);
-        client.deposit(&ctx.payer, &ctx.id, &1_000);
+        client.deposit(&ctx.payer, &ctx.id, &1_000, &client.get_deposit_nonce(&ctx.id, &ctx.payer));
 
         ctx.advance(10, 0);
         client.release(&ctx.id);
@@ -1812,7 +1812,7 @@ mod schedule_tests {
         let ctx = setup_invoice();
         let client = ctx.client();
         client.schedule_release(&ctx.id, &(NOW + 10_000), &1_000);
-        client.deposit(&ctx.payer, &ctx.id, &1_000);
+        client.deposit(&ctx.payer, &ctx.id, &1_000, &client.get_deposit_nonce(&ctx.id, &ctx.payer));
         assert_eq!(client.try_release(&ctx.id), Err(Ok(Error::ReleaseNotYetDue)));
 
         client.cancel_release_schedule(&ctx.id);
@@ -1852,7 +1852,7 @@ mod schedule_tests {
     fn test_schedule_blocked_after_release() {
         let ctx = setup_invoice();
         let client = ctx.client();
-        client.deposit(&ctx.payer, &ctx.id, &1_000);
+        client.deposit(&ctx.payer, &ctx.id, &1_000, &client.get_deposit_nonce(&ctx.id, &ctx.payer));
         assert_eq!(
             client.try_schedule_release(&ctx.id, &(NOW + 10), &0),
             Err(Ok(Error::InvalidStatus))
@@ -1969,7 +1969,7 @@ mod refund_grace_tests {
         let ctx = setup_ctx();
         let client = ctx.client();
         let id = ctx.create();
-        client.deposit(&ctx.payer, &id, &400);
+        client.deposit(&ctx.payer, &id, &400, &client.get_deposit_nonce(&id, &ctx.payer));
         assert_eq!(client.get_refund_grace_status(&id), RefundGraceStatus::NoGrace);
 
         ctx.set_time(DEADLINE + 1);
@@ -1983,7 +1983,7 @@ mod refund_grace_tests {
         let client = ctx.client();
         client.set_default_refund_grace(&GRACE);
         let id = ctx.create();
-        client.deposit(&ctx.payer, &id, &400);
+        client.deposit(&ctx.payer, &id, &400, &client.get_deposit_nonce(&id, &ctx.payer));
         let payers = vec![&ctx.env, ctx.payer.clone()];
 
         assert_eq!(client.get_refund_grace_status(&id), RefundGraceStatus::NotStarted);
@@ -2042,7 +2042,7 @@ mod refund_grace_tests {
             Err(Ok(Error::InvalidGracePeriod))
         );
 
-        client.deposit(&ctx.payer, &id, &100);
+        client.deposit(&ctx.payer, &id, &100, &client.get_deposit_nonce(&id, &ctx.payer));
         assert_eq!(client.try_set_refund_grace(&id, &60), Err(Ok(Error::InvalidStatus)));
     }
 
@@ -2052,7 +2052,7 @@ mod refund_grace_tests {
         let client = ctx.client();
         client.set_default_refund_grace(&GRACE);
         let id = ctx.create();
-        client.deposit(&ctx.payer, &id, &400);
+        client.deposit(&ctx.payer, &id, &400, &client.get_deposit_nonce(&id, &ctx.payer));
         let payers = vec![&ctx.env, ctx.payer.clone()];
 
         ctx.set_time(DEADLINE + 10);
@@ -2114,7 +2114,7 @@ mod refund_grace_tests {
         let client = ctx.client();
         client.set_default_refund_grace(&GRACE);
         let id = ctx.create();
-        client.deposit(&ctx.payer, &id, &400);
+        client.deposit(&ctx.payer, &id, &400, &client.get_deposit_nonce(&id, &ctx.payer));
         let payers = vec![&ctx.env, ctx.payer.clone()];
 
         ctx.set_time(DEADLINE + 1);
@@ -2135,7 +2135,7 @@ mod refund_grace_tests {
         let client = ctx.client();
         client.set_default_refund_grace(&GRACE);
         let id = ctx.create();
-        client.deposit(&ctx.payer, &id, &400);
+        client.deposit(&ctx.payer, &id, &400, &client.get_deposit_nonce(&id, &ctx.payer));
 
         client.waive_refund_grace(&id);
         assert_eq!(
@@ -2170,7 +2170,7 @@ mod refund_grace_tests {
         let client = ctx.client();
         client.set_default_refund_grace(&GRACE);
         let id = ctx.create();
-        client.deposit(&ctx.payer, &id, &1_000);
+        client.deposit(&ctx.payer, &id, &1_000, &client.get_deposit_nonce(&id, &ctx.payer));
         assert_eq!(client.get_invoice(&id).status, EscrowStatus::Released);
 
         assert_eq!(client.try_extend_refund_grace(&id, &10), Err(Ok(Error::InvalidStatus)));
@@ -2186,7 +2186,7 @@ mod refund_grace_tests {
 
         // Funding completes but a schedule delays release past the deadline.
         client.schedule_release(&id, &(DEADLINE + 100), &0);
-        client.deposit(&ctx.payer, &id, &1_000);
+        client.deposit(&ctx.payer, &id, &1_000, &client.get_deposit_nonce(&id, &ctx.payer));
         assert_eq!(client.get_invoice(&id).status, EscrowStatus::Active);
 
         ctx.set_time(DEADLINE + 100);

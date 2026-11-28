@@ -62,6 +62,7 @@ fn create_invoice(s: &Setup, bps: u32) -> u64 {
         &vec![&s.env, 6_000_i128, 4_000_i128],
         &s.charity,
         &bps,
+        &0u64,
     )
 }
 
@@ -144,6 +145,7 @@ fn test_deactivated_charity_rejected_for_new_invoice() {
             &vec![&s.env, 1_000_i128],
             &s.charity,
             &500,
+            &0u64,
         ),
         Err(Ok(Error::CharityInactive))
     );
@@ -176,6 +178,7 @@ fn test_create_invoice_invalid_bps_fails() {
             &vec![&s.env, 1_000_i128],
             &s.charity,
             &0,
+            &0u64,
         ),
         Err(Ok(Error::InvalidDonationBps))
     );
@@ -187,6 +190,7 @@ fn test_create_invoice_invalid_bps_fails() {
             &vec![&s.env, 1_000_i128],
             &s.charity,
             &(MAX_DONATION_BPS + 1),
+            &0u64,
         ),
         Err(Ok(Error::InvalidDonationBps))
     );
@@ -203,13 +207,14 @@ fn test_create_invoice_mismatched_lists_fails() {
             &vec![&s.env, 1_000_i128],
             &s.charity,
             &500,
+            &0u64,
         ),
         Err(Ok(Error::InvalidRecipients))
     );
     let empty_r: Vec<Address> = Vec::new(&s.env);
     let empty_a: Vec<i128> = Vec::new(&s.env);
     assert_eq!(
-        s.client.try_create_invoice(&s.creator, &s.token, &empty_r, &empty_a, &s.charity, &500),
+        s.client.try_create_invoice(&s.creator, &s.token, &empty_r, &empty_a, &s.charity, &500, &0u64),
         Err(Ok(Error::InvalidRecipients))
     );
 }
@@ -225,6 +230,7 @@ fn test_create_invoice_non_positive_amount_fails() {
             &vec![&s.env, 0_i128],
             &s.charity,
             &500,
+            &0u64,
         ),
         Err(Ok(Error::InvalidAmount))
     );
@@ -241,6 +247,7 @@ fn test_charity_as_recipient_fails() {
             &vec![&s.env, 1_000_i128],
             &s.charity,
             &500,
+            &0u64,
         ),
         Err(Ok(Error::CharityIsRecipient))
     );
@@ -258,6 +265,7 @@ fn test_unknown_charity_fails() {
             &vec![&s.env, 1_000_i128],
             &unknown,
             &500,
+            &0u64,
         ),
         Err(Ok(Error::CharityNotFound))
     );
@@ -286,6 +294,7 @@ fn test_preview_split_rounding_goes_to_charity() {
         &vec![&s.env, 333_i128, 333_i128],
         &s.charity,
         &250,
+        &0u64,
     );
     let split = s.client.preview_split(&id);
     // 333 * 2.5% = 8.325 → 8 deducted each; net 325 each.

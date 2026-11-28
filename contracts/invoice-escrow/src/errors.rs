@@ -105,6 +105,16 @@ pub enum Error {
     NoDispute = 46,
     /// The dispute has already been resolved.
     DisputeAlreadyResolved = 47,
+    /// The invoice is locked under an active dispute lock.
+    InvoiceLocked = 48,
+    /// The provided nonce does not match the expected next nonce.
+    InvalidNonce = 49,
+    /// A dispute lock is already active for this invoice.
+    AlreadyDisputed = 50,
+    /// No dispute lock is active for this invoice.
+    NotDisputed = 51,
+    /// A payment reminder has already been sent within the cooldown window.
+    ReminderAlreadySent = 52,
 }
 
 /// Returns a human-readable recovery suggestion for the given error.
@@ -301,6 +311,26 @@ pub fn get_recovery_suggestion(error: Error) -> String {
             &Env::default(),
             "This dispute has already been resolved and cannot be decided again.",
         ),
+        Error::InvoiceLocked => String::from_str(
+            &Env::default(),
+            "Invoice is locked under an active dispute; wait for the admin to resolve it.",
+        ),
+        Error::InvalidNonce => String::from_str(
+            &Env::default(),
+            "Nonce does not match the expected next value; fetch the current nonce and retry.",
+        ),
+        Error::AlreadyDisputed => String::from_str(
+            &Env::default(),
+            "A dispute lock is already active for this invoice.",
+        ),
+        Error::NotDisputed => String::from_str(
+            &Env::default(),
+            "No dispute lock is active for this invoice.",
+        ),
+        Error::ReminderAlreadySent => String::from_str(
+            &Env::default(),
+            "A payment reminder was already sent recently; wait for the cooldown window to elapse.",
+        ),
     }
 }
 
@@ -354,6 +384,11 @@ pub fn error_from_code(code: u32) -> Option<Error> {
         45 => Some(Error::DisputeAlreadyOpen),
         46 => Some(Error::NoDispute),
         47 => Some(Error::DisputeAlreadyResolved),
+        48 => Some(Error::InvoiceLocked),
+        49 => Some(Error::InvalidNonce),
+        50 => Some(Error::AlreadyDisputed),
+        51 => Some(Error::NotDisputed),
+        52 => Some(Error::ReminderAlreadySent),
         _ => None,
     }
 }

@@ -98,6 +98,7 @@ pub mod split_rules;
 mod split_strategies;
 mod escrow_arbitration;
 mod tiered_refund;
+mod creator_fee_tiers;
 pub mod pool;
 mod batch_verify;
 pub mod compression;
@@ -195,7 +196,7 @@ use types::{
     DisputeOutcome, DisputeRecord, DisputeStatus, EncryptionAlgorithm, EncryptionKey, EncryptionAuditEntry, EncryptionValidation,
     FeeBracket, FeeSplit, FeeTier, FeeWaiver,
     FeeWaiverAction, FeeWaiverAuditEntry, InstalmentPlan,
-    Invoice, InvoiceCore, InvoiceExt, InvoiceExt2, InvoiceExt3, InvoiceHot, InvoiceOptions,
+    Invoice, InvoiceChangeProposal, InvoiceCore, InvoiceExt, InvoiceExt2, InvoiceExt3, InvoiceHot, InvoiceOptions,
     InvoiceOptions2, InvoicePayment, InvoiceStats, InvoiceStatus, InvoiceTemplate,
     InvoiceTemplateRecord, LegacyInvoice, OperationSnapshot, RecipientAuth, RecipientAuthLogEntry, RecipientAuthStatus, OverflowBehavior, OverfundingPolicy, Payment,
     PaymentCertificate, PaymentCommitment, PaymentProof, PaymentRecord, PendingAdminAction, Permission,
